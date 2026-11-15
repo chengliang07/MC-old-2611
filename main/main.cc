@@ -87,13 +87,13 @@ extern "C" void app_main(void)
 
     {
         Settings network_settings("network", true);
-        const int32_t version_marker =
-            network_settings.GetInt("4g_default", 0);
-        if (version_marker != 2) {
-            ESP_LOGI(TAG, "Migrating default network to internal 4G");
+        if (network_settings.GetInt("type", 1) != 1 ||
+            network_settings.GetInt("4g_fallback", 0) != 0) {
+            ESP_LOGI(TAG, "Test build: force internal 4G without WiFi fallback");
             network_settings.SetInt("type", 1);
             network_settings.SetInt("sim_slot", 1);
-            network_settings.SetInt("4g_default", 2);
+            network_settings.SetInt("4g_fallback", 0);
+            network_settings.SetInt("4g_default", 3);
             vTaskDelay(pdMS_TO_TICKS(300));
         }
     }

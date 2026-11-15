@@ -13,8 +13,9 @@ DualNetworkBoard::DualNetworkBoard(gpio_num_t ml307_tx_pin, gpio_num_t ml307_rx_
       ml307_rx_pin_(ml307_rx_pin), 
       ml307_dtr_pin_(ml307_dtr_pin) {
     
-    // 从Settings加载网络类型
-    network_type_ = LoadNetworkTypeFromSettings(default_net_type);
+    // 测试版固定内置 4G，避免旧 NVS 的 WiFi 回退状态在 Board 构造前生效。
+    network_type_ = NetworkType::ML307;
+    SaveNetworkTypeToSettings(NetworkType::ML307);
     
     // 只初始化当前网络类型对应的板卡
     InitializeCurrentBoard();
@@ -31,8 +32,9 @@ cellular_rx_pin_(cellular_rx_pin),
 cellular_dtr_pin_(cellular_dtr_pin),
 cellular_ri_pin_(cellular_ri_pin) {
 
-// 从Settings加载网络类型
-network_type_ = LoadNetworkTypeFromSettings(default_net_type);
+// 测试版固定内置 4G，避免旧 NVS 的 WiFi 回退状态在 Board 构造前生效。
+network_type_ = NetworkType::ML307;
+SaveNetworkTypeToSettings(NetworkType::ML307);
 
 // 只初始化当前网络类型对应的板卡
 InitializeCurrentBoard();
