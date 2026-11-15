@@ -71,6 +71,10 @@ struct RequestResult {
     int index = 0;
 };
 
+struct ResumeChatContext {
+    uint32_t session = 0;
+};
+
 EnglishUi s_ui;
 lv_obj_t* s_bound_screen = nullptr;
 lv_obj_t* s_return_screen = nullptr;
@@ -85,6 +89,7 @@ time_t s_tasks_cached_at = 0;
 std::string s_review_cached_task_id;
 EnglishReview s_review_cached;
 time_t s_review_cached_at = 0;
+bool s_restore_chat_on_unload = false;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
@@ -212,6 +217,8 @@ void StartReviewWorker(const std::string& task_id);
 void StartSubmitWorker(const std::string& result);
 void BuildTaskList();
 void BuildReview();
+void ResumeChatAfterVoiceUiDrain(uint32_t session);
+
 void ShowCenteredMessage(const char* text, bool show_back_button) {
     ResetContentRefs();
     lv_obj_clean(s_ui.content);
@@ -558,6 +565,34 @@ void StartSubmitWorker(const std::string& result) {
     }
 }
 
+void ResumeChatAfterVoiceUiDrain(uint32_t session) {
+    auto* context = new ResumeChatContext{};
+    context->session = session;
+    if (CreateWorkerTask(
+            [](void* arg) {
+                std::unique_ptr<ResumeChatContext> resume(
+                    static_cast<ResumeChatContext*>(arg));
+                vTaskDelay(pdMS_TO_TICKS(80));
+                if (resume->session == CurrentSession()) {
+                    lv_async_call(
+                        [](void* data) {
+                            auto* deferred =
+                                static_cast<ResumeChatContext*>(data);
+                            if (deferred->session == CurrentSession()) {
+                                ChatScreen::ResumeAfterTemporaryLeave();
+                            }
+                            delete deferred;
+                        },
+                        resume.release());
+                }
+                FinishWorkerTask();
+            },
+            "english_resume", 3072, context) != pdPASS) {
+        delete context;
+        ChatScreen::ResumeAfterTemporaryLeave();
+    }
+}
+
 void OnTaskClicked(lv_event_t* event) {
     const auto index = static_cast<size_t>(reinterpret_cast<uintptr_t>(
         lv_event_get_user_data(event)));
@@ -617,10 +652,8 @@ void ReturnHome() {
     if (target == nullptr || target == old_screen) {
         target = HomeScreen::Create();
     }
+    s_restore_chat_on_unload = target == ChatScreen::CurrentScreen();
     lv_screen_load(target);
-    if (target == ChatScreen::CurrentScreen()) {
-        ChatScreen::ResumeAfterTemporaryLeave();
-    }
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);
     }
@@ -650,6 +683,10 @@ void OnScreenUnloaded(lv_event_t* event) {
     s_stage = 0;
     s_in_review = false;
     s_ui = EnglishUi{};
+    if (s_restore_chat_on_unload) {
+        s_restore_chat_on_unload = false;
+        ResumeChatAfterVoiceUiDrain(CurrentSession());
+    }
 }
 
 void BuildHeader(lv_obj_t* screen) {
@@ -700,6 +737,7 @@ lv_obj_t* EnglishScreen::Create(lv_obj_t* return_screen) {
     s_current_index = 0;
     s_stage = 0;
     s_in_review = false;
+    s_restore_chat_on_unload = false;
 
     BuildHeader(screen);
 

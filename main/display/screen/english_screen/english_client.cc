@@ -17,9 +17,7 @@ constexpr const char* TAG = "EnglishClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
-constexpr int kHttpTimeoutMs = 12000;
-constexpr int kHttpReadChunkSize = 2048;
-constexpr size_t kMaxHttpBodyBytes = 256 * 1024;
+constexpr int kHttpTimeoutMs = 8000;
 
 std::mutex s_http_mutex;
 
@@ -88,7 +86,7 @@ bool HttpRequest(const char* method, const std::string& url,
 
     http->SetTimeout(kHttpTimeoutMs);
     http->SetHeader("Accept", "application/json");
-    http->SetHeader("Connection", "close");
+    http->SetHeader("Connection", "keep-alive");
     http->SetHeader("Authorization", "Bearer " + device_token);
     if (!content.empty()) {
         http->SetHeader("Content-Type", "application/json");
@@ -99,23 +97,7 @@ bool HttpRequest(const char* method, const std::string& url,
         return false;
     }
     status = http->GetStatusCode();
-    body.clear();
-    body.reserve(16 * 1024);
-    char chunk[kHttpReadChunkSize];
-    while (true) {
-        const int received = http->Read(chunk, sizeof(chunk));
-        if (received <= 0) {
-            break;
-        }
-        if (body.size() + static_cast<size_t>(received) >
-            kMaxHttpBodyBytes) {
-            error = "英语服务响应过大";
-            body.clear();
-            http->Close();
-            return false;
-        }
-        body.append(chunk, static_cast<size_t>(received));
-    }
+    body = http->ReadAll();
     http->Close();
     if (status < 200 || status >= 300) {
         cJSON* root = cJSON_Parse(body.c_str());
