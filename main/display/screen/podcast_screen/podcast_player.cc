@@ -142,6 +142,7 @@ void ForcePoolRateCvt16k(esp_gmf_pool_handle_t pool) {
 // 网络抖动不再直接变成断音。
 constexpr int kRingBlockSize = 16 * 1024;
 constexpr int kRingBlockCount = 96;  // 约 1.5MB
+constexpr int kMinPrefetchBlocks = 8;
 constexpr size_t kRingBytes =
     static_cast<size_t>(kRingBlockSize) * kRingBlockCount;
 
@@ -156,6 +157,7 @@ struct StreamState {
     std::atomic<bool> stop{false};
     std::atomic<bool> ended{false};
     std::atomic<bool> open_ok{false};
+    std::atomic<int> ready_blocks{0};
     std::atomic<int> refs{1};
     std::atomic<esp_http_client_handle_t> client{nullptr};
     SemaphoreHandle_t opened = nullptr;
@@ -450,6 +452,8 @@ void PodcastFetchTask(void* arg) {
             if (xQueueSend(state->ring_data, &block, pdMS_TO_TICKS(2000)) !=
                 pdTRUE) {
                 xQueueSend(state->ring_free, &index, 0);
+            } else {
+                state->ready_blocks.fetch_add(1, std::memory_order_release);
             }
         } else {
             xQueueSend(state->ring_free, &index, 0);
@@ -698,6 +702,13 @@ void PodcastPlayTask(void* arg) {
             abandon(nullptr);
         }
         return;
+    }
+    for (int i = 0; i < 120 && is_current(); ++i) {
+        if (state->ready_blocks.load(std::memory_order_acquire) >=
+            kMinPrefetchBlocks) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     {
