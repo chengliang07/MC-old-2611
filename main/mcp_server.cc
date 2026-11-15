@@ -107,6 +107,16 @@ void McpServer::AddCommonTools() {
                 HomeScreen::RequestOpenPodcastFromCurrentScreen();
                 return true;
             });
+
+        AddTool("self.app.open_pet",
+            "Open the Yidu Pet (一丢宠物) app on the device screen. "
+            "Use this tool when the user asks to see, feed, hatch, or check "
+            "on their pet.",
+            PropertyList(),
+            [](const PropertyList& properties) -> ReturnValue {
+                HomeScreen::RequestOpenPetFromCurrentScreen();
+                return true;
+            });
     }
 
     auto camera = board.GetCamera();

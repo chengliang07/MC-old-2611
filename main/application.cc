@@ -674,10 +674,18 @@ void Application::Start() {
                     (user_text.find("打开") != std::string::npos ||
                      user_text.find("一丢") != std::string::npos ||
                      user_text.find("复习") != std::string::npos);
-                if (wants_podcast || wants_english) {
-                    Schedule([this, wants_podcast]() {
+                const bool wants_pet =
+                    user_text.find("宠物") != std::string::npos &&
+                    (user_text.find("打开") != std::string::npos ||
+                     user_text.find("一丢") != std::string::npos ||
+                     user_text.find("看看") != std::string::npos ||
+                     user_text.find("喂") != std::string::npos ||
+                     user_text.find("孵化") != std::string::npos);
+                if (wants_podcast || wants_english || wants_pet) {
+                    Schedule([this, wants_podcast, wants_pet]() {
                         ESP_LOGI(TAG, "local intent: open %s",
-                                 wants_podcast ? "podcast" : "english");
+                                 wants_podcast ? "podcast" :
+                                 (wants_pet ? "pet" : "english"));
                         if (device_state_ == kDeviceStateSpeaking) {
                             AbortSpeaking(kAbortReasonNone);
                         } else if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -685,6 +693,8 @@ void Application::Start() {
                         }
                         if (wants_podcast) {
                             HomeScreen::RequestOpenPodcastFromCurrentScreen();
+                        } else if (wants_pet) {
+                            HomeScreen::RequestOpenPetFromCurrentScreen();
                         } else {
                             HomeScreen::RequestOpenEnglishFromCurrentScreen();
                         }

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cctype>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <esp_log.h>
@@ -39,6 +40,7 @@
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
 #include "openclaw_screen/openclaw_screen.h"
+#include "pet_screen/pet_screen.h"
 #include "ai_image_gen_screen/ai_image_gen_screen.h"
 #include "translate_screen/translate_screen.h"
 #include "secondary_screen/secondary_screen.h"
@@ -223,6 +225,11 @@ void podcast_lifecycle_cb(screen_lifecycle_event_t event) {
 void english_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("english", event);
     EnglishScreen::LifecycleCallback(event);
+}
+
+void pet_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("pet", event);
+    PetScreen::LifecycleCallback(event);
 }
 
 void digital_people_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -542,6 +549,19 @@ void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
     }
 }
 
+void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = PetScreen::Create(HomeScreen::Create());
+    if (app == nullptr) {
+        return;
+    }
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        lv_obj_delete_async(old_scr);
+    }
+}
+
 void OpenPodcastFromCurrentAsync(void* /*arg*/) {
     lv_obj_t* origin = lv_screen_active();
     if (origin == nullptr) {
@@ -573,6 +593,31 @@ void OpenEnglishFromCurrentAsync(void* /*arg*/) {
     }
     screen_attach_lifecycle(english, english_lifecycle_cb);
     lv_screen_load(english);
+}
+
+void OpenPetFromCurrentAsync(void* /*arg*/) {
+    lv_obj_t* origin = lv_screen_active();
+    if (origin == nullptr) {
+        return;
+    }
+    const bool from_chat = origin == ChatScreen::CurrentScreen();
+    lv_obj_t* return_screen = from_chat ? origin : HomeScreen::Create();
+    lv_obj_t* pet = PetScreen::Create(return_screen);
+    if (pet == nullptr) {
+        if (!from_chat && return_screen != nullptr) {
+            lv_obj_delete_async(return_screen);
+        }
+        return;
+    }
+    if (from_chat) {
+        ChatScreen::PrepareTemporaryLeave();
+    }
+    screen_attach_lifecycle(pet, pet_lifecycle_cb);
+    lv_screen_load(pet);
+    // 学伴页保留原实例；其它页面卸载时会清空 UI 指针，统一改为回新首页。
+    if (!from_chat && origin != pet) {
+        lv_obj_delete_async(origin);
+    }
 }
 
 void OpenChatAsync(void* /*arg*/) {
@@ -881,6 +926,7 @@ constexpr AppEntry kApps[] = {
     {"chat",           "一丢学伴", LaunchChat,          chat_lifecycle_cb,          true},
     {"radio",          "一丢播客", LaunchPodcast,       podcast_lifecycle_cb,       true},
     {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
+    {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     // {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
@@ -1111,6 +1157,50 @@ lv_obj_t* CreateAppCellSkeleton(lv_obj_t* cell) {
     return skeleton;
 }
 
+lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
+    // 宠物暂无主题 spng 资源，用 LVGL 基础对象画一颗蛋，避免首页出现空白格。
+    lv_obj_t* icon = lv_obj_create(cell);
+    lv_obj_remove_style_all(icon);
+    lv_obj_set_size(icon, kIconSize, kIconSize);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* egg = lv_obj_create(icon);
+    lv_obj_remove_style_all(egg);
+    lv_obj_set_size(egg, 78, 96);
+    lv_obj_center(egg);
+    lv_obj_set_style_radius(egg, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFF7E8), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(egg, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(egg, 3, LV_PART_MAIN);
+    lv_obj_set_style_border_color(egg, lv_color_hex(0xE7C98F), LV_PART_MAIN);
+    lv_obj_remove_flag(egg, LV_OBJ_FLAG_CLICKABLE);
+
+    auto add_eye = [egg](int x) {
+        lv_obj_t* eye = lv_obj_create(egg);
+        lv_obj_remove_style_all(eye);
+        lv_obj_set_size(eye, 10, 14);
+        lv_obj_align(eye, LV_ALIGN_CENTER, x, -8);
+        lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(eye, lv_color_hex(0x1F2937), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_remove_flag(eye, LV_OBJ_FLAG_CLICKABLE);
+    };
+    add_eye(-16);
+    add_eye(16);
+
+    lv_obj_t* beak = lv_obj_create(egg);
+    lv_obj_remove_style_all(beak);
+    lv_obj_set_size(beak, 18, 8);
+    lv_obj_align(beak, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_set_style_radius(beak, 4, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(beak, lv_color_hex(0xF59E0B), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(beak, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(beak, LV_OBJ_FLAG_CLICKABLE);
+    return icon;
+}
+
 lv_obj_t* CreateAppCell(lv_obj_t* parent, const AppEntry& entry, int idx) {
     lv_obj_t* cell = lv_obj_create(parent);
     lv_obj_remove_style_all(cell);
@@ -1133,12 +1223,18 @@ lv_obj_t* CreateAppCell(lv_obj_t* parent, const AppEntry& entry, int idx) {
                                        LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_transform_scale(cell, 262, LV_PART_MAIN | LV_STATE_PRESSED);
 
-    // 路径取自 s_icon_paths[idx]：已按当前主题前缀解析好（ic_app_home_themeN_xxx）。
-    lv_obj_t* icon = lv_image_create(cell);
-    lv_image_set_src(icon, s_icon_paths[idx]);
-    lv_obj_set_size(icon, kIconSize, kIconSize);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    // child[0] 始终是图标容器，保证 skeleton 的 child[1] 下标不变。
+    lv_obj_t* icon = nullptr;
+    if (std::strcmp(entry.icon_suffix, "pet") == 0) {
+        icon = CreatePetAppIcon(cell);
+    } else {
+        // 路径取自 s_icon_paths[idx]：已按当前主题前缀解析好（ic_app_home_themeN_xxx）。
+        icon = lv_image_create(cell);
+        lv_image_set_src(icon, s_icon_paths[idx]);
+        lv_obj_set_size(icon, kIconSize, kIconSize);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     // child[1]：翻页骨架（与 icon 同位同尺寸），见 SetPagerSkeletonMode。
     CreateAppCellSkeleton(cell);
@@ -2593,6 +2689,12 @@ void HomeScreen::RequestOpenPodcastFromCurrentScreen() {
 void HomeScreen::RequestOpenEnglishFromCurrentScreen() {
     if (lv_async_call(OpenEnglishFromCurrentAsync, nullptr) != LV_RESULT_OK) {
         ESP_LOGW(TAG_HOME, "open english request dropped");
+    }
+}
+
+void HomeScreen::RequestOpenPetFromCurrentScreen() {
+    if (lv_async_call(OpenPetFromCurrentAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open pet request dropped");
     }
 }
 
