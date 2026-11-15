@@ -14,6 +14,7 @@
 #include "english_client.h"
 #include "english_types.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
@@ -431,20 +432,48 @@ bool BeginRequest(RequestResult*& context) {
     return true;
 }
 
+BaseType_t CreateWorkerTask(TaskFunction_t function, const char* name,
+                            uint32_t stack_depth, void* arg) {
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    BaseType_t result =
+        xTaskCreateWithCaps(function, name, stack_depth, arg, 4, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    BaseType_t result =
+        xTaskCreate(function, name, stack_depth, arg, 4, nullptr);
+#endif
+    if (result != pdPASS) {
+        ESP_LOGE(TAG, "create %s failed: internal=%u psram=%u", name,
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    }
+    return result;
+}
+
+void FinishWorkerTask() {
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    vTaskDeleteWithCaps(nullptr);
+#else
+    vTaskDelete(nullptr);
+#endif
+}
+
 void StartTasksWorker() {
     auto* context = new RequestResult{};
     context->kind = RequestKind::Tasks;
     if (!BeginRequest(context)) {
         return;
     }
-    if (xTaskCreate(
+    if (CreateWorkerTask(
             [](void* arg) {
                 auto* result = static_cast<RequestResult*>(arg);
                 result->tasks = EnglishClient::FetchTasks(result->error);
                 PostRequestResult(result);
-                vTaskDelete(nullptr);
+                FinishWorkerTask();
             },
-            "english_tasks", 8192, context, 4, nullptr) != pdPASS) {
+            "english_tasks", 8192, context) != pdPASS) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("加载任务失败"));
@@ -458,15 +487,15 @@ void StartReviewWorker(const std::string& task_id) {
     if (!BeginRequest(context)) {
         return;
     }
-    if (xTaskCreate(
+    if (CreateWorkerTask(
             [](void* arg) {
                 auto* result = static_cast<RequestResult*>(arg);
                 result->review =
                     EnglishClient::FetchReview(result->task_id, result->error);
                 PostRequestResult(result);
-                vTaskDelete(nullptr);
+                FinishWorkerTask();
             },
-            "english_review", 8192, context, 4, nullptr) != pdPASS) {
+            "english_review", 8192, context) != pdPASS) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("加载复习内容失败"));
@@ -488,7 +517,7 @@ void StartSubmitWorker(const std::string& result) {
         return;
     }
     SetStatus(I18n::T("正在保存结果..."));
-    if (xTaskCreate(
+    if (CreateWorkerTask(
             [](void* arg) {
                 auto* request = static_cast<RequestResult*>(arg);
                 const bool ok = EnglishClient::SubmitResult(
@@ -498,9 +527,9 @@ void StartSubmitWorker(const std::string& result) {
                     request->error = "保存结果失败";
                 }
                 PostRequestResult(request);
-                vTaskDelete(nullptr);
+                FinishWorkerTask();
             },
-            "english_result", 8192, context, 4, nullptr) != pdPASS) {
+            "english_result", 8192, context) != pdPASS) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("保存结果失败"));
