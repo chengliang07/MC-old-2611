@@ -640,6 +640,17 @@ void AudioService::EnableVoiceProcessing(bool enable, bool reset_decoder) {
     }
 }
 
+void AudioService::ReleaseVoiceProcessor() {
+    if (!audio_processor_initialized_) {
+        return;
+    }
+    ESP_LOGI(TAG, "Releasing voice processor (free AEC buffers)");
+    audio_processor_->Stop();
+    audio_processor_->Deinitialize();
+    audio_processor_initialized_ = false;
+    xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+}
+
 void AudioService::SetBargeInActive(bool active) {
     barge_in_active_ = active;
     if (active) {

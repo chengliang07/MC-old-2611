@@ -64,24 +64,60 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     afe_config->aec_init = true;
     afe_config->vad_init = true;
 
-    afe_iface_ = esp_afe_handle_from_config(afe_config);
-    afe_data_ = afe_iface_->create_from_config(afe_config);
-    
-    xTaskCreate([](void* arg) {
-        auto this_ = (AfeAudioProcessor*)arg;
-        this_->AudioProcessorTask();
-        vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    {
+        std::lock_guard<std::mutex> lock(afe_mutex_);
+        if (afe_data_ != nullptr) {
+            return;
+        }
+        afe_iface_ = esp_afe_handle_from_config(afe_config);
+        afe_data_ = afe_iface_->create_from_config(afe_config);
+    }
+
+    // 任务只建一次：释放 AFE 后任务停在 PROCESSOR_RUNNING 上，重建时复用。
+    if (task_handle_ == nullptr) {
+        xTaskCreate([](void* arg) {
+            auto this_ = (AfeAudioProcessor*)arg;
+            this_->AudioProcessorTask();
+            vTaskDelete(NULL);
+        }, "audio_communication", 4096, this, 3, &task_handle_);
+    }
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
-    if (afe_data_ != nullptr) {
-        afe_iface_->destroy(afe_data_);
-    }
+    DestroyAfe();
     vEventGroupDelete(event_group_);
 }
 
+void AfeAudioProcessor::DestroyAfe() {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
+    if (afe_data_ != nullptr) {
+        if (afe_iface_ != nullptr) {
+            afe_iface_->destroy(afe_data_);
+        }
+        afe_data_ = nullptr;
+    }
+    afe_iface_ = nullptr;
+    release_requested_.store(false, std::memory_order_release);
+}
+
+void AfeAudioProcessor::Deinitialize() {
+    // 由 AFE 自己的 fetch 线程执行 destroy，避免 fetch 中途被释放。
+    xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    release_requested_.store(true, std::memory_order_release);
+    for (int i = 0; i < 60; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(afe_mutex_);
+            if (afe_data_ == nullptr) {
+                return;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGW(TAG, "Deinitialize: AFE release timed out");
+}
+
 size_t AfeAudioProcessor::GetFeedSize() {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ == nullptr) {
         return 0;
     }
@@ -89,6 +125,7 @@ size_t AfeAudioProcessor::GetFeedSize() {
 }
 
 void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ == nullptr) {
         return;
     }
@@ -111,6 +148,7 @@ void AfeAudioProcessor::Start() {
     is_speaking_ = false;
     speech_frames_ = 0;
     output_buffer_.clear();
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
@@ -129,6 +167,7 @@ void AfeAudioProcessor::SetEchoGate(bool enable) {
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
@@ -147,15 +186,40 @@ void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> call
 }
 
 void AfeAudioProcessor::AudioProcessorTask() {
-    auto fetch_size = afe_iface_->get_fetch_chunksize(afe_data_);
-    auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
-    ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
-        feed_size, fetch_size);
+    {
+        std::lock_guard<std::mutex> lock(afe_mutex_);
+        if (afe_iface_ != nullptr && afe_data_ != nullptr) {
+            auto fetch_size = afe_iface_->get_fetch_chunksize(afe_data_);
+            auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
+            ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
+                feed_size, fetch_size);
+        }
+    }
 
     while (true) {
-        xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
+        xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE,
+                            pdMS_TO_TICKS(200));
+        if (release_requested_.load(std::memory_order_acquire)) {
+            DestroyAfe();
+            continue;
+        }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        const esp_afe_sr_iface_t* iface = nullptr;
+        esp_afe_sr_data_t* data = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(afe_mutex_);
+            iface = afe_iface_;
+            data = afe_data_;
+        }
+        if (iface == nullptr || data == nullptr) {
+            continue;
+        }
+
+        auto res = iface->fetch_with_delay(data, pdMS_TO_TICKS(100));
+        if (release_requested_.load(std::memory_order_acquire)) {
+            DestroyAfe();
+            continue;
+        }
         if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
             continue;
         }

@@ -1269,6 +1269,7 @@ void Application::SoftStopVoiceAudioPaths() {
     audio_service_.SetBargeInActive(false);
     audio_service_.EnableWakeWordDetection(false);
     audio_service_.EnableVoiceProcessing(false);
+    audio_service_.ReleaseVoiceProcessor();
 }
 
 void Application::TearDownVoiceAudioPaths(bool release_wake_word) {

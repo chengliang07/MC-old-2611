@@ -896,7 +896,7 @@ constexpr AppEntry kApps[] = {
     // {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
     // {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
     // {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
-    // {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
+    {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
     // {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
     // {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
     // {"info",           "系统信息", LaunchInfo,          info_lifecycle_cb,          false},

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <atomic>
+#include <mutex>
 
 #include "audio_processor.h"
 #include "audio_codec.h"
@@ -19,6 +21,7 @@ public:
     ~AfeAudioProcessor();
 
     void Initialize(AudioCodec* codec, int frame_duration_ms, srmodel_list_t* models_list) override;
+    void Deinitialize() override;
     void Feed(std::vector<int16_t>&& data) override;
     void Start() override;
     void Stop() override;
@@ -34,6 +37,9 @@ private:
     EventGroupHandle_t event_group_ = nullptr;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
+    std::mutex afe_mutex_;
+    std::atomic<bool> release_requested_{false};
+    TaskHandle_t task_handle_ = nullptr;
     std::function<void(std::vector<int16_t>&& data)> output_callback_;
     std::function<void(bool speaking)> vad_state_change_callback_;
     AudioCodec* codec_ = nullptr;
@@ -56,6 +62,7 @@ private:
     float echo_baseline_ = 0.0f;
 
     void AudioProcessorTask();
+    void DestroyAfe();
 };
 
 #endif
