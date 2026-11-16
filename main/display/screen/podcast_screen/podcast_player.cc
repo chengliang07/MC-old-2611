@@ -36,7 +36,6 @@ namespace {
 
 constexpr const char* TAG = "PodcastPlayer";
 constexpr int kOutputSampleRate = 16000;
-constexpr int kPronunciationSpeedQ1000 = 1250;
 
 struct PlayArg {
     uint32_t generation = 0;
@@ -203,6 +202,8 @@ struct RingBlock {
 struct StreamState {
     std::string url;
     int64_t range_start = 0;
+    bool quick = false;
+    int ring_block_count = kRingBlockCount;
     std::string error;
     std::atomic<bool> stop{false};
     std::atomic<bool> ended{false};
@@ -291,24 +292,32 @@ std::string ResolveLocation(const std::string& base, const std::string& location
     return "";
 }
 
+bool IsQuickPronunciationUrl(const std::string& url) {
+    return url.find("dict.youdao.com") != std::string::npos;
+}
+
 bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
                      std::string& error, int64_t range_start = 0,
                      int64_t* remaining = nullptr) {
     client = nullptr;
     std::string current = url;
+    const bool quick = IsQuickPronunciationUrl(url);
+    const int max_attempts = quick ? 2 : 5;
     for (int hop = 0; hop < 4; ++hop) {
         esp_http_client_config_t cfg = {};
         cfg.url = current.c_str();
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.timeout_ms = 15000;
+        cfg.timeout_ms = quick ? 6000 : 15000;
         // 音频只需小块缓冲；TLS 握手本身占用大量内部 RAM，这里留出余量，
         // 避免和语音会话/TLS 会话叠加时 open 失败（errno 0）。
-        cfg.buffer_size = 2048;
-        cfg.buffer_size_tx = 1024;
-        const std::string device_token = PodcastClient::DeviceToken();
+        cfg.buffer_size = quick ? 4096 : 2048;
+        cfg.buffer_size_tx = quick ? 512 : 1024;
+        // 有道发音是公开接口，不要带设备 Token，避免额外头部和无谓鉴权。
+        const std::string device_token =
+            quick ? std::string() : PodcastClient::DeviceToken();
         bool opened = false;
         int last_errno = 0;
-        for (int attempt = 0; attempt < 5; ++attempt) {
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
             client = esp_http_client_init(&cfg);
             if (client == nullptr) {
                 error = "创建网络连接失败";
@@ -339,8 +348,9 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
                          heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
             esp_http_client_cleanup(client);
             client = nullptr;
-            if (attempt < 4) {
-                vTaskDelay(pdMS_TO_TICKS(400 + attempt * 400));
+            if (attempt + 1 < max_attempts) {
+                vTaskDelay(pdMS_TO_TICKS(quick ? 100 + attempt * 100
+                                               : 400 + attempt * 400));
             }
         }
         if (!opened) {
@@ -399,18 +409,21 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
 }
 
 bool PrepareStreamBuffers(StreamState* state) {
+    const int block_count = state->ring_block_count;
+    const size_t ring_bytes =
+        static_cast<size_t>(kRingBlockSize) * static_cast<size_t>(block_count);
     if (state->ring == nullptr) {
-        state->ring = static_cast<uint8_t*>(
-            heap_caps_malloc(kRingBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        state->ring = static_cast<uint8_t*>(heap_caps_malloc(
+            ring_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     }
     if (state->ring == nullptr) {
         return false;
     }
     if (state->ring_free == nullptr) {
-        state->ring_free = xQueueCreate(kRingBlockCount, sizeof(uint16_t));
+        state->ring_free = xQueueCreate(block_count, sizeof(uint16_t));
     }
     if (state->ring_data == nullptr) {
-        state->ring_data = xQueueCreate(kRingBlockCount, sizeof(RingBlock));
+        state->ring_data = xQueueCreate(block_count, sizeof(RingBlock));
     }
     if (state->ring_free == nullptr || state->ring_data == nullptr) {
         return false;
@@ -421,7 +434,7 @@ bool PrepareStreamBuffers(StreamState* state) {
     }
     while (xQueueReceive(state->ring_data, &block, 0) == pdTRUE) {
     }
-    for (int i = 0; i < kRingBlockCount; ++i) {
+    for (int i = 0; i < block_count; ++i) {
         const uint16_t value = static_cast<uint16_t>(i);
         xQueueSend(state->ring_free, &value, 0);
     }
@@ -703,9 +716,12 @@ void PodcastPlayTask(void* arg) {
     const int64_t base_ms = play_arg->base_ms;
     delete play_arg;
 
+    const bool quick = IsQuickPronunciationUrl(url);
     auto* state = new StreamState();
     state->url = url;
     state->range_start = range_bytes;
+    state->quick = quick;
+    state->ring_block_count = quick ? 4 : kRingBlockCount;
     state->opened = xSemaphoreCreateBinary();
 
     auto is_current = [generation]() {
@@ -764,7 +780,7 @@ void PodcastPlayTask(void* arg) {
         return;
     }
     bool opened = false;
-    for (int i = 0; i < 400; ++i) {
+    for (int i = 0; i < (quick ? 120 : 400); ++i) {
         if (!is_current()) {
             break;
         }
@@ -938,7 +954,6 @@ static bool StartInternal(const std::string& url, std::string& error,
 }
 
 bool PodcastPlayer::Start(const std::string& url, std::string& error) {
-    SetSpeed(static_cast<float>(kPronunciationSpeedQ1000) / 1000.0f);
     return StartInternal(url, error, 0, 0);
 }
 
