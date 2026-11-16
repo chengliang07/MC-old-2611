@@ -664,11 +664,14 @@ void Application::Start() {
                 // 后端未接入设备 MCP 时的本地兜底：
                 // “打开/听/一丢 + 播客”直接进入播客页，不再等 LLM 调工具。
                 std::string user_text(text->valuestring);
-                const bool wants_podcast =
-                    user_text.find("播客") != std::string::npos &&
-                    (user_text.find("打开") != std::string::npos ||
-                     user_text.find("一丢") != std::string::npos ||
-                     user_text.find("听") != std::string::npos);
+                // 语音识别对“播客”常给出“博客/电台/广播”等近似词，统一归到播客。
+                const bool mentions_podcast =
+                    user_text.find("播客") != std::string::npos ||
+                    user_text.find("博客") != std::string::npos ||
+                    user_text.find("电台") != std::string::npos ||
+                    user_text.find("广播") != std::string::npos;
+                // 只说“播客/一丢播客/博客”也要能进，不再要求带“打开/听”。
+                const bool wants_podcast = mentions_podcast;
                 const bool wants_english =
                     user_text.find("英语") != std::string::npos &&
                     (user_text.find("打开") != std::string::npos ||

@@ -448,12 +448,27 @@ void ReturnHome() {
     }
 }
 
-void OnBackClicked(lv_event_t* /*event*/) {
+// 播放中先停回节目列表，列表页再点才离开播客页。
+void HandleBack() {
+    if (s_playing || s_paused) {
+        PodcastPlayer::Stop();
+        s_playing = false;
+        s_paused = false;
+        s_current_title.clear();
+        UpdateControls(false, false);
+        RebuildList();
+        SetStatusDirect(I18n::T("选择节目开始播放"));
+        return;
+    }
     ReturnHome();
 }
 
+void OnBackClicked(lv_event_t* /*event*/) {
+    HandleBack();
+}
+
 void OnSwipeBack() {
-    ReturnHome();
+    HandleBack();
 }
 
 void OnScreenUnloaded(lv_event_t* event) {

@@ -155,7 +155,8 @@ void ConfigureListContent() {
     lv_obj_set_scrollbar_mode(s_ui.content, LV_SCROLLBAR_MODE_AUTO);
 }
 
-void ShowCenteredMessage(const char* text, bool show_back_button);
+void ShowCenteredMessage(const char* text, bool show_back_button,
+                         bool compact = false);
 void OnBackToListClicked(lv_event_t* /*event*/);
 void OnTaskClicked(lv_event_t* event);
 void OnCardClicked(lv_event_t* /*event*/);
@@ -167,7 +168,8 @@ void StartSubmitWorker(const std::string& result);
 void BuildTaskList();
 void BuildReview();
 
-void ShowCenteredMessage(const char* text, bool show_back_button) {
+void ShowCenteredMessage(const char* text, bool show_back_button,
+                         bool compact) {
     ResetContentRefs();
     lv_obj_clean(s_ui.content);
     ConfigurePageContent();
@@ -176,8 +178,11 @@ void ShowCenteredMessage(const char* text, bool show_back_button) {
     lv_label_set_text(label, text);
     lv_obj_set_width(label, kContentWidth - 64);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(label, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(kColorText),
+    lv_obj_set_style_text_font(label,
+                               compact ? &font_puhui_20_4 : &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(label,
+                                lv_color_hex(compact ? kColorSubtle : kColorText),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
@@ -545,7 +550,7 @@ void OnTaskClicked(lv_event_t* event) {
     s_review = EnglishReview{};
     s_current_index = 0;
     s_stage = 0;
-    ShowCenteredMessage(I18n::T("正在加载复习内容..."), false);
+    ShowCenteredMessage(I18n::T("正在加载复习内容..."), false, true);
     SetStatus(I18n::T("正在加载复习内容..."));
     StartReviewWorker(s_tasks[index].id);
 }
@@ -593,12 +598,26 @@ void ReturnHome() {
     }
 }
 
-void OnBackClicked(lv_event_t* /*event*/) {
+// 复习中先回任务列表，列表页再点才离开英语页。
+void HandleBack() {
+    if (s_in_review) {
+        s_review = EnglishReview{};
+        s_current_task_id.clear();
+        s_current_index = 0;
+        s_stage = 0;
+        BuildTaskList();
+        SetStatus(I18n::T("选择任务开始复习"));
+        return;
+    }
     ReturnHome();
 }
 
+void OnBackClicked(lv_event_t* /*event*/) {
+    HandleBack();
+}
+
 void OnSwipeBack() {
-    ReturnHome();
+    HandleBack();
 }
 
 void OnScreenUnloaded(lv_event_t* event) {
