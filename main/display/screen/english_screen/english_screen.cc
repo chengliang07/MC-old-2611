@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "application.h"
+#include "assets/lang_config.h"
 #include "chat_screen/chat_screen.h"
 #include "english_client.h"
 #include "english_types.h"
@@ -19,6 +20,7 @@
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
 #include "i18n.h"
+#include "podcast_player.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -200,6 +202,7 @@ void ShowCenteredMessage(const char* text, bool show_back_button,
 void OnBackToListClicked(lv_event_t* /*event*/);
 void OnTaskClicked(lv_event_t* event);
 void OnCardClicked(lv_event_t* /*event*/);
+void OnPronounceClicked(lv_event_t* /*event*/);
 void OnChoiceClicked(lv_event_t* event);
 void OnRememberedClicked(lv_event_t* /*event*/);
 void OnForgottenClicked(lv_event_t* /*event*/);
@@ -450,7 +453,7 @@ void BuildChoice() {
     lv_obj_set_style_pad_all(s_ui.card, 0, LV_PART_MAIN);
 
     s_ui.card_label = lv_label_create(s_ui.card);
-    lv_obj_set_width(s_ui.card_label, kContentWidth - 96);
+    lv_obj_set_width(s_ui.card_label, kContentWidth - 200);
     lv_label_set_long_mode(s_ui.card_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_ui.card_label, entry.term.c_str());
     lv_obj_set_style_text_font(s_ui.card_label, &font_puhui_30_4,
@@ -459,20 +462,27 @@ void BuildChoice() {
                                 lv_color_hex(kColorText), LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.card_label, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.card_label, LV_ALIGN_CENTER, 0,
+    lv_obj_align(s_ui.card_label, LV_ALIGN_LEFT_MID, 20,
                  entry.phonetic.empty() ? 0 : -16);
     screen_make_input_passive(s_ui.card_label);
 
     if (!entry.phonetic.empty()) {
         lv_obj_t* phonetic = lv_label_create(s_ui.card);
+        lv_obj_set_width(phonetic, kContentWidth - 200);
+        lv_label_set_long_mode(phonetic, LV_LABEL_LONG_WRAP);
         lv_label_set_text(phonetic, entry.phonetic.c_str());
         lv_obj_set_style_text_font(phonetic, &font_puhui_20_4,
                                    LV_PART_MAIN);
         lv_obj_set_style_text_color(phonetic, lv_color_hex(kColorSubtle),
                                     LV_PART_MAIN);
-        lv_obj_align(phonetic, LV_ALIGN_CENTER, 0, 38);
+        lv_obj_set_style_text_align(phonetic, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        lv_obj_align(phonetic, LV_ALIGN_LEFT_MID, 20, 38);
         screen_make_input_passive(phonetic);
     }
+
+    CreateButton(s_ui.card, 526, 38, 92, 56, I18n::T("发音"),
+                 kColorAccent, OnPronounceClicked);
 
     for (size_t i = 0; i < entry.options.size(); ++i) {
         const int32_t x = static_cast<int32_t>(16 + (i % 2) * 328);
@@ -684,6 +694,23 @@ void OnCardClicked(lv_event_t* /*event*/) {
     UpdateCard();
 }
 
+void OnPronounceClicked(lv_event_t* /*event*/) {
+    if (s_current_index >= s_review.entries.size()) {
+        return;
+    }
+    std::string error;
+    const std::string url = EnglishClient::PronunciationUrl(
+        s_review.entries[s_current_index].term, error);
+    if (url.empty()) {
+        SetStatus(error.c_str());
+        return;
+    }
+    PodcastPlayer::SetEventCallback(nullptr, nullptr);
+    if (!PodcastPlayer::Start(url, error)) {
+        SetStatus(error.c_str());
+    }
+}
+
 void OnChoiceClicked(lv_event_t* event) {
     if (s_choice_locked || s_current_index >= s_review.entries.size()) {
         return;
@@ -704,9 +731,11 @@ void OnChoiceClicked(lv_event_t* event) {
         static_cast<lv_obj_t*>(lv_event_get_target(event));
     lv_obj_t* correct_button =
         s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
+    PodcastPlayer::Stop();
     if (selected == s_choice_correct) {
         lv_obj_set_style_bg_color(selected_button,
                                   lv_color_hex(kColorSuccess), LV_PART_MAIN);
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
         StartSubmitWorker("remembered");
     } else {
         lv_obj_set_style_bg_color(selected_button,
@@ -716,6 +745,8 @@ void OnChoiceClicked(lv_event_t* event) {
                                       lv_color_hex(kColorSuccess),
                                       LV_PART_MAIN);
         }
+        Application::GetInstance().PlaySound(
+            Lang::Sounds::OGG_EXCLAMATION);
         StartSubmitWorker("forgotten");
     }
 }
@@ -786,6 +817,7 @@ void OnScreenUnloaded(lv_event_t* event) {
         return;
     }
     s_bound_screen = nullptr;
+    PodcastPlayer::Stop();
     s_screen_active.store(false, std::memory_order_release);
     s_busy.store(false, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);

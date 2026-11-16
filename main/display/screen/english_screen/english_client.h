@@ -13,4 +13,6 @@ public:
                              const std::string& word_id,
                              const std::string& result,
                              std::string& error);
+    static std::string PronunciationUrl(const std::string& text,
+                                       std::string& error);
 };

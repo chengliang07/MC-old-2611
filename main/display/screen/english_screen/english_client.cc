@@ -294,3 +294,19 @@ bool EnglishClient::SubmitResult(const std::string& task_id,
     }
     return true;
 }
+
+std::string EnglishClient::PronunciationUrl(const std::string& text,
+                                            std::string& error) {
+    error.clear();
+    std::string api_base;
+    std::string device_token;
+    if (!LoadConfig(api_base, device_token, error)) {
+        return "";
+    }
+    if (text.empty()) {
+        error = "没有可发音的内容";
+        return "";
+    }
+    return api_base + "/api/device/v1/english/pronounce?text=" +
+           UrlEncode(text);
+}
