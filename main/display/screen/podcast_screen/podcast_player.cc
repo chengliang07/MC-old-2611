@@ -36,6 +36,7 @@ namespace {
 
 constexpr const char* TAG = "PodcastPlayer";
 constexpr int kOutputSampleRate = 16000;
+constexpr int kPronunciationSpeedQ1000 = 1250;
 
 struct PlayArg {
     uint32_t generation = 0;
@@ -937,6 +938,7 @@ static bool StartInternal(const std::string& url, std::string& error,
 }
 
 bool PodcastPlayer::Start(const std::string& url, std::string& error) {
+    SetSpeed(static_cast<float>(kPronunciationSpeedQ1000) / 1000.0f);
     return StartInternal(url, error, 0, 0);
 }
 

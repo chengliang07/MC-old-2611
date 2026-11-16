@@ -160,6 +160,39 @@ std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 
+// 复习中断后保留进度：只保留在当前固件进程内，不做跨重启持久化。
+std::string s_history_task_id;
+EnglishReview s_history_review;
+size_t s_history_index = 0;
+uint8_t s_history_stage = 0;
+bool s_has_history = false;
+
+void SaveReviewProgress() {
+    if (!s_in_review || s_current_task_id.empty() ||
+        s_review.entries.empty()) {
+        return;
+    }
+    s_history_task_id = s_current_task_id;
+    s_history_review = s_review;
+    s_history_index = s_current_index;
+    s_history_stage = s_stage;
+    s_has_history = true;
+}
+
+bool RestoreReviewProgress(const std::string& task_id) {
+    if (!s_has_history || s_history_task_id != task_id ||
+        s_history_review.entries.empty() ||
+        s_history_index >= s_history_review.entries.size()) {
+        return false;
+    }
+    s_review = s_history_review;
+    s_current_task_id = task_id;
+    s_current_index = s_history_index;
+    s_stage = s_history_stage;
+    s_in_review = true;
+    return true;
+}
+
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
 }
@@ -175,6 +208,19 @@ void SetStatus(const char* text) {
     if (s_ui.status != nullptr) {
         lv_label_set_text(s_ui.status, text != nullptr ? text : "");
     }
+}
+
+void PostSetStatus(const char* text) {
+    if (text == nullptr) {
+        return;
+    }
+    lv_async_call(
+        [](void* data) {
+            std::unique_ptr<std::string> message(
+                static_cast<std::string*>(data));
+            SetStatus(message->c_str());
+        },
+        new std::string(text));
 }
 
 void ResetContentRefs() {
@@ -361,18 +407,26 @@ void BuildTaskList() {
                                      : task.status == "in_progress"
                                            ? I18n::T("进行中")
                                            : I18n::T("未开始");
+        const bool resumable =
+            s_has_history && s_history_task_id == task.id &&
+            s_history_index < s_history_review.entries.size();
+        if (resumable) {
+            state_text = I18n::T("继续复习");
+        }
         lv_label_set_text(state, state_text);
         lv_obj_set_style_text_font(state, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(
-            state, lv_color_hex(task.status == "completed"
-                                    ? kColorSuccess
-                                    : kColorSubtle),
+            state, lv_color_hex(resumable ? kColorAccent
+                                    : task.status == "completed"
+                                          ? kColorSuccess
+                                          : kColorSubtle),
             LV_PART_MAIN);
         lv_obj_align(state, LV_ALIGN_BOTTOM_LEFT, 0, 0);
         screen_make_input_passive(state);
 
         lv_obj_t* action = lv_label_create(row);
-        lv_label_set_text(action, I18n::T("复习 >"));
+        lv_label_set_text(action,
+                          resumable ? I18n::T("继续 >") : I18n::T("复习 >"));
         lv_obj_set_style_text_font(action, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(action, lv_color_hex(kColorAccent),
                                     LV_PART_MAIN);
@@ -511,7 +565,7 @@ void BuildChoice() {
 
     s_ui.card = lv_obj_create(s_ui.content);
     lv_obj_set_pos(s_ui.card, 16, 52);
-    lv_obj_set_size(s_ui.card, kContentWidth - 32, 132);
+    lv_obj_set_size(s_ui.card, kContentWidth - 32, 210);
     lv_obj_set_style_radius(s_ui.card, 26, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_ui.card, lv_color_hex(kColorCard),
                               LV_PART_MAIN);
@@ -549,14 +603,14 @@ void BuildChoice() {
 
     const std::string pronounce_label =
         std::string(FONT_AWESOME_VOLUME_HIGH) + " " + I18n::T("发音");
-    CreateButton(s_ui.card, 526, 38, 92, 56, pronounce_label.c_str(),
+    CreateButton(s_ui.card, 526, 76, 92, 56, pronounce_label.c_str(),
                  kColorAccent, OnPronounceClicked);
 
     for (size_t i = 0; i < entry.options.size(); ++i) {
         const int32_t x = static_cast<int32_t>(16 + (i % 2) * 328);
-        const int32_t y = static_cast<int32_t>(200 + (i / 2) * 112);
+        const int32_t y = static_cast<int32_t>(278 + (i / 2) * 96);
         s_choice_buttons[i] = CreateChoiceButton(
-            s_ui.content, x, y, 312, 92, entry.options[i].c_str(),
+            s_ui.content, x, y, 312, 84, entry.options[i].c_str(),
             OnChoiceClicked, i);
     }
 }
@@ -615,15 +669,7 @@ void PostRequestResult(RequestResult* result) {
                         }
                         break;
                     case RequestKind::Result:
-                        if (resolved->index + 1 <
-                            static_cast<int>(s_review.entries.size())) {
-                            s_current_index = resolved->index + 1;
-                            s_stage = 0;
-                            BuildReview();
-                            SetStatus(I18n::T("结果已保存"));
-                        } else {
-                            BuildComplete();
-                        }
+                        PostSetStatus(I18n::T("结果已保存"));
                         break;
                 }
             },
@@ -638,10 +684,10 @@ bool BeginRequest(RequestResult*& context) {
     if (!s_busy.compare_exchange_strong(expected, true)) {
         const int64_t since =
             s_busy_since_us.load(std::memory_order_relaxed);
-        // 看门狗：请求卡死超过 15 秒后允许新的请求接管，
+        // 看门狗：请求卡死超过 5 秒后允许新的请求接管，
         // 避免网络异常时页面永久停在加载中。
         if (since != 0 &&
-            esp_timer_get_time() - since < 15LL * 1000 * 1000) {
+            esp_timer_get_time() - since < 5LL * 1000 * 1000) {
             delete context;
             return false;
         }
@@ -750,6 +796,9 @@ void StartSubmitWorker(const std::string& result) {
                 if (!ok && request->error.empty()) {
                     request->error = "保存结果失败";
                 }
+                if (!ok) {
+                    PostSetStatus(request->error.c_str());
+                }
                 PostRequestResult(request);
                 FinishWorkerTask();
             },
@@ -766,12 +815,18 @@ void OnTaskClicked(lv_event_t* event) {
     if (index >= s_tasks.size()) {
         return;
     }
+    const std::string task_id = s_tasks[index].id;
+    if (RestoreReviewProgress(task_id)) {
+        BuildReview();
+        SetStatus(I18n::T("已恢复上次复习进度"));
+        return;
+    }
     s_review = EnglishReview{};
     s_current_index = 0;
     s_stage = 0;
     ShowCenteredMessage(I18n::T("正在加载复习内容..."), false, true);
     SetStatus(I18n::T("正在加载复习内容..."));
-    StartReviewWorker(s_tasks[index].id);
+    StartReviewWorker(task_id);
 }
 
 void OnCardClicked(lv_event_t* /*event*/) {
@@ -814,6 +869,7 @@ void OnChoiceClicked(lv_event_t* event) {
     }
 
     s_choice_locked = true;
+    const bool was_last = s_current_index + 1 >= s_review.entries.size();
     lv_obj_t* selected_button =
         static_cast<lv_obj_t*>(lv_event_get_target(event));
     lv_obj_t* correct_button =
@@ -822,7 +878,6 @@ void OnChoiceClicked(lv_event_t* event) {
     if (selected == s_choice_correct) {
         lv_obj_set_style_bg_color(selected_button,
                                   lv_color_hex(kColorSuccess), LV_PART_MAIN);
-        Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
         StartSubmitWorker("remembered");
     } else {
         lv_obj_set_style_bg_color(selected_button,
@@ -832,13 +887,21 @@ void OnChoiceClicked(lv_event_t* event) {
                                       lv_color_hex(kColorSuccess),
                                       LV_PART_MAIN);
         }
-        Application::GetInstance().PlaySound(
-            Lang::Sounds::OGG_EXCLAMATION);
         StartSubmitWorker("forgotten");
+    }
+    if (was_last) {
+        SetStatus(I18n::T("结果已保存"));
+        BuildComplete();
+    } else {
+        s_current_index++;
+        s_stage = 0;
+        BuildReview();
+        SetStatus(I18n::T("结果已保存"));
     }
 }
 
 void OnBackToListClicked(lv_event_t* /*event*/) {
+    SaveReviewProgress();
     s_review = EnglishReview{};
     s_current_task_id.clear();
     s_current_index = 0;
@@ -879,6 +942,7 @@ void ReturnHome() {
 // 复习中先回任务列表，列表页再点才离开英语页。
 void HandleBack() {
     if (s_in_review) {
+        SaveReviewProgress();
         s_review = EnglishReview{};
         s_current_task_id.clear();
         s_current_index = 0;
@@ -920,22 +984,21 @@ void OnScreenUnloaded(lv_event_t* event) {
 
 void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* back = lv_button_create(screen);
+    lv_obj_remove_style_all(back);
     lv_obj_set_size(back, 72, 72);
-    lv_obj_set_pos(back, 22, 14);
-    lv_obj_set_style_radius(back, 18, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x1B2740),
-                              LV_PART_MAIN);
+    lv_obj_set_pos(back, 16, 22);
+    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(back, 0, LV_PART_MAIN);
     screen_swipe_back_ignore(back, true);
     lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* back_label = lv_label_create(back);
-    lv_label_set_text(back_label, "<");
-    lv_obj_set_style_text_font(back_label, &font_puhui_30_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(back_label, lv_color_hex(kColorText),
-                                LV_PART_MAIN);
-    lv_obj_center(back_label);
+    lv_obj_t* back_icon = lv_image_create(back);
+    lv_image_set_src(back_icon, "A:ic_app_back.spng");
+    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(back_icon);
 
     lv_obj_t* title = lv_label_create(screen);
     lv_label_set_text(title, I18n::T("一丢英语"));

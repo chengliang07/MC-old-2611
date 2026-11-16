@@ -28,9 +28,9 @@ constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
 
-// 播放地址缓存：签名地址 60 分钟有效，这里保守缓存 45 分钟，
-// 点开节目时不必再等一次 /play 往返。
-constexpr int kPlayCacheSeconds = 45 * 60;
+// 播放地址缓存：签名地址 60 分钟有效，但设备切到不同 WiFi / 网络后
+// JSON 内的签名主机可能暂时不可达；缩短缓存让下一次播放尽快重新换地址。
+constexpr int kPlayCacheSeconds = 5 * 60;
 
 struct PlayCacheEntry {
     std::string id;

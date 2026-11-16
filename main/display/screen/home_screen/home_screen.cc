@@ -533,7 +533,7 @@ void LaunchChat(screen_lifecycle_cb_t lifecycle_cb) {
 
 void LaunchPodcast(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = PodcastScreen::Create(HomeScreen::Create());
+    lv_obj_t* app = PodcastScreen::Create(old_scr);
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
     if (old_scr != nullptr && old_scr != app) {
@@ -543,7 +543,7 @@ void LaunchPodcast(screen_lifecycle_cb_t lifecycle_cb) {
 
 void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = EnglishScreen::Create(HomeScreen::Create());
+    lv_obj_t* app = EnglishScreen::Create(old_scr);
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
     if (old_scr != nullptr && old_scr != app) {
@@ -553,7 +553,7 @@ void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
 
 void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
-    lv_obj_t* app = PetScreen::Create(HomeScreen::Create());
+    lv_obj_t* app = PetScreen::Create(old_scr);
     if (app == nullptr) {
         return;
     }
@@ -616,9 +616,9 @@ void OpenPetFromCurrentAsync(void* /*arg*/) {
     }
     screen_attach_lifecycle(pet, pet_lifecycle_cb);
     lv_screen_load(pet);
-    // 学伴页保留原实例；其它页面卸载时会清空 UI 指针，统一改为回新首页。
+    // 保留来源页；返回时回到点击进入前的页面。
     if (!from_chat && origin != pet) {
-        lv_obj_delete_async(origin);
+        // 不删除来源屏，避免逐次点击后累积 LVGL 异步删除任务。
     }
 }
 

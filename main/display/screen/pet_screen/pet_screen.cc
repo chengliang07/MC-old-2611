@@ -826,22 +826,21 @@ lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
 
 void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* back = lv_button_create(screen);
+    lv_obj_remove_style_all(back);
     lv_obj_set_size(back, 72, 72);
-    lv_obj_set_pos(back, 22, 14);
-    lv_obj_set_style_radius(back, 18, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x1B2740),
-                              LV_PART_MAIN);
+    lv_obj_set_pos(back, 16, 22);
+    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(back, 0, LV_PART_MAIN);
     screen_swipe_back_ignore(back, true);
     lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* back_label = lv_label_create(back);
-    lv_label_set_text(back_label, "<");
-    lv_obj_set_style_text_font(back_label, &font_puhui_30_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(back_label, lv_color_hex(kColorText),
-                                LV_PART_MAIN);
-    lv_obj_center(back_label);
+    lv_obj_t* back_icon = lv_image_create(back);
+    lv_image_set_src(back_icon, "A:ic_app_back.spng");
+    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(back_icon);
 
     lv_obj_t* title = lv_label_create(screen);
     lv_label_set_text(title, I18n::T("一丢宠物"));
