@@ -17,4 +17,6 @@ public:
     static PodcastPlayInfo ResolvePlayUrl(const std::string& podcast_id,
                                           std::string& error);
     static std::string DeviceToken();
+    // 开机后台预取一次节目列表，落到 SD 缓存，首次进入播客页可直接显示。
+    static void PrefetchListAsync();
 };

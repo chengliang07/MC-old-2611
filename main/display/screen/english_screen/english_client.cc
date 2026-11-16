@@ -1,6 +1,8 @@
 #include "english_client.h"
 
+#include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -10,6 +12,8 @@
 #include "esp_log.h"
 #include "http.h"
 #include "settings.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -309,4 +313,36 @@ std::string EnglishClient::PronunciationUrl(const std::string& text,
     }
     return api_base + "/api/device/v1/english/pronounce?text=" +
            UrlEncode(text);
+}
+
+void EnglishClient::PrefetchTasksAsync() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    xTaskCreate(
+        [](void* /*arg*/) {
+            // 比播客预热再晚一些，避免两次 TLS 同时抢内部 RAM。
+            vTaskDelay(pdMS_TO_TICKS(20000));
+            std::string error;
+            const EnglishTaskList tasks = FetchTasks(error);
+            if (error.empty() && !tasks.empty()) {
+                const char* tmp = "/sdcard/system/english_tasks.tmp";
+                FILE* file = std::fopen(tmp, "w");
+                if (file != nullptr) {
+                    for (const auto& task : tasks) {
+                        std::fprintf(file, "%s|%s|%s|%d|%d\n",
+                                     task.id.c_str(),
+                                     task.task_date.c_str(),
+                                     task.status.c_str(),
+                                     task.phrase_count,
+                                     task.can_review ? 1 : 0);
+                    }
+                    std::fclose(file);
+                    std::rename(tmp, "/sdcard/system/english_tasks.txt");
+                }
+            }
+            vTaskDelete(nullptr);
+        },
+        "english_prefetch", 8192, nullptr, 3, nullptr);
 }

@@ -37,6 +37,8 @@
 #include "magnet_screen/magnet_screen.h"
 #include "music_screen/music_screen.h"
 #include "podcast_screen/podcast_screen.h"
+#include "podcast_screen/podcast_client.h"
+#include "english_screen/english_client.h"
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
 #include "openclaw_screen/openclaw_screen.h"
@@ -2593,6 +2595,9 @@ lv_obj_t* HomeScreen::Create() {
     // 主题相关：根据 NVS 里的当前主题 id 把 kApps 的 icon_suffix 拼成完整
     // 路径，写入 s_icon_paths 缓存。后续 CreateAppCell 直接索引这份缓存。
     EnsureIconPathsBuilt();
+    // 后台预热播客/英语列表（进程内只跑一次），首次打开应用可直接显示缓存。
+    PodcastClient::PrefetchListAsync();
+    EnglishClient::PrefetchTasksAsync();
 
     lv_obj_t* screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);

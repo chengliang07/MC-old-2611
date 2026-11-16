@@ -15,4 +15,6 @@ public:
                              std::string& error);
     static std::string PronunciationUrl(const std::string& text,
                                        std::string& error);
+    // 开机后台预取任务列表，落 SD 缓存，首次进入可先显示。
+    static void PrefetchTasksAsync();
 };

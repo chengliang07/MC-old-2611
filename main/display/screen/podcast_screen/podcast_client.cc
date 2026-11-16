@@ -1,6 +1,8 @@
 #include "podcast_client.h"
 
+#include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <ctime>
 #include <cstring>
 #include <memory>
@@ -13,6 +15,8 @@
 #include "esp_log.h"
 #include "http.h"
 #include "settings.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -293,4 +297,34 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
 std::string PodcastClient::DeviceToken() {
     Settings settings(kSettingsNs, false);
     return settings.GetString(kKeyDeviceToken, CONFIG_PODCAST_DEVICE_TOKEN);
+}
+
+void PodcastClient::PrefetchListAsync() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    xTaskCreate(
+        [](void* /*arg*/) {
+            // 等开机联网/激活流程稳定后再抓，失败就放弃，不打扰用户。
+            vTaskDelay(pdMS_TO_TICKS(8000));
+            std::string error;
+            const PodcastList items = FetchPodcasts(error);
+            if (error.empty() && !items.empty()) {
+                const char* tmp = "/sdcard/system/podcast_list.tmp";
+                FILE* file = std::fopen(tmp, "w");
+                if (file != nullptr) {
+                    for (const auto& item : items) {
+                        std::fprintf(file, "%s|%s|%d|%d\n", item.id.c_str(),
+                                     item.title.c_str(),
+                                     item.duration_seconds,
+                                     item.completed ? 1 : 0);
+                    }
+                    std::fclose(file);
+                    std::rename(tmp, "/sdcard/system/podcast_list.txt");
+                }
+            }
+            vTaskDelete(nullptr);
+        },
+        "podcast_prefetch", 8192, nullptr, 3, nullptr);
 }
