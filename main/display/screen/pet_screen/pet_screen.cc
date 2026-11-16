@@ -768,6 +768,10 @@ void StartIdleTimer() {
                 s_mood == PetMood::Celebrate) {
                 return;
             }
+            if (!Application::GetInstance().GetAudioService().IsIdle()) {
+                ApplyFace(PetMood::Listen);
+                return;
+            }
             s_idle_phase = (s_idle_phase + 1) % 3;
             ApplyFace(s_idle_phase == 1
                           ? PetMood::Curious
