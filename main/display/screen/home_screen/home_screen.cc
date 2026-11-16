@@ -1161,13 +1161,13 @@ lv_obj_t* CreateAppCellSkeleton(lv_obj_t* cell) {
 
 lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
     // 宠物暂无主题 spng 资源。用与一丢英语（music）、一丢播客（radio）
-    // 主题2图标一致的橙色主体 + 黑色描边，中心换成白色爪印。
+    // 主题2图标一致的白色底 + 橙色主体 + 黑色描边。
     lv_obj_t* icon = lv_obj_create(cell);
     lv_obj_remove_style_all(icon);
     lv_obj_set_size(icon, kIconSize, kIconSize);
     lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_radius(icon, 22, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(icon, lv_color_hex(0xF97316), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(icon, 4, LV_PART_MAIN);
     lv_obj_set_style_border_color(icon, lv_color_hex(0x111111),
@@ -1175,13 +1175,13 @@ lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 白色爪印：大掌垫 + 四个小趾垫。
+    // 橙色爪印：大掌垫 + 四个小趾垫。
     lv_obj_t* pad = lv_obj_create(icon);
     lv_obj_remove_style_all(pad);
     lv_obj_set_size(pad, 52, 42);
     lv_obj_align(pad, LV_ALIGN_CENTER, 0, 14);
     lv_obj_set_style_radius(pad, 22, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(pad, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pad, lv_color_hex(0xF97316), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(pad, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(pad, LV_OBJ_FLAG_CLICKABLE);
 
@@ -1194,7 +1194,7 @@ lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
         lv_obj_set_size(toe, toe_size[i], toe_size[i] + 5);
         lv_obj_align(toe, LV_ALIGN_CENTER, toe_x[i], toe_y[i]);
         lv_obj_set_style_radius(toe, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(toe, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(toe, lv_color_hex(0xF97316), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(toe, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_remove_flag(toe, LV_OBJ_FLAG_CLICKABLE);
     }
