@@ -277,7 +277,7 @@ void AfeAudioProcessor::AudioProcessorTask() {
                 sum += static_cast<uint64_t>(static_cast<int32_t>(out[i]) * out[i]);
             }
             frame_rms = sqrt(static_cast<double>(sum) / count);
-            if (echo_gate_frames_ < 50) {
+            if (echo_gate_frames_ < 30) {
                 // 收敛期：快速跟踪回声电平，期间一律不判定打断
                 ++echo_gate_frames_;
                 speech = false;
@@ -291,10 +291,10 @@ void AfeAudioProcessor::AudioProcessorTask() {
                 if (ratio > echo_peak_ratio_) {
                     echo_peak_ratio_ = ratio;
                 }
-                // 双讲门限大幅收紧：合成参考只能压约 9dB，残留回声仍可能触发 VAD。
-                // 只有明显强于当前回声基线（4 倍）的持续人声才算打断，
-                // 避免扬声器自己的声音被误判为用户插嘴。
-                if (speech && ratio < 4.0f) {
+                // 合成参考只能压约 9dB，残留回声仍可能触发 VAD。
+                // 2.5 倍（约 +8dB）是"正常音量能打断"和"不被扬声器回声
+                // 误触发"之间的折中，仍然只认持续人声。
+                if (speech && ratio < 2.5f) {
                     speech = false;
                 }
                 if (!speech) {
@@ -308,10 +308,10 @@ void AfeAudioProcessor::AudioProcessorTask() {
         // VAD state change：连续语音约 300ms 才上报，滤掉短促回声。
         if (vad_state_change_callback_) {
             if (speech) {
-                if (speech_frames_ < 40) {
+                if (speech_frames_ < 30) {
                     speech_frames_++;
                 }
-                if (!is_speaking_ && speech_frames_ >= 20) {
+                if (!is_speaking_ && speech_frames_ >= 12) {
                     is_speaking_ = true;
                     vad_state_change_callback_(true);
                 }
