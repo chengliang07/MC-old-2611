@@ -71,30 +71,23 @@ static int DiagLogVprintf(const char* fmt, va_list ap) {
 extern "C" void app_main(void)
 {
     s_prev_log_vprintf = esp_log_set_vprintf(DiagLogVprintf);
-    ESP_LOGW(TAG, "BOOT_STAGE 1 vprintf installed");
 
     // Initialize the default event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_LOGW(TAG, "BOOT_STAGE 2 event loop");
 
     // Initialize NVS flash for WiFi configuration
     esp_err_t ret = nvs_flash_init();
-    ESP_LOGW(TAG, "BOOT_STAGE 3 nvs init ret=%d", static_cast<int>(ret));
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "Erasing NVS flash to fix corruption");
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    ESP_LOGW(TAG, "BOOT_STAGE 4 nvs ready");
 
     // UI locale from NVS (must run before first screen create).
     I18n::Init();
-    ESP_LOGW(TAG, "BOOT_STAGE 5 i18n ready");
 
     // Launch the application
     auto& app = Application::GetInstance();
-    ESP_LOGW(TAG, "BOOT_STAGE 6 application instance");
     app.Start();
-    ESP_LOGW(TAG, "BOOT_STAGE 7 application started");
 }
