@@ -589,6 +589,21 @@ void Application::Start() {
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
+    protocol_->OnDisconnected([this]() {
+        // 通道中途断开时如果仍停在 listening，麦克风会一直往空通道推流，
+        // 表现为“聆听中但说话没反应”。这里统一退回 idle，等自动重连。
+        Schedule([this]() {
+            if (device_state_ != kDeviceStateListening &&
+                device_state_ != kDeviceStateSpeaking) {
+                return;
+            }
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetChatMessage("system", "");
+            abort_suppress_until_us_ = 0;
+            aborted_ = false;
+            SetDeviceState(kDeviceStateIdle);
+        });
+    });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (aborted_) {
             return;
