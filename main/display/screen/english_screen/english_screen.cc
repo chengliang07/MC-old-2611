@@ -38,8 +38,10 @@ constexpr uint32_t kColorCardPressed = 0x24314D;
 constexpr uint32_t kColorAccent = 0x60A5FA;
 constexpr uint32_t kColorSuccess = 0x34D399;
 constexpr uint32_t kColorWarning = 0xFBBF24;
+constexpr uint32_t kColorDanger = 0xF87171;
 constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
+constexpr uint32_t kColorChoice = 0xE2E8F0;
 
 enum class RequestKind : uint8_t {
     Tasks,
@@ -82,6 +84,9 @@ std::string s_current_task_id;
 size_t s_current_index = 0;
 uint8_t s_stage = 0;
 bool s_in_review = false;
+bool s_choice_locked = false;
+int s_choice_correct = -1;
+lv_obj_t* s_choice_buttons[4] = {};
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
@@ -109,6 +114,9 @@ void ResetContentRefs() {
     s_ui.stage_caption = nullptr;
     s_ui.card = nullptr;
     s_ui.card_label = nullptr;
+    s_choice_locked = false;
+    s_choice_correct = -1;
+    std::memset(s_choice_buttons, 0, sizeof(s_choice_buttons));
 }
 
 lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
@@ -133,6 +141,35 @@ lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
     lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_hex(0x0B1020),
                                 LV_PART_MAIN);
+    lv_obj_center(label);
+    return button;
+}
+
+lv_obj_t* CreateChoiceButton(lv_obj_t* parent, int32_t x, int32_t y,
+                             int32_t width, int32_t height, const char* text,
+                             lv_event_cb_t callback, uintptr_t index) {
+    lv_obj_t* button = lv_button_create(parent);
+    lv_obj_set_size(button, width, height);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_style_radius(button, 20, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(kColorChoice),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(kColorAccent),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
+    screen_swipe_back_ignore(button, true);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(index));
+
+    lv_obj_t* label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_width(label, width - 28);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x0B1020),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_center(label);
     return button;
 }
@@ -163,6 +200,7 @@ void ShowCenteredMessage(const char* text, bool show_back_button,
 void OnBackToListClicked(lv_event_t* /*event*/);
 void OnTaskClicked(lv_event_t* event);
 void OnCardClicked(lv_event_t* /*event*/);
+void OnChoiceClicked(lv_event_t* event);
 void OnRememberedClicked(lv_event_t* /*event*/);
 void OnForgottenClicked(lv_event_t* /*event*/);
 void StartTasksWorker();
@@ -170,6 +208,7 @@ void StartReviewWorker(const std::string& task_id);
 void StartSubmitWorker(const std::string& result);
 void BuildTaskList();
 void BuildReview();
+void BuildChoice();
 
 void ShowCenteredMessage(const char* text, bool show_back_button,
                          bool compact) {
@@ -307,6 +346,13 @@ void BuildReview() {
         ShowCenteredMessage(I18n::T("暂无复习短句"), true);
         return;
     }
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (entry.options.size() >= 2 && entry.options.size() <= 4 &&
+        entry.correct_index >= 0 &&
+        entry.correct_index < static_cast<int>(entry.options.size())) {
+        BuildChoice();
+        return;
+    }
 
     s_ui.stage_caption = lv_label_create(s_ui.content);
     lv_obj_set_style_text_font(s_ui.stage_caption, &font_puhui_20_4,
@@ -367,6 +413,76 @@ void BuildReview() {
     UpdateCard();
 }
 
+void BuildChoice() {
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    s_choice_locked = false;
+    s_choice_correct = entry.correct_index;
+
+    s_ui.stage_caption = lv_label_create(s_ui.content);
+    lv_label_set_text(s_ui.stage_caption, I18n::T("选出正确的中文意思"));
+    lv_obj_set_style_text_font(s_ui.stage_caption, &font_puhui_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_ui.stage_caption,
+                                lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_align(s_ui.stage_caption, LV_ALIGN_TOP_LEFT, 16, 8);
+    screen_make_input_passive(s_ui.stage_caption);
+
+    s_ui.progress = lv_label_create(s_ui.content);
+    lv_obj_set_style_text_font(s_ui.progress, &font_puhui_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_ui.progress,
+                                lv_color_hex(kColorSubtle), LV_PART_MAIN);
+    lv_obj_align(s_ui.progress, LV_ALIGN_TOP_RIGHT, -16, 8);
+    screen_make_input_passive(s_ui.progress);
+    char progress[32];
+    std::snprintf(progress, sizeof(progress), "%u / %u",
+                  static_cast<unsigned>(s_current_index + 1),
+                  static_cast<unsigned>(s_review.entries.size()));
+    lv_label_set_text(s_ui.progress, progress);
+
+    s_ui.card = lv_obj_create(s_ui.content);
+    lv_obj_set_pos(s_ui.card, 16, 52);
+    lv_obj_set_size(s_ui.card, kContentWidth - 32, 132);
+    lv_obj_set_style_radius(s_ui.card, 26, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_ui.card, lv_color_hex(kColorCard),
+                              LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_ui.card, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_ui.card, 0, LV_PART_MAIN);
+
+    s_ui.card_label = lv_label_create(s_ui.card);
+    lv_obj_set_width(s_ui.card_label, kContentWidth - 96);
+    lv_label_set_long_mode(s_ui.card_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_ui.card_label, entry.term.c_str());
+    lv_obj_set_style_text_font(s_ui.card_label, &font_puhui_30_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_ui.card_label,
+                                lv_color_hex(kColorText), LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_ui.card_label, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_align(s_ui.card_label, LV_ALIGN_CENTER, 0,
+                 entry.phonetic.empty() ? 0 : -16);
+    screen_make_input_passive(s_ui.card_label);
+
+    if (!entry.phonetic.empty()) {
+        lv_obj_t* phonetic = lv_label_create(s_ui.card);
+        lv_label_set_text(phonetic, entry.phonetic.c_str());
+        lv_obj_set_style_text_font(phonetic, &font_puhui_20_4,
+                                   LV_PART_MAIN);
+        lv_obj_set_style_text_color(phonetic, lv_color_hex(kColorSubtle),
+                                    LV_PART_MAIN);
+        lv_obj_align(phonetic, LV_ALIGN_CENTER, 0, 38);
+        screen_make_input_passive(phonetic);
+    }
+
+    for (size_t i = 0; i < entry.options.size(); ++i) {
+        const int32_t x = static_cast<int32_t>(16 + (i % 2) * 328);
+        const int32_t y = static_cast<int32_t>(200 + (i / 2) * 112);
+        s_choice_buttons[i] = CreateChoiceButton(
+            s_ui.content, x, y, 312, 92, entry.options[i].c_str(),
+            OnChoiceClicked, i);
+    }
+}
+
 void BuildComplete() {
     s_in_review = false;
     ShowCenteredMessage(
@@ -384,6 +500,9 @@ void PostRequestResult(RequestResult* result) {
                 }
                 s_busy.store(false, std::memory_order_release);
                 if (!resolved->error.empty()) {
+                    if (resolved->kind == RequestKind::Result) {
+                        s_choice_locked = false;
+                    }
                     SetStatus(resolved->error.c_str());
                     return;
                 }
@@ -563,6 +682,41 @@ void OnTaskClicked(lv_event_t* event) {
 void OnCardClicked(lv_event_t* /*event*/) {
     s_stage = (s_stage + 1) % 3;
     UpdateCard();
+}
+
+void OnChoiceClicked(lv_event_t* event) {
+    if (s_choice_locked || s_current_index >= s_review.entries.size()) {
+        return;
+    }
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (s_choice_correct < 0 || s_choice_correct >= 4 ||
+        s_choice_correct >= static_cast<int>(entry.options.size())) {
+        return;
+    }
+    const int selected = static_cast<int>(reinterpret_cast<uintptr_t>(
+        lv_event_get_user_data(event)));
+    if (selected < 0 || selected >= static_cast<int>(entry.options.size())) {
+        return;
+    }
+
+    s_choice_locked = true;
+    lv_obj_t* selected_button = lv_event_get_target(event);
+    lv_obj_t* correct_button =
+        s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
+    if (selected == s_choice_correct) {
+        lv_obj_set_style_bg_color(selected_button,
+                                  lv_color_hex(kColorSuccess), LV_PART_MAIN);
+        StartSubmitWorker("remembered");
+    } else {
+        lv_obj_set_style_bg_color(selected_button,
+                                  lv_color_hex(kColorDanger), LV_PART_MAIN);
+        if (correct_button != nullptr) {
+            lv_obj_set_style_bg_color(correct_button,
+                                      lv_color_hex(kColorSuccess),
+                                      LV_PART_MAIN);
+        }
+        StartSubmitWorker("forgotten");
+    }
 }
 
 void OnBackToListClicked(lv_event_t* /*event*/) {

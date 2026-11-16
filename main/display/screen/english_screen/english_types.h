@@ -18,6 +18,8 @@ struct EnglishEntry {
     std::string meaning;
     std::string phrase;
     std::string example;
+    std::vector<std::string> options;
+    int correct_index = -1;
 };
 
 struct EnglishReview {

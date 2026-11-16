@@ -220,6 +220,33 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
         entry.meaning = JsonString(item, "meaning");
         entry.phrase = JsonString(item, "phrase");
         entry.example = JsonString(item, "example");
+        const cJSON* options = cJSON_GetObjectItem(item, "options");
+        const cJSON* option = nullptr;
+        cJSON_ArrayForEach(option, options) {
+            if (cJSON_IsString(option) && option->valuestring != nullptr &&
+                option->valuestring[0] != '\0') {
+                entry.options.emplace_back(option->valuestring);
+            }
+        }
+        const cJSON* correct_index =
+            cJSON_GetObjectItem(item, "correct_index");
+        if (!cJSON_IsNumber(correct_index)) {
+            correct_index = cJSON_GetObjectItem(item, "answer_index");
+        }
+        entry.correct_index =
+            cJSON_IsNumber(correct_index) ? correct_index->valueint : -1;
+        if (entry.correct_index >= 0 && entry.correct_index >=
+                                          static_cast<int>(entry.options.size())) {
+            entry.correct_index = -1;
+        }
+        if (entry.correct_index < 0 && !entry.meaning.empty()) {
+            for (size_t i = 0; i < entry.options.size(); ++i) {
+                if (entry.options[i] == entry.meaning) {
+                    entry.correct_index = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
         if (!entry.word_id.empty()) {
             review.entries.push_back(std::move(entry));
         }
