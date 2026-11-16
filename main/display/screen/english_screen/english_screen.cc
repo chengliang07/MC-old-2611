@@ -16,6 +16,7 @@
 #include "english_types.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include <font_awesome.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
@@ -481,7 +482,9 @@ void BuildChoice() {
         screen_make_input_passive(phonetic);
     }
 
-    CreateButton(s_ui.card, 526, 38, 92, 56, I18n::T("发音"),
+    const std::string pronounce_label =
+        std::string(FONT_AWESOME_VOLUME_HIGH) + " " + I18n::T("发音");
+    CreateButton(s_ui.card, 526, 38, 92, 56, pronounce_label.c_str(),
                  kColorAccent, OnPronounceClicked);
 
     for (size_t i = 0; i < entry.options.size(); ++i) {
