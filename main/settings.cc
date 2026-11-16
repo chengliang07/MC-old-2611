@@ -101,8 +101,9 @@ Settings::~Settings() {
 
 nvs_handle_t Settings::Handle() {
     if (nvs_handle_ == 0) {
-        nvs_open(ns_.c_str(), read_write_ ? NVS_READWRITE : NVS_READONLY,
-                 &nvs_handle_);
+        // 所有读取都走只读句柄。即使调用方构造的是写入型 Settings，
+        // 也不能因为一次 Get* 就同步 nvs_open(READWRITE) 写 Flash。
+        nvs_open(ns_.c_str(), NVS_READONLY, &nvs_handle_);
     }
     return nvs_handle_;
 }

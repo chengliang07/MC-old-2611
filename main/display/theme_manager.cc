@@ -14,21 +14,11 @@ constexpr const char* kKeyThemeId = "theme_id";
 }  // namespace
 
 int GetCurrentThemeId() {
-    // 只读打开：这个函数在 LVGL 线程调用，READWRITE 的 nvs_open 会同步写
-    // Flash，栈在 PSRAM 时会触发 cache 断言并重启。
+    // 启动/重建主屏阶段只读 NVS，禁止在 LVGL 线程写 Flash。
     Settings reader(kSettingsNs, false);
-    const bool migrated = reader.GetBool("theme_default_v2", false);
     int id = reader.GetInt(kKeyThemeId, kDefaultThemeId);
     if (id < kMinThemeId || id > kMaxThemeId) {
         id = kDefaultThemeId;
-    }
-    // 一次性迁移：默认主题从 1 调整为 2，老设备也要生效一次。
-    // 写入交给 NVS 专用任务，调用线程不碰 Flash。
-    if (!migrated) {
-        Settings writer(kSettingsNs, true);
-        writer.SetInt(kKeyThemeId, kDefaultThemeId);
-        writer.SetBool("theme_default_v2", true);
-        return kDefaultThemeId;
     }
     return id;
 }
