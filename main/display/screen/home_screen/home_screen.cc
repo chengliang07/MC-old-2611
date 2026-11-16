@@ -1160,69 +1160,47 @@ lv_obj_t* CreateAppCellSkeleton(lv_obj_t* cell) {
 }
 
 lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
-    // 宠物暂无主题 spng 资源。这里用与其它图标一致的圆角方块底 + 白脸造型，
-    // 保证首页图标风格统一（不再是一个“蛋”）。
+    // 宠物暂无主题 spng 资源。用与一丢英语（music）、一丢播客（radio）
+    // 相同的蓝紫渐变圆角方块底，只把中心图形换成宠物爪印。
     lv_obj_t* icon = lv_obj_create(cell);
     lv_obj_remove_style_all(icon);
     lv_obj_set_size(icon, kIconSize, kIconSize);
     lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_radius(icon, 28, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(icon, lv_color_hex(0x7DD3FC), LV_PART_MAIN);
-    lv_obj_set_style_bg_grad_color(icon, lv_color_hex(0x8B5CF6),
+    lv_obj_set_style_bg_color(icon, lv_color_hex(0x38BDF8), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(icon, lv_color_hex(0x6366F1),
                                    LV_PART_MAIN);
     lv_obj_set_style_bg_grad_dir(icon, LV_GRAD_DIR_VER, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(icon, 3, LV_PART_MAIN);
-    lv_obj_set_style_border_color(icon, lv_color_hex(0xC7D2FE),
+    lv_obj_set_style_border_color(icon, lv_color_hex(0xBFDBFE),
                                   LV_PART_MAIN);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 两只耳朵
-    const int ear_x[2] = {-20, 20};
-    for (int x : ear_x) {
-        lv_obj_t* ear = lv_obj_create(icon);
-        lv_obj_remove_style_all(ear);
-        lv_obj_set_size(ear, 26, 26);
-        lv_obj_align(ear, LV_ALIGN_CENTER, x, -22);
-        lv_obj_set_style_radius(ear, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(ear, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(ear, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_remove_flag(ear, LV_OBJ_FLAG_CLICKABLE);
+    // 白色爪印：大掌垫 + 四个小趾垫。
+    lv_obj_t* pad = lv_obj_create(icon);
+    lv_obj_remove_style_all(pad);
+    lv_obj_set_size(pad, 52, 42);
+    lv_obj_align(pad, LV_ALIGN_CENTER, 0, 14);
+    lv_obj_set_style_radius(pad, 22, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pad, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(pad, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(pad, LV_OBJ_FLAG_CLICKABLE);
+
+    const int toe_x[4] = {-30, -10, 12, 32};
+    const int toe_y[4] = {-22, -34, -34, -22};
+    const int toe_size[4] = {17, 18, 18, 17};
+    for (int i = 0; i < 4; ++i) {
+        lv_obj_t* toe = lv_obj_create(icon);
+        lv_obj_remove_style_all(toe);
+        lv_obj_set_size(toe, toe_size[i], toe_size[i] + 5);
+        lv_obj_align(toe, LV_ALIGN_CENTER, toe_x[i], toe_y[i]);
+        lv_obj_set_style_radius(toe, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(toe, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(toe, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_remove_flag(toe, LV_OBJ_FLAG_CLICKABLE);
     }
-
-    // 脸部
-    lv_obj_t* face = lv_obj_create(icon);
-    lv_obj_remove_style_all(face);
-    lv_obj_set_size(face, 60, 56);
-    lv_obj_align(face, LV_ALIGN_CENTER, 0, 8);
-    lv_obj_set_style_radius(face, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(face, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(face, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(face, LV_OBJ_FLAG_CLICKABLE);
-
-    // 眼睛
-    const int eye_x[2] = {-12, 12};
-    for (int x : eye_x) {
-        lv_obj_t* eye = lv_obj_create(face);
-        lv_obj_remove_style_all(eye);
-        lv_obj_set_size(eye, 8, 8);
-        lv_obj_align(eye, LV_ALIGN_CENTER, x, -6);
-        lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(eye, lv_color_hex(0x1E293B), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_remove_flag(eye, LV_OBJ_FLAG_CLICKABLE);
-    }
-
-    // 嘴
-    lv_obj_t* mouth = lv_obj_create(face);
-    lv_obj_remove_style_all(mouth);
-    lv_obj_set_size(mouth, 18, 6);
-    lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 10);
-    lv_obj_set_style_radius(mouth, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(mouth, lv_color_hex(0x1E293B), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(mouth, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(mouth, LV_OBJ_FLAG_CLICKABLE);
     return icon;
 }
 

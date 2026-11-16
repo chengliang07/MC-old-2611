@@ -21,6 +21,7 @@ constexpr const char* TAG = "EnglishClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
+constexpr const char* kPronunciationBase = "https://dict.youdao.com/dictvoice";
 constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
@@ -302,18 +303,14 @@ bool EnglishClient::SubmitResult(const std::string& task_id,
 std::string EnglishClient::PronunciationUrl(const std::string& text,
                                             std::string& error) {
     error.clear();
-    std::string api_base;
-    std::string device_token;
-    if (!LoadConfig(api_base, device_token, error)) {
-        return "";
-    }
     if (text.empty()) {
         error = "没有可发音的内容";
         return "";
     }
-    return api_base + "/api/device/v1/english/pronounce?text=" +
-           UrlEncode(text);
+    return std::string(kPronunciationBase) + "?audio=" + UrlEncode(text) +
+           "&type=2";
 }
+
 
 void EnglishClient::PrefetchTasksAsync() {
     static std::atomic<bool> started{false};

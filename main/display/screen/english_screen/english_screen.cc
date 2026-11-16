@@ -521,7 +521,7 @@ void BuildChoice() {
     s_ui.card_label = lv_label_create(s_ui.card);
     lv_obj_set_width(s_ui.card_label, kContentWidth - 200);
     lv_label_set_long_mode(s_ui.card_label, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_ui.card_label, entry.term.c_str());
+    lv_label_set_text(s_ui.card_label, entry.phrase.c_str());
     lv_obj_set_style_text_font(s_ui.card_label, &font_puhui_30_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.card_label,
@@ -784,8 +784,10 @@ void OnPronounceClicked(lv_event_t* /*event*/) {
         return;
     }
     std::string error;
-    const std::string url = EnglishClient::PronunciationUrl(
-        s_review.entries[s_current_index].term, error);
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    const std::string pronounce_text =
+        entry.phrase.empty() ? entry.term : entry.phrase;
+    const std::string url = EnglishClient::PronunciationUrl(pronounce_text, error);
     if (url.empty()) {
         SetStatus(error.c_str());
         return;
@@ -979,15 +981,15 @@ lv_obj_t* EnglishScreen::Create(lv_obj_t* return_screen) {
 
     s_ui.status = lv_label_create(screen);
     lv_label_set_text(s_ui.status, I18n::T("正在加载任务..."));
-    lv_obj_set_width(s_ui.status, 640);
+    lv_obj_set_width(s_ui.status, 320);
     lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.status, lv_color_hex(kColorSubtle),
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
+    lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_RIGHT,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 606);
+    lv_obj_align(s_ui.status, LV_ALIGN_TOP_RIGHT, -24, 60);
     screen_make_input_passive(s_ui.status);
 
     s_bound_screen = screen;
