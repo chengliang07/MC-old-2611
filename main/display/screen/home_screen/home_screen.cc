@@ -536,9 +536,6 @@ void LaunchPodcast(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* app = PodcastScreen::Create(old_scr);
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
 }
 
 void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
@@ -546,9 +543,6 @@ void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* app = EnglishScreen::Create(old_scr);
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
 }
 
 void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
@@ -559,9 +553,6 @@ void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
     }
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
-    if (old_scr != nullptr && old_scr != app) {
-        lv_obj_delete_async(old_scr);
-    }
 }
 
 void OpenPodcastFromCurrentAsync(void* /*arg*/) {
