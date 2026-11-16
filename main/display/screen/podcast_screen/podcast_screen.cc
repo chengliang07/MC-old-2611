@@ -71,6 +71,8 @@ PodcastUi s_ui;
 lv_obj_t* s_bound_screen = nullptr;
 lv_obj_t* s_return_screen = nullptr;
 PodcastList s_items;
+// 上次成功拉到的节目列表：再次进入先本地渲染，后台只做刷新。
+PodcastList s_cached_items;
 std::string s_current_title;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_loading{false};
@@ -300,6 +302,7 @@ void ApplyLoadResult(void* data) {
         return;
     }
     s_items = std::move(result->items);
+    s_cached_items = s_items;
     if (s_items.empty()) {
         SetStatusDirect(I18n::T("暂无节目"));
     } else {
@@ -566,6 +569,12 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
     s_ui.stop_btn =
         CreateActionButton(screen, 390, I18n::T("停止"), OnStopClicked);
     UpdateControls(false, false);
+
+    if (!s_cached_items.empty()) {
+        s_items = s_cached_items;
+        RebuildList();
+        SetStatusDirect(I18n::T("正在刷新节目..."));
+    }
 
     s_bound_screen = screen;
     lv_obj_add_event_cb(screen, OnScreenUnloaded, LV_EVENT_SCREEN_UNLOADED,

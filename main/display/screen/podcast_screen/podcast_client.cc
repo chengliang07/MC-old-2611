@@ -20,7 +20,7 @@ constexpr const char* TAG = "PodcastClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyApiBase = "api_base";
 constexpr const char* kKeyDeviceToken = "device_token";
-constexpr int kHttpTimeoutMs = 15000;
+constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
 

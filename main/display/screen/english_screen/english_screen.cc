@@ -74,6 +74,9 @@ EnglishUi s_ui;
 lv_obj_t* s_bound_screen = nullptr;
 lv_obj_t* s_return_screen = nullptr;
 EnglishTaskList s_tasks;
+// 上次成功拉到的任务列表：再次进入时先显示，后台再刷新。
+EnglishTaskList s_cached_tasks;
+bool s_cache_valid = false;
 EnglishReview s_review;
 std::string s_current_task_id;
 size_t s_current_index = 0;
@@ -387,6 +390,8 @@ void PostRequestResult(RequestResult* result) {
                 switch (resolved->kind) {
                     case RequestKind::Tasks:
                         s_tasks = std::move(resolved->tasks);
+                        s_cached_tasks = s_tasks;
+                        s_cache_valid = true;
                         BuildTaskList();
                         SetStatus(s_tasks.empty()
                                       ? I18n::T("还未收到任务")
@@ -734,8 +739,14 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_current_index = 0;
         s_stage = 0;
         s_in_review = false;
-        BuildTaskList();
-        SetStatus(I18n::T("正在加载任务..."));
+        if (s_cache_valid) {
+            s_tasks = s_cached_tasks;
+            BuildTaskList();
+            SetStatus(I18n::T("正在刷新任务..."));
+        } else {
+            BuildTaskList();
+            SetStatus(I18n::T("正在加载任务..."));
+        }
         StartTasksWorker();
     } else {
         ESP_LOGI(TAG, "unload: english_screen");

@@ -17,7 +17,7 @@ constexpr const char* TAG = "EnglishClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
-constexpr int kHttpTimeoutMs = 15000;
+constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
 
