@@ -686,6 +686,7 @@ void StartTasksWorker() {
     auto* context = new RequestResult{};
     context->kind = RequestKind::Tasks;
     if (!BeginRequest(context)) {
+        SetStatus(I18n::T("上一请求还在处理，请稍候"));
         return;
     }
     if (CreateWorkerTask(
@@ -707,6 +708,7 @@ void StartReviewWorker(const std::string& task_id) {
     context->kind = RequestKind::Review;
     context->task_id = task_id;
     if (!BeginRequest(context)) {
+        SetStatus(I18n::T("上一请求还在处理，请稍候"));
         return;
     }
     if (CreateWorkerTask(
