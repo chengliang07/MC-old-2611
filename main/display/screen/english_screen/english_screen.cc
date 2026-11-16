@@ -700,7 +700,8 @@ void OnChoiceClicked(lv_event_t* event) {
     }
 
     s_choice_locked = true;
-    lv_obj_t* selected_button = lv_event_get_target(event);
+    lv_obj_t* selected_button =
+        static_cast<lv_obj_t*>(lv_event_get_target(event));
     lv_obj_t* correct_button =
         s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
     if (selected == s_choice_correct) {
