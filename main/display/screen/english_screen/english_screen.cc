@@ -31,6 +31,7 @@ LV_FONT_DECLARE(font_puhui_30_4);
 namespace {
 
 constexpr const char* TAG = "EnglishScreen";
+constexpr uint32_t kChoiceFeedbackMs = 650;
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kContentX = 24;
 constexpr int32_t kContentY = 100;
@@ -154,6 +155,7 @@ bool s_in_review = false;
 bool s_choice_locked = false;
 int s_choice_correct = -1;
 lv_obj_t* s_choice_buttons[4] = {};
+lv_timer_t* s_choice_feedback_timer = nullptr;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<int64_t> s_busy_since_us{0};
@@ -177,6 +179,25 @@ void SaveReviewProgress() {
     s_history_index = s_current_index;
     s_history_stage = s_stage;
     s_has_history = true;
+}
+
+void CancelChoiceFeedback() {
+    if (s_choice_feedback_timer != nullptr) {
+        lv_timer_delete(s_choice_feedback_timer);
+        s_choice_feedback_timer = nullptr;
+    }
+}
+
+void AdvanceAfterChoiceFeedback() {
+    CancelChoiceFeedback();
+    SetStatus(I18n::T("结果已保存"));
+    if (s_current_index + 1 >= s_review.entries.size()) {
+        BuildComplete();
+        return;
+    }
+    s_current_index++;
+    s_stage = 0;
+    BuildReview();
 }
 
 bool RestoreReviewProgress(const std::string& task_id) {
@@ -224,6 +245,7 @@ void PostSetStatus(const char* text) {
 }
 
 void ResetContentRefs() {
+    CancelChoiceFeedback();
     s_ui.progress = nullptr;
     s_ui.stage_caption = nullptr;
     s_ui.card = nullptr;
@@ -616,6 +638,7 @@ void BuildChoice() {
 }
 
 void BuildComplete() {
+    CancelChoiceFeedback();
     s_in_review = false;
     ShowCenteredMessage(
         I18n::T("本次复习完成\n未掌握的短句已加入成长记录"), true);
@@ -889,15 +912,14 @@ void OnChoiceClicked(lv_event_t* event) {
         }
         StartSubmitWorker("forgotten");
     }
-    if (was_last) {
-        SetStatus(I18n::T("结果已保存"));
-        BuildComplete();
-    } else {
-        s_current_index++;
-        s_stage = 0;
-        BuildReview();
-        SetStatus(I18n::T("结果已保存"));
-    }
+    (void)was_last;
+    s_choice_feedback_timer = lv_timer_create(
+        [](lv_timer_t* timer) {
+            lv_timer_delete(timer);
+            AdvanceAfterChoiceFeedback();
+        },
+        kChoiceFeedbackMs, nullptr);
+    lv_timer_set_repeat_count(s_choice_feedback_timer, 1);
 }
 
 void OnBackToListClicked(lv_event_t* /*event*/) {
@@ -967,6 +989,7 @@ void OnScreenUnloaded(lv_event_t* event) {
     if (target != s_bound_screen) {
         return;
     }
+    CancelChoiceFeedback();
     s_bound_screen = nullptr;
     PodcastPlayer::Stop();
     s_screen_active.store(false, std::memory_order_release);

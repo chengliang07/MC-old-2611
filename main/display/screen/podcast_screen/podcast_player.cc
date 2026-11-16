@@ -307,7 +307,7 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
         esp_http_client_config_t cfg = {};
         cfg.url = current.c_str();
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.timeout_ms = quick ? 6000 : 15000;
+        cfg.timeout_ms = quick ? 3000 : 15000;
         // 音频只需小块缓冲；TLS 握手本身占用大量内部 RAM，这里留出余量，
         // 避免和语音会话/TLS 会话叠加时 open 失败（errno 0）。
         cfg.buffer_size = quick ? 4096 : 2048;

@@ -22,6 +22,7 @@ constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
 constexpr const char* kPronunciationBase = "https://dict.youdao.com/dictvoice";
+constexpr const char* kReviewCacheDir = "/sdcard/system";
 constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
@@ -126,6 +127,49 @@ bool GetJson(const std::string& path, const std::string& api_base,
                        status, error);
 }
 
+std::string ReviewCachePath(const std::string& task_id) {
+    return std::string(kReviewCacheDir) + "/english_review_" + task_id +
+           ".json";
+}
+
+void SaveReviewCache(const std::string& task_id, const std::string& body) {
+    if (task_id.empty() || body.empty()) {
+        return;
+    }
+    const std::string path = ReviewCachePath(task_id);
+    const std::string tmp = path + ".tmp";
+    FILE* file = std::fopen(tmp.c_str(), "w");
+    if (file == nullptr) {
+        return;
+    }
+    const size_t written =
+        std::fwrite(body.data(), 1, body.size(), file);
+    std::fclose(file);
+    if (written == body.size()) {
+        std::rename(tmp.c_str(), path.c_str());
+    } else {
+        std::remove(tmp.c_str());
+    }
+}
+
+std::string LoadReviewCache(const std::string& task_id) {
+    if (task_id.empty()) {
+        return "";
+    }
+    FILE* file = std::fopen(ReviewCachePath(task_id).c_str(), "r");
+    if (file == nullptr) {
+        return "";
+    }
+    std::string body;
+    char buffer[1024];
+    size_t read = 0;
+    while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        body.append(buffer, read);
+    }
+    std::fclose(file);
+    return body;
+}
+
 }  // namespace
 
 EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
@@ -202,7 +246,13 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
     const std::string path = "/api/device/v1/english/tasks/" +
                              UrlEncode(task_id) + "/review";
     if (!GetJson(path, api_base, device_token, body, error)) {
-        return {};
+        body = LoadReviewCache(task_id);
+        if (body.empty()) {
+            return {};
+        }
+        error.clear();
+    } else {
+        SaveReviewCache(task_id, body);
     }
 
     cJSON* root = cJSON_Parse(body.c_str());
