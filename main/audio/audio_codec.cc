@@ -27,8 +27,15 @@ bool AudioCodec::InputData(std::vector<int16_t>& data) {
 }
 
 void AudioCodec::Start() {
-    Settings settings("audio", false);
+    Settings settings("audio", true);
     output_volume_ = settings.GetInt("output_volume", output_volume_);
+    // 2.0.113 起默认音量调整为 45%：老设备 NVS 里还存着旧默认值，
+    // 这里做一次性迁移，之后再改音量就以用户设置为准。
+    if (!settings.GetBool("default_volume_v2", false)) {
+        output_volume_ = 45;
+        settings.SetInt("output_volume", output_volume_);
+        settings.SetBool("default_volume_v2", true);
+    }
     if (output_volume_ <= 0) {
         ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (10)", output_volume_);
         output_volume_ = 10;

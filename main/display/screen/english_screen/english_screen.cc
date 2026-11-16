@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@
 #include "english_types.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include <font_awesome.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -82,6 +84,68 @@ EnglishTaskList s_tasks;
 // 上次成功拉到的任务列表：再次进入时先显示，后台再刷新。
 EnglishTaskList s_cached_tasks;
 bool s_cache_valid = false;
+
+constexpr const char* kTasksCachePath = "/sdcard/system/english_tasks.txt";
+
+void SaveTasksCache() {
+    FILE* file = std::fopen(kTasksCachePath, "w");
+    if (file == nullptr) {
+        return;
+    }
+    for (const auto& task : s_tasks) {
+        std::fprintf(file, "%s|%s|%s|%d|%d\n", task.id.c_str(),
+                     task.task_date.c_str(), task.status.c_str(),
+                     task.phrase_count, task.can_review ? 1 : 0);
+    }
+    std::fclose(file);
+}
+
+// 列表写入 SD 后，冷启动首次进入也能先显示上次的任务。
+void LoadTasksCache() {
+    FILE* file = std::fopen(kTasksCachePath, "r");
+    if (file == nullptr) {
+        return;
+    }
+    EnglishTaskList tasks;
+    char line[512];
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        std::string text(line);
+        while (!text.empty() &&
+               (text.back() == '\n' || text.back() == '\r')) {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        std::string fields[5];
+        size_t field = 0;
+        size_t start = 0;
+        for (size_t i = 0; i <= text.size() && field < 5; ++i) {
+            if (i == text.size() || text[i] == '|') {
+                if (field < 5) {
+                    fields[field] = text.substr(start, i - start);
+                    ++field;
+                }
+                start = i + 1;
+            }
+        }
+        if (field < 5 || fields[0].empty()) {
+            continue;
+        }
+        EnglishTask task;
+        task.id = fields[0];
+        task.task_date = fields[1];
+        task.status = fields[2];
+        task.phrase_count = std::atoi(fields[3].c_str());
+        task.can_review = fields[4] == "1";
+        tasks.push_back(std::move(task));
+    }
+    std::fclose(file);
+    if (!tasks.empty()) {
+        s_cached_tasks = std::move(tasks);
+        s_cache_valid = true;
+    }
+}
 EnglishReview s_review;
 std::string s_current_task_id;
 size_t s_current_index = 0;
@@ -92,6 +156,7 @@ int s_choice_correct = -1;
 lv_obj_t* s_choice_buttons[4] = {};
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
+std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 
@@ -509,6 +574,11 @@ void PostRequestResult(RequestResult* result) {
                 std::unique_ptr<RequestResult> resolved(
                     static_cast<RequestResult*>(data));
                 if (!IsCurrentRequest(*resolved)) {
+                    // 同一页面里被判过期的请求也要交还 busy，
+                    // 否则后续刷新会一直被拒，永远停在“正在刷新任务”。
+                    if (resolved->session == CurrentSession()) {
+                        s_busy.store(false, std::memory_order_release);
+                    }
                     return;
                 }
                 s_busy.store(false, std::memory_order_release);
@@ -524,6 +594,7 @@ void PostRequestResult(RequestResult* result) {
                         s_tasks = std::move(resolved->tasks);
                         s_cached_tasks = s_tasks;
                         s_cache_valid = true;
+                        SaveTasksCache();
                         BuildTaskList();
                         SetStatus(s_tasks.empty()
                                       ? I18n::T("还未收到任务")
@@ -565,9 +636,18 @@ void PostRequestResult(RequestResult* result) {
 bool BeginRequest(RequestResult*& context) {
     bool expected = false;
     if (!s_busy.compare_exchange_strong(expected, true)) {
-        delete context;
-        return false;
+        const int64_t since =
+            s_busy_since_us.load(std::memory_order_relaxed);
+        // 看门狗：请求卡死超过 15 秒后允许新的请求接管，
+        // 避免网络异常时页面永久停在加载中。
+        if (since != 0 &&
+            esp_timer_get_time() - since < 15LL * 1000 * 1000) {
+            delete context;
+            return false;
+        }
+        s_busy.store(true, std::memory_order_release);
     }
+    s_busy_since_us.store(esp_timer_get_time(), std::memory_order_relaxed);
     context->session = CurrentSession();
     context->generation =
         s_request_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -836,7 +916,7 @@ void OnScreenUnloaded(lv_event_t* event) {
 
 void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* back = lv_button_create(screen);
-    lv_obj_set_size(back, 58, 58);
+    lv_obj_set_size(back, 72, 72);
     lv_obj_set_pos(back, 22, 14);
     lv_obj_set_style_radius(back, 18, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x1B2740),
@@ -929,6 +1009,9 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_current_index = 0;
         s_stage = 0;
         s_in_review = false;
+        if (!s_cache_valid) {
+            LoadTasksCache();
+        }
         if (s_cache_valid) {
             s_tasks = s_cached_tasks;
             BuildTaskList();

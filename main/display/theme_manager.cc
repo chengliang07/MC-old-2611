@@ -14,7 +14,12 @@ constexpr const char* kKeyThemeId = "theme_id";
 }  // namespace
 
 int GetCurrentThemeId() {
-    Settings s(kSettingsNs, false);
+    Settings s(kSettingsNs, true);
+    // 一次性迁移：默认主题从 1 调整为 2，老设备也要生效一次。
+    if (!s.GetBool("theme_default_v2", false)) {
+        s.SetInt(kKeyThemeId, kDefaultThemeId);
+        s.SetBool("theme_default_v2", true);
+    }
     int id = s.GetInt(kKeyThemeId, kDefaultThemeId);
     if (id < kMinThemeId || id > kMaxThemeId) {
         id = kDefaultThemeId;

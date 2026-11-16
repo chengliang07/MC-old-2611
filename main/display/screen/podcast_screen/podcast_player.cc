@@ -14,6 +14,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "esp_gmf_io_http.h"
 #include "esp_gmf_element.h"
 #include "esp_gmf_obj.h"
@@ -39,6 +40,8 @@ constexpr int kOutputSampleRate = 16000;
 struct PlayArg {
     uint32_t generation = 0;
     std::string url;
+    int64_t range_bytes = 0;
+    int64_t base_ms = 0;
 };
 
 std::mutex s_player_mutex;
@@ -53,7 +56,53 @@ std::atomic<uint32_t> s_output_generation{0};
 PodcastPlayerEventCallback s_event_cb = nullptr;
 void* s_event_ctx = nullptr;
 std::vector<int16_t> s_pcm_buf;
+std::vector<int16_t> s_pcm_out;
 bool s_media_lib_ready = false;
+
+// ---- 播放进度 / 倍速 -------------------------------------------------------
+// 位置用“基准毫秒 + 本次连续播放时长 × 倍速”估算，不依赖解码器。
+std::atomic<int64_t> s_base_ms{0};
+std::atomic<int64_t> s_clock_us{0};
+std::atomic<int> s_speed_q1000{1000};
+std::atomic<int> s_duration_sec{0};
+std::atomic<int64_t> s_total_bytes{0};
+std::string s_current_url;
+
+int64_t ClampPositionMs(int64_t ms) {
+    const int duration = s_duration_sec.load(std::memory_order_relaxed);
+    if (duration > 0 && ms > static_cast<int64_t>(duration) * 1000) {
+        return static_cast<int64_t>(duration) * 1000;
+    }
+    if (ms < 0) {
+        return 0;
+    }
+    return ms;
+}
+
+int64_t CurrentPositionMs() {
+    int64_t ms = s_base_ms.load(std::memory_order_relaxed);
+    const int64_t clock = s_clock_us.load(std::memory_order_relaxed);
+    if (clock != 0) {
+        const int64_t elapsed_us = esp_timer_get_time() - clock;
+        const int q = s_speed_q1000.load(std::memory_order_relaxed);
+        ms += elapsed_us * q / 1000 / 1000;
+    }
+    return ClampPositionMs(ms);
+}
+
+void PausePositionClock() {
+    if (s_clock_us.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    const int64_t ms = CurrentPositionMs();
+    s_clock_us.store(0, std::memory_order_release);
+    s_base_ms.store(ms, std::memory_order_relaxed);
+}
+
+void ResetPositionClock(int64_t base_ms) {
+    s_base_ms.store(base_ms, std::memory_order_relaxed);
+    s_clock_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+}
 
 void Emit(PodcastPlayerEvent event, const char* detail) {
     PodcastPlayerEventCallback callback = nullptr;
@@ -152,6 +201,7 @@ struct RingBlock {
 
 struct StreamState {
     std::string url;
+    int64_t range_start = 0;
     std::string error;
     std::atomic<bool> stop{false};
     std::atomic<bool> ended{false};
@@ -382,7 +432,8 @@ void PodcastFetchTask(void* arg) {
     esp_http_client_handle_t client = nullptr;
     int64_t remaining = -1;
     std::string error;
-    if (!OpenAudioStream(state->url, client, error, 0, &remaining)) {
+    if (!OpenAudioStream(state->url, client, error, state->range_start,
+                         &remaining)) {
         state->error = error;
         state->ended.store(true);
         xSemaphoreGive(state->opened);
@@ -390,11 +441,15 @@ void PodcastFetchTask(void* arg) {
         vTaskDelete(nullptr);
         return;
     }
+    if (remaining > 0) {
+        s_total_bytes.store(state->range_start + remaining,
+                            std::memory_order_relaxed);
+    }
     state->client.store(client, std::memory_order_release);
     state->open_ok.store(true);
     xSemaphoreGive(state->opened);
 
-    int64_t fetched = 0;
+    int64_t fetched = state->range_start;
     int resumes = 0;
     while (!state->stop.load(std::memory_order_relaxed)) {
         uint16_t index = 0;
@@ -548,7 +603,32 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
         s_pcm_buf.assign(pcm, pcm + frames);
     }
 
-    codec->OutputData(s_pcm_buf);
+    const int speed_q = s_speed_q1000.load(std::memory_order_relaxed);
+    if (speed_q != 1000 && !s_pcm_buf.empty()) {
+        // 倍速：按比例重采样。0.5x 变慢变低沉，1.5x 变快变尖，
+        // 首版先保证可听可控，后续再补保持音调的时间伸缩。
+        const double ratio = static_cast<double>(speed_q) / 1000.0;
+        const size_t out_count = static_cast<size_t>(
+            static_cast<double>(s_pcm_buf.size()) / ratio);
+        if (out_count > 0) {
+            s_pcm_out.resize(out_count);
+            double pos = 0.0;
+            for (size_t i = 0; i < out_count; ++i) {
+                const size_t index = static_cast<size_t>(pos);
+                const double frac = pos - static_cast<double>(index);
+                const int16_t a = s_pcm_buf[index];
+                const int16_t b =
+                    index + 1 < s_pcm_buf.size() ? s_pcm_buf[index + 1] : a;
+                s_pcm_out[i] = static_cast<int16_t>(
+                    static_cast<double>(a) +
+                    (static_cast<double>(b) - static_cast<double>(a)) * frac);
+                pos += ratio;
+            }
+            codec->OutputData(s_pcm_out);
+        }
+    } else {
+        codec->OutputData(s_pcm_buf);
+    }
     if (!s_reported_playing.exchange(true, std::memory_order_acq_rel)) {
         Emit(PodcastPlayerEvent::Playing, nullptr);
     }
@@ -618,10 +698,13 @@ void PodcastPlayTask(void* arg) {
     auto* play_arg = static_cast<PlayArg*>(arg);
     const uint32_t generation = play_arg->generation;
     const std::string url = play_arg->url;
+    const int64_t range_bytes = play_arg->range_bytes;
+    const int64_t base_ms = play_arg->base_ms;
     delete play_arg;
 
     auto* state = new StreamState();
     state->url = url;
+    state->range_start = range_bytes;
     state->opened = xSemaphoreCreateBinary();
 
     auto is_current = [generation]() {
@@ -747,6 +830,7 @@ void PodcastPlayTask(void* arg) {
         codec->EnableOutput(true);
         s_output_generation.store(generation, std::memory_order_relaxed);
         s_output_enabled.store(true, std::memory_order_release);
+        ResetPositionClock(base_ms);
 
         ESP_LOGI(TAG, "start MP3 playback");
         const esp_gmf_err_t result =
@@ -794,7 +878,8 @@ void PodcastPlayTask(void* arg) {
 
 }  // namespace
 
-bool PodcastPlayer::Start(const std::string& url, std::string& error) {
+static bool StartInternal(const std::string& url, std::string& error,
+                          int64_t range_bytes, int64_t base_ms) {
     error.clear();
     if (url.empty()) {
         error = "播放地址为空";
@@ -820,6 +905,14 @@ bool PodcastPlayer::Start(const std::string& url, std::string& error) {
         auto* arg = new PlayArg{};
         arg->generation = generation;
         arg->url = url;
+        arg->range_bytes = range_bytes;
+        arg->base_ms = base_ms;
+        s_current_url = url;
+        if (range_bytes == 0) {
+            s_total_bytes.store(0, std::memory_order_relaxed);
+        }
+        s_base_ms.store(base_ms, std::memory_order_relaxed);
+        s_clock_us.store(0, std::memory_order_relaxed);
         if (xTaskCreate(PodcastPlayTask, "podcast_play", 8192, arg, 5,
                         &s_play_task) != pdPASS) {
             delete arg;
@@ -837,7 +930,73 @@ bool PodcastPlayer::Start(const std::string& url, std::string& error) {
         esp_audio_simple_player_stop(old_player);
     }
     ReleaseStreamState(old_stream);
+    if (create_failed) {
+        error = "创建播放任务失败";
+    }
     return !create_failed;
+}
+
+bool PodcastPlayer::Start(const std::string& url, std::string& error) {
+    return StartInternal(url, error, 0, 0);
+}
+
+bool PodcastPlayer::Seek(int seconds, std::string& error) {
+    error.clear();
+    const int duration = s_duration_sec.load(std::memory_order_relaxed);
+    const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
+    std::string url;
+    {
+        std::lock_guard<std::mutex> lock(s_player_mutex);
+        url = s_current_url;
+    }
+    if (url.empty() || duration <= 0 || total <= 0) {
+        error = "暂不支持拖动";
+        return false;
+    }
+    if (seconds < 0) {
+        seconds = 0;
+    }
+    if (seconds >= duration) {
+        Stop();
+        return true;
+    }
+    const int64_t offset = total * seconds / duration;
+    return StartInternal(url, error, offset,
+                         static_cast<int64_t>(seconds) * 1000);
+}
+
+void PodcastPlayer::SetDuration(int seconds) {
+    s_duration_sec.store(seconds > 0 ? seconds : 0,
+                         std::memory_order_relaxed);
+}
+
+int PodcastPlayer::GetPositionSeconds() {
+    return static_cast<int>(CurrentPositionMs() / 1000);
+}
+
+int PodcastPlayer::GetDurationSeconds() {
+    return s_duration_sec.load(std::memory_order_relaxed);
+}
+
+void PodcastPlayer::SetSpeed(float speed) {
+    if (speed < 0.5f) {
+        speed = 0.5f;
+    } else if (speed > 1.5f) {
+        speed = 1.5f;
+    }
+    // 先把已播放时长按旧倍速结算，再切换倍速继续计时。
+    const int64_t ms = CurrentPositionMs();
+    const bool running = s_clock_us.load(std::memory_order_acquire) != 0;
+    s_base_ms.store(ms, std::memory_order_relaxed);
+    s_clock_us.store(running ? esp_timer_get_time() : 0,
+                     std::memory_order_relaxed);
+    s_speed_q1000.store(static_cast<int>(speed * 1000.0f + 0.5f),
+                        std::memory_order_relaxed);
+}
+
+float PodcastPlayer::GetSpeed() {
+    return static_cast<float>(s_speed_q1000.load(std::memory_order_relaxed)) /
+           1000.0f;
 }
 
 bool PodcastPlayer::Pause() {
@@ -853,6 +1012,7 @@ bool PodcastPlayer::Pause() {
     if (esp_audio_simple_player_pause(player) != ESP_GMF_ERR_OK) {
         return false;
     }
+    PausePositionClock();
     s_output_enabled.store(false, std::memory_order_release);
     return true;
 }
@@ -870,12 +1030,17 @@ bool PodcastPlayer::Resume() {
     if (esp_audio_simple_player_resume(player) != ESP_GMF_ERR_OK) {
         return false;
     }
+    if (s_clock_us.load(std::memory_order_acquire) == 0) {
+        s_clock_us.store(esp_timer_get_time(), std::memory_order_release);
+    }
     s_output_enabled.store(true, std::memory_order_release);
     return true;
 }
 
 void PodcastPlayer::Stop() {
     StopCurrentPlayback(true);
+    s_clock_us.store(0, std::memory_order_relaxed);
+    s_base_ms.store(0, std::memory_order_relaxed);
 }
 
 void PodcastPlayer::SetEventCallback(PodcastPlayerEventCallback callback,

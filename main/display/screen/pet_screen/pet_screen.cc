@@ -826,7 +826,7 @@ lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
 
 void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* back = lv_button_create(screen);
-    lv_obj_set_size(back, 58, 58);
+    lv_obj_set_size(back, 72, 72);
     lv_obj_set_pos(back, 22, 14);
     lv_obj_set_style_radius(back, 18, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x1B2740),

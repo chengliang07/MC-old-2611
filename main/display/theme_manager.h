@@ -22,7 +22,7 @@ namespace ThemeManager {
 constexpr int kMinThemeId     = 1;
 constexpr int kMaxThemeId     = 4;
 constexpr int kThemeCount     = kMaxThemeId - kMinThemeId + 1;
-constexpr int kDefaultThemeId = 1;
+constexpr int kDefaultThemeId = 2;
 
 // 读取当前主题 id (1 ~ 4)。未配置 / 越界都返回 kDefaultThemeId。
 int GetCurrentThemeId();
