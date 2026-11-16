@@ -680,7 +680,18 @@ void connect_task(void* arg) {
     // 准备：停止扫描 + 断开当前连接，然后写新配置 + connect
     esp_wifi_scan_stop();
     esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 12298 = ESP_ERR_WIFI_WOULD_BLOCK：扫描/上一次连接尚未完全退出时，
+    // esp_wifi_set_config / esp_wifi_connect 会被驱动拒绝。等到没有活动扫描，
+    // 再给 STA 状态机一点时间完成 disconnect，避免删掉旧网络后首次连接失败。
+    for (int i = 0; i < 50; ++i) {
+        wifi_scan_state_t scan_state = WIFI_SCAN_IDLE;
+        if (esp_wifi_get_scan_state(&scan_state) != ESP_OK ||
+            scan_state == WIFI_SCAN_IDLE) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelay(pdMS_TO_TICKS(300));
 
     wifi_config_t wc = {};
     strlcpy(reinterpret_cast<char*>(wc.sta.ssid), ctx->ssid.c_str(), 32);
@@ -703,6 +714,11 @@ void connect_task(void* arg) {
     }
 
     err = esp_wifi_connect();
+    if (err == ESP_ERR_WIFI_WOULD_BLOCK) {
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        err = esp_wifi_connect();
+    }
     if (err != ESP_OK) {
         snprintf(buf, sizeof(buf), I18n::T("esp_wifi_connect 失败 (err=%d)"), err);
         post_status(buf, kColorError);
