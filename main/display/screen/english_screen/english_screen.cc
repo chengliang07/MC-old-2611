@@ -188,18 +188,6 @@ void CancelChoiceFeedback() {
     }
 }
 
-void AdvanceAfterChoiceFeedback() {
-    CancelChoiceFeedback();
-    SetStatus(I18n::T("结果已保存"));
-    if (s_current_index + 1 >= s_review.entries.size()) {
-        BuildComplete();
-        return;
-    }
-    s_current_index++;
-    s_stage = 0;
-    BuildReview();
-}
-
 bool RestoreReviewProgress(const std::string& task_id) {
     if (!s_has_history || s_history_task_id != task_id ||
         s_history_review.entries.empty() ||
@@ -346,6 +334,20 @@ void StartSubmitWorker(const std::string& result);
 void BuildTaskList();
 void BuildReview();
 void BuildChoice();
+void BuildComplete();
+void AdvanceAfterChoiceFeedback();
+
+void AdvanceAfterChoiceFeedback() {
+    CancelChoiceFeedback();
+    SetStatus(I18n::T("结果已保存"));
+    if (s_current_index + 1 >= s_review.entries.size()) {
+        BuildComplete();
+        return;
+    }
+    s_current_index++;
+    s_stage = 0;
+    BuildReview();
+}
 
 void ShowCenteredMessage(const char* text, bool show_back_button,
                          bool compact) {
