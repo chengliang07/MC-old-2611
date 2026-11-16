@@ -7,6 +7,7 @@
 #include <string>
 
 #include "application.h"
+#include "assets/lang_config.h"
 #include "chat_screen/chat_screen.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -46,6 +47,9 @@ struct PetUi {
     lv_obj_t* art = nullptr;
     lv_obj_t* body = nullptr;
     lv_obj_t* bubble = nullptr;
+    lv_obj_t* bubble_card = nullptr;
+    lv_obj_t* stats = nullptr;
+    lv_obj_t* stats_toggle_label = nullptr;
     lv_obj_t* food_value = nullptr;
     lv_obj_t* satiety_value = nullptr;
     lv_obj_t* level_value = nullptr;
@@ -71,12 +75,15 @@ lv_obj_t* s_return_screen = nullptr;
 PetState s_state;
 bool s_has_state = false;
 std::string s_stage;
+int32_t s_body_base_x = 0;
 int32_t s_body_base_y = 0;
-bool s_idle_up = false;
+uint32_t s_last_tap_ms = 0;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
+
+void StartIdleMotion();
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -176,6 +183,9 @@ void BuildPetArt(const char* stage) {
     if (s_ui.art == nullptr) {
         return;
     }
+    if (s_ui.body != nullptr) {
+        lv_anim_delete(s_ui.body, nullptr);
+    }
     lv_obj_clean(s_ui.art);
     s_ui.body = nullptr;
 
@@ -191,26 +201,34 @@ void BuildPetArt(const char* stage) {
 
     if (egg) {
         lv_obj_set_size(group, 200, 230);
-        s_body_base_y = 20;
-        lv_obj_set_pos(group, 180, s_body_base_y);
+        s_body_base_x = 230;
+        s_body_base_y = 64;
+        lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+        lv_obj_set_style_transform_pivot_x(group, 100, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(group, 115, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(group, 480, LV_PART_MAIN);
         DrawEgg(group);
     } else {
         lv_obj_set_size(group, 300, 240);
-        s_body_base_y = 8;
-        lv_obj_set_pos(group, 130, s_body_base_y);
-        DrawChicken(group, stage);
         const int scale = std::strcmp(stage, "adult") == 0
-                              ? 332
-                              : std::strcmp(stage, "teen") == 0 ? 292 : 256;
-        if (scale != 256) {
-            lv_obj_set_style_transform_pivot_x(group, 150, LV_PART_MAIN);
-            lv_obj_set_style_transform_pivot_y(group, 120, LV_PART_MAIN);
-            lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
-        }
+                              ? 400
+                              : std::strcmp(stage, "teen") == 0 ? 360 : 320;
+        s_body_base_x = 180;
+        s_body_base_y = std::strcmp(stage, "adult") == 0
+                            ? 68
+                            : std::strcmp(stage, "teen") == 0 ? 52 : 34;
+        lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+        DrawChicken(group, stage);
+        lv_obj_set_style_transform_pivot_x(group, 150, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(group, 120, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
     }
 
     s_ui.body = group;
     screen_make_input_passive(s_ui.art);
+    if (s_screen_active.load(std::memory_order_relaxed)) {
+        StartIdleMotion();
+    }
 }
 
 void SetStatus(const char* text) {
@@ -288,10 +306,7 @@ const char* MoodText(const PetState& state) {
     if (state.satiety < 30) {
         return I18n::T("肚子咕咕叫，想吃饭");
     }
-    if (state.satiety < 60) {
-        return I18n::T("陪我复习一会儿吧");
-    }
-    return I18n::T("今天也一起学英语吧");
+    return nullptr;
 }
 
 void SetState(const PetState& state) {
@@ -318,8 +333,14 @@ void SetState(const PetState& state) {
         }
         lv_label_set_text(s_ui.level_value, text);
     }
-    if (s_ui.bubble != nullptr) {
-        lv_label_set_text(s_ui.bubble, MoodText(state));
+    if (s_ui.bubble != nullptr && s_ui.bubble_card != nullptr) {
+        const char* mood = MoodText(state);
+        if (mood != nullptr && mood[0] != '\0') {
+            lv_label_set_text(s_ui.bubble, mood);
+            lv_obj_remove_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     if (state.stage != s_stage) {
@@ -334,31 +355,129 @@ void StopIdleTimer() {
         lv_timer_delete(s_ui.idle_timer);
         s_ui.idle_timer = nullptr;
     }
+    if (s_ui.body != nullptr) {
+        lv_anim_delete(s_ui.body, nullptr);
+    }
 }
 
-void OnIdleTick(lv_timer_t* /*timer*/) {
-    if (!s_screen_active.load(std::memory_order_relaxed) ||
-        s_ui.body == nullptr) {
+bool IsEggStage() {
+    return s_stage.empty() || s_stage == "egg";
+}
+
+void AnimSetX(void* var, int32_t value) {
+    lv_obj_set_x(static_cast<lv_obj_t*>(var), s_body_base_x + value);
+}
+
+void AnimSetY(void* var, int32_t value) {
+    lv_obj_set_y(static_cast<lv_obj_t*>(var), s_body_base_y + value);
+}
+
+void AnimSetSpin(void* var, int32_t value) {
+    lv_obj_set_style_transform_rotation(static_cast<lv_obj_t*>(var), value,
+                                        LV_PART_MAIN);
+}
+
+void StartIdleMotion() {
+    lv_obj_t* body = s_ui.body;
+    if (body == nullptr) {
         return;
     }
-    s_idle_up = !s_idle_up;
-    lv_obj_set_y(s_ui.body, s_body_base_y + (s_idle_up ? -4 : 4));
+
+    lv_anim_delete(body, nullptr);
+    lv_obj_set_x(body, s_body_base_x);
+    lv_obj_set_y(body, s_body_base_y);
+    lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
+
+    lv_anim_t anim;
+    if (IsEggStage()) {
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, body);
+        lv_anim_set_exec_cb(&anim, AnimSetSpin);
+        lv_anim_set_values(&anim, -70, 70);
+        lv_anim_set_duration(&anim, 900);
+        lv_anim_set_playback_duration(&anim, 900);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_start(&anim);
+        return;
+    }
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, body);
+    lv_anim_set_exec_cb(&anim, AnimSetX);
+    lv_anim_set_values(&anim, -36, 36);
+    lv_anim_set_duration(&anim, 1100);
+    lv_anim_set_playback_duration(&anim, 1100);
+    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_start(&anim);
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, body);
+    lv_anim_set_exec_cb(&anim, AnimSetY);
+    lv_anim_set_values(&anim, 0, -8);
+    lv_anim_set_duration(&anim, 280);
+    lv_anim_set_playback_duration(&anim, 280);
+    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_start(&anim);
+
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, body);
+    lv_anim_set_exec_cb(&anim, AnimSetSpin);
+    lv_anim_set_values(&anim, -28, 28);
+    lv_anim_set_duration(&anim, 1100);
+    lv_anim_set_playback_duration(&anim, 1100);
+    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_start(&anim);
+}
+
+void RestartIdleAsync(void* arg) {
+    auto* pet = static_cast<lv_obj_t*>(arg);
+    if (pet == s_ui.body && s_screen_active.load(std::memory_order_relaxed)) {
+        StartIdleMotion();
+    }
+}
+
+void PlayPetRoll() {
+    lv_obj_t* body = s_ui.body;
+    if (body == nullptr) {
+        return;
+    }
+    lv_anim_delete(body, nullptr);
+
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, body);
+    lv_anim_set_user_data(&anim, body);
+    lv_anim_set_exec_cb(&anim, AnimSetSpin);
+    lv_anim_set_values(&anim, 0, 3600);
+    lv_anim_set_duration(&anim, IsEggStage() ? 700 : 820);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_set_completed_cb(&anim, [](lv_anim_t* finished) {
+        auto* pet = static_cast<lv_obj_t*>(lv_anim_get_user_data(finished));
+        if (pet == nullptr) {
+            return;
+        }
+        lv_obj_set_style_transform_rotation(pet, 0, LV_PART_MAIN);
+        if (pet == s_ui.body &&
+            s_screen_active.load(std::memory_order_relaxed)) {
+            lv_async_call(RestartIdleAsync, pet);
+        }
+    });
+    lv_anim_start(&anim);
 }
 
 void StartIdleTimer() {
-    if (s_ui.idle_timer != nullptr) {
-        lv_timer_resume(s_ui.idle_timer);
-        return;
-    }
-    s_ui.idle_timer = lv_timer_create(OnIdleTick, 650, nullptr);
-    if (s_ui.idle_timer != nullptr) {
-        lv_timer_set_repeat_count(s_ui.idle_timer, LV_ANIM_REPEAT_INFINITE);
-    }
+    StartIdleMotion();
 }
 
 void OnBackClicked(lv_event_t* /*event*/);
 void OnStudyClicked(lv_event_t* /*event*/);
 void OnActionClicked(lv_event_t* /*event*/);
+void OnPetClicked(lv_event_t* /*event*/);
+void OnStatsClicked(lv_event_t* /*event*/);
 void OnSwipeBack();
 void OnScreenUnloaded(lv_event_t* event);
 void OnScreenDeleted(lv_event_t* event);
@@ -420,58 +539,72 @@ void BuildHeader(lv_obj_t* screen) {
     screen_make_input_passive(title);
 }
 
-void BuildStatCard(lv_obj_t* parent, int32_t x, int32_t y,
-                   const char* caption, lv_obj_t** value_out) {
-    lv_obj_t* card = lv_obj_create(parent);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_pos(card, x, y);
-    lv_obj_set_size(card, 190, 82);
-    lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
-    lv_obj_set_style_border_width(card, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 0, LV_PART_MAIN);
-    lv_obj_remove_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* caption_label = lv_label_create(card);
+void BuildStatRow(lv_obj_t* parent, int32_t y, const char* caption,
+                  lv_obj_t** value_out) {
+    lv_obj_t* caption_label = lv_label_create(parent);
     lv_label_set_text(caption_label, caption);
     lv_obj_set_style_text_font(caption_label, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(caption_label,
                                 lv_color_hex(kColorSubtle), LV_PART_MAIN);
-    lv_obj_align(caption_label, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_align(caption_label, LV_ALIGN_TOP_LEFT, 18, y + 8);
 
-    lv_obj_t* value = lv_label_create(card);
+    lv_obj_t* value = lv_label_create(parent);
     lv_label_set_text(value, "-");
     lv_obj_set_style_text_font(value, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(value, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
-    lv_obj_align(value, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_align(value, LV_ALIGN_TOP_RIGHT, -18, y);
     if (value_out != nullptr) {
         *value_out = value;
     }
-    screen_make_input_passive(card);
+    lv_obj_remove_flag(caption_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(value, LV_OBJ_FLAG_CLICKABLE);
+}
+
+void BuildStatsPanel(lv_obj_t* screen) {
+    lv_obj_t* panel = lv_obj_create(screen);
+    lv_obj_remove_style_all(panel);
+    lv_obj_set_pos(panel, 470, 84);
+    lv_obj_set_size(panel, 230, 202);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(kColorCard), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(panel, 22, LV_PART_MAIN);
+    lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x2A3A5A),
+                                  LV_PART_MAIN);
+    lv_obj_set_style_pad_all(panel, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+
+    BuildStatRow(panel, 14, I18n::T("粮食"), &s_ui.food_value);
+    BuildStatRow(panel, 76, I18n::T("饱腹"), &s_ui.satiety_value);
+    BuildStatRow(panel, 138, I18n::T("等级"), &s_ui.level_value);
+
+    s_ui.stats = panel;
+    screen_make_input_passive(panel);
 }
 
 void BuildContent(lv_obj_t* screen) {
     lv_obj_t* stage = lv_obj_create(screen);
     lv_obj_remove_style_all(stage);
-    lv_obj_set_pos(stage, 60, 96);
-    lv_obj_set_size(stage, 600, 286);
+    lv_obj_set_pos(stage, 20, 84);
+    lv_obj_set_size(stage, 680, 372);
     lv_obj_set_style_bg_color(stage, lv_color_hex(kColorPanel),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(stage, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(stage, 28, LV_PART_MAIN);
     lv_obj_set_style_border_width(stage, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(stage, 0, LV_PART_MAIN);
+    lv_obj_add_flag(stage, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_remove_flag(stage, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(stage, LV_OBJ_FLAG_SCROLLABLE);
 
     s_ui.art = lv_obj_create(stage);
     lv_obj_remove_style_all(s_ui.art);
-    lv_obj_set_pos(s_ui.art, 20, 14);
-    lv_obj_set_size(s_ui.art, 560, 258);
+    lv_obj_set_pos(s_ui.art, 10, 8);
+    lv_obj_set_size(s_ui.art, 660, 352);
     lv_obj_set_style_bg_opa(s_ui.art, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_ui.art, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_ui.art, 0, LV_PART_MAIN);
@@ -479,10 +612,20 @@ void BuildContent(lv_obj_t* screen) {
     lv_obj_remove_flag(s_ui.art, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_ui.art, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* bubble_card = lv_obj_create(screen);
+    lv_obj_t* hit = lv_obj_create(stage);
+    lv_obj_remove_style_all(hit);
+    lv_obj_set_pos(hit, 70, 8);
+    lv_obj_set_size(hit, 540, 356);
+    lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(hit, OnPetClicked, LV_EVENT_CLICKED, nullptr);
+
+    s_ui.bubble_card = lv_obj_create(screen);
+    lv_obj_t* bubble_card = s_ui.bubble_card;
     lv_obj_remove_style_all(bubble_card);
-    lv_obj_set_pos(bubble_card, 60, 396);
-    lv_obj_set_size(bubble_card, 600, 58);
+    lv_obj_set_pos(bubble_card, 60, 464);
+    lv_obj_set_size(bubble_card, 600, 54);
     lv_obj_set_style_bg_color(bubble_card, lv_color_hex(0x1B2740),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bubble_card, LV_OPA_COVER, LV_PART_MAIN);
@@ -491,9 +634,10 @@ void BuildContent(lv_obj_t* screen) {
     lv_obj_set_style_pad_all(bubble_card, 0, LV_PART_MAIN);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(bubble_card, LV_OBJ_FLAG_HIDDEN);
 
     s_ui.bubble = lv_label_create(bubble_card);
-    lv_label_set_text(s_ui.bubble, I18n::T("复习英语，攒够 3 粮就能孵化"));
+    lv_label_set_text(s_ui.bubble, "");
     lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_ui.bubble, 560);
     lv_obj_set_style_text_font(s_ui.bubble, &font_puhui_20_4,
@@ -505,18 +649,18 @@ void BuildContent(lv_obj_t* screen) {
     lv_obj_center(s_ui.bubble);
     screen_make_input_passive(s_ui.bubble);
 
-    BuildStatCard(screen, 30, 472, I18n::T("粮食"), &s_ui.food_value);
-    BuildStatCard(screen, 265, 472, I18n::T("饱腹"), &s_ui.satiety_value);
-    BuildStatCard(screen, 500, 472, I18n::T("等级"), &s_ui.level_value);
+    BuildStatsPanel(screen);
+    CreateButton(screen, 590, 16, 108, 56, I18n::T("属性"), kColorAccent,
+                 OnStatsClicked, &s_ui.stats_toggle_label);
 
     s_ui.action_btn = CreateButton(
-        screen, 40, 578, 310, 70, I18n::T("孵化"), kColorSuccess,
+        screen, 40, 528, 310, 72, I18n::T("孵化"), kColorSuccess,
         OnActionClicked, &s_ui.action_label);
-    CreateButton(screen, 370, 578, 310, 70, I18n::T("去复习"),
+    CreateButton(screen, 370, 528, 310, 72, I18n::T("去复习"),
                  kColorAccent, OnStudyClicked, nullptr);
 
     s_ui.status = lv_label_create(screen);
-    lv_label_set_text(s_ui.status, I18n::T("正在加载宠物..."));
+    lv_label_set_text(s_ui.status, I18n::T("加载中..."));
     lv_obj_set_width(s_ui.status, 640);
     lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
@@ -525,7 +669,7 @@ void BuildContent(lv_obj_t* screen) {
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 664);
+    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 614);
     screen_make_input_passive(s_ui.status);
 }
 
@@ -612,16 +756,7 @@ void PostRequestResult(RequestResult* result) {
                 } else if (resolved->kind == RequestKind::Feed) {
                     SetStatus(I18n::T("好吃！饱腹 +25"));
                 } else {
-                    char text[96];
-                    std::snprintf(text, sizeof(text),
-                                  "%s · Lv.%d · %d/%d XP · %s %d/%d",
-                                  I18n::T("宠物状态已更新"),
-                                  resolved->state.level, resolved->state.xp,
-                                  resolved->state.next_level_xp,
-                                  I18n::T("今日已获得"),
-                                  resolved->state.today_earned,
-                                  resolved->state.daily_cap);
-                    SetStatus(text);
+                    SetStatus("");
                 }
             },
             result) != LV_RESULT_OK) {
@@ -638,7 +773,7 @@ void StartWorker(RequestKind kind) {
     }
 
     if (kind == RequestKind::Load) {
-        SetStatus(I18n::T("正在加载宠物..."));
+        SetStatus(I18n::T("加载中..."));
     } else if (kind == RequestKind::Feed) {
         SetStatus(I18n::T("正在喂食..."));
     } else {
@@ -686,6 +821,32 @@ void OnActionClicked(lv_event_t* /*event*/) {
     }
     if (s_state.food_balance >= 1 && s_state.satiety < 90) {
         StartWorker(RequestKind::Feed);
+    }
+}
+
+void OnPetClicked(lv_event_t* /*event*/) {
+    const uint32_t now = lv_tick_get();
+    if (now - s_last_tap_ms < 400) {
+        return;
+    }
+    s_last_tap_ms = now;
+    Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+    PlayPetRoll();
+}
+
+void OnStatsClicked(lv_event_t* /*event*/) {
+    if (s_ui.stats == nullptr) {
+        return;
+    }
+    const bool show = lv_obj_has_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
+    if (show) {
+        lv_obj_remove_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_ui.stats_toggle_label != nullptr) {
+        lv_label_set_text(s_ui.stats_toggle_label,
+                          show ? I18n::T("收起") : I18n::T("属性"));
     }
 }
 

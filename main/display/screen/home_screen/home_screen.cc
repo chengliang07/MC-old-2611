@@ -1158,46 +1158,46 @@ lv_obj_t* CreateAppCellSkeleton(lv_obj_t* cell) {
 }
 
 lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
-    // 宠物暂无主题 spng 资源，用 LVGL 基础对象画一颗蛋，避免首页出现空白格。
+    // 宠物暂无主题 spng 资源，用 LVGL 基础对象画方形蛋图标，避免首页出现空白格。
     lv_obj_t* icon = lv_obj_create(cell);
     lv_obj_remove_style_all(icon);
     lv_obj_set_size(icon, kIconSize, kIconSize);
     lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_radius(icon, 28, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon, lv_color_hex(0xFFF3C4), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(icon, lv_color_hex(0xFDE68A),
+                                   LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(icon, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon, 3, LV_PART_MAIN);
+    lv_obj_set_style_border_color(icon, lv_color_hex(0xE7C98F),
+                                  LV_PART_MAIN);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* egg = lv_obj_create(icon);
     lv_obj_remove_style_all(egg);
-    lv_obj_set_size(egg, 78, 96);
+    lv_obj_set_size(egg, 58, 74);
     lv_obj_center(egg);
     lv_obj_set_style_radius(egg, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFF7E8), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFFDF5), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(egg, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(egg, 3, LV_PART_MAIN);
+    lv_obj_set_style_border_width(egg, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(egg, lv_color_hex(0xE7C98F), LV_PART_MAIN);
     lv_obj_remove_flag(egg, LV_OBJ_FLAG_CLICKABLE);
 
-    auto add_eye = [egg](int x) {
-        lv_obj_t* eye = lv_obj_create(egg);
-        lv_obj_remove_style_all(eye);
-        lv_obj_set_size(eye, 10, 14);
-        lv_obj_align(eye, LV_ALIGN_CENTER, x, -8);
-        lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(eye, lv_color_hex(0x1F2937), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_remove_flag(eye, LV_OBJ_FLAG_CLICKABLE);
-    };
-    add_eye(-16);
-    add_eye(16);
-
-    lv_obj_t* beak = lv_obj_create(egg);
-    lv_obj_remove_style_all(beak);
-    lv_obj_set_size(beak, 18, 8);
-    lv_obj_align(beak, LV_ALIGN_CENTER, 0, 18);
-    lv_obj_set_style_radius(beak, 4, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(beak, lv_color_hex(0xF59E0B), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(beak, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(beak, LV_OBJ_FLAG_CLICKABLE);
+    const int speckles[3][3] = {{-12, -14, 6}, {10, -2, 5}, {-4, 16, 7}};
+    for (const auto& speckle : speckles) {
+        lv_obj_t* dot = lv_obj_create(egg);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, speckle[2], speckle[2]);
+        lv_obj_align(dot, LV_ALIGN_CENTER, speckle[0], speckle[1]);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0xD6B36A),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    }
     return icon;
 }
 
