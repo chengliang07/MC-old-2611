@@ -946,7 +946,7 @@ constexpr AppEntry kApps[] = {
     // {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
     // {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
     // {"info",           "系统信息", LaunchInfo,          info_lifecycle_cb,          false},
-    // {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
+    {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
     // {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
     // {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
     // 录音本地可用；仅「录音转写」按钮需要联网（见 recording_screen）。
