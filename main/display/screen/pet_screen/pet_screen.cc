@@ -46,6 +46,14 @@ struct PetUi {
     lv_obj_t* screen = nullptr;
     lv_obj_t* art = nullptr;
     lv_obj_t* body = nullptr;
+    lv_obj_t* left_eye = nullptr;
+    lv_obj_t* right_eye = nullptr;
+    lv_obj_t* mouth = nullptr;
+    lv_obj_t* left_brow = nullptr;
+    lv_obj_t* right_brow = nullptr;
+    lv_obj_t* core = nullptr;
+    lv_obj_t* antenna_tip = nullptr;
+    lv_obj_t* mark = nullptr;
     lv_obj_t* bubble = nullptr;
     lv_obj_t* bubble_card = nullptr;
     lv_obj_t* stats = nullptr;
@@ -57,6 +65,16 @@ struct PetUi {
     lv_obj_t* action_label = nullptr;
     lv_obj_t* status = nullptr;
     lv_timer_t* idle_timer = nullptr;
+};
+
+enum class PetMood : uint8_t {
+    Idle,
+    Sleep,
+    Curious,
+    Think,
+    Happy,
+    Celebrate,
+    Listen,
 };
 
 struct RequestResult {
@@ -78,6 +96,17 @@ std::string s_stage;
 int32_t s_body_base_x = 0;
 int32_t s_body_base_y = 0;
 uint32_t s_last_tap_ms = 0;
+uint8_t s_idle_phase = 0;
+PetMood s_mood = PetMood::Idle;
+PetMood s_base_mood = PetMood::Idle;
+int32_t s_eye_cx[2] = {0, 0};
+int32_t s_eye_cy = 0;
+int32_t s_eye_w = 30;
+int32_t s_eye_h = 38;
+int32_t s_mouth_cx = 150;
+int32_t s_mouth_cy = 150;
+int32_t s_brow_cy = 90;
+bool s_has_brows = false;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
@@ -126,57 +155,240 @@ lv_obj_t* CreateText(lv_obj_t* parent, int32_t x, int32_t y,
 }
 
 void DrawEgg(lv_obj_t* group) {
-    CreateBox(group, 40, 20, 120, 170, 0xFFF3C4, 60);
-    CreateBox(group, 65, 43, 18, 14, 0xFFFFFF, 7);
-    CreateText(group, 76, 70, "/", 0x8A6A2F, &font_puhui_20_4);
-    CreateText(group, 92, 96, "\\", 0x8A6A2F, &font_puhui_20_4);
-    CreateText(group, 76, 122, "/", 0x8A6A2F, &font_puhui_20_4);
+    CreateBox(group, 40, 20, 120, 170, 0xFFF7E8, 60);
+    CreateBox(group, 64, 42, 18, 14, 0xFFFFFF, 7);
+    CreateBox(group, 86, 82, 14, 14, 0xBFE8DF, 7);
+    CreateBox(group, 62, 120, 10, 10, 0xBFE8DF, 5);
+    CreateBox(group, 108, 136, 12, 12, 0xFBBF24, 6);
 }
 
-void DrawChicken(lv_obj_t* group, const char* stage) {
+void CenterAt(lv_obj_t* obj, int32_t cx, int32_t cy) {
+    if (obj == nullptr) {
+        return;
+    }
+    lv_obj_align(obj, LV_ALIGN_TOP_LEFT,
+                 cx - lv_obj_get_width(obj) / 2,
+                 cy - lv_obj_get_height(obj) / 2);
+}
+
+// 原创「知识小生命」：圆润短小的软体生物，胸口的知识核心随成长变大。
+void DrawCreature(lv_obj_t* group, const char* stage) {
     const bool adult = std::strcmp(stage, "adult") == 0;
     const bool teen = std::strcmp(stage, "teen") == 0;
 
-    CreateBox(group, 28, 100, 64, 84, 0xFACC15, 32);
-    CreateBox(group, 44, 122, 52, 76, 0xFDE047, 26);
+    int body_x = 80, body_y = 78, body_w = 140, body_h = 132;
+    int eye_gap = 56, eye_w = 28, eye_h = 36, eye_y = 130;
+    int mouth_y = 160, brow_y = 100, brow_w = 24;
+    bool brows = true, arms = false, antenna = false;
+    int core_d = 14, core_y = 190, glow_d = 22;
+    int belly_x = 115, belly_y = 172, belly_w = 70, belly_h = 36;
+    int foot_w = 30, foot_h = 12, foot_y = 204, foot_gap = 56;
+    int arm_w = 0, arm_h = 0, arm_y = 0;
 
-    const int body_x = adult ? 48 : teen ? 58 : 70;
-    const int body_y = adult ? 28 : teen ? 38 : 48;
-    const int body_w = adult ? 204 : teen ? 184 : 160;
-    const int body_h = adult ? 184 : teen ? 166 : 150;
-    CreateBox(group, body_x, body_y, body_w, body_h, 0xFDE047,
+    if (teen) {
+        body_x = 65; body_y = 58; body_w = 170; body_h = 158;
+        eye_gap = 60; eye_w = 30; eye_h = 38; eye_y = 118;
+        mouth_y = 148; brow_y = 92; brow_w = 28; arms = true;
+        core_d = 24; core_y = 194; glow_d = 36;
+        belly_x = 100; belly_y = 168; belly_w = 100; belly_h = 52;
+        foot_w = 34; foot_h = 13; foot_y = 212; foot_gap = 60;
+        arm_w = 30; arm_h = 54; arm_y = 132; antenna = true;
+    } else if (adult) {
+        body_x = 45; body_y = 45; body_w = 210; body_h = 178;
+        eye_gap = 64; eye_w = 32; eye_h = 40; eye_y = 108;
+        mouth_y = 142; brow_y = 82; brow_w = 30; arms = true;
+        core_d = 34; core_y = 194; glow_d = 50;
+        belly_x = 95; belly_y = 168; belly_w = 110; belly_h = 58;
+        foot_w = 40; foot_h = 14; foot_y = 216; foot_gap = 64;
+        arm_w = 34; arm_h = 62; arm_y = 126; antenna = true;
+    }
+
+    const uint32_t body_color = 0x5EC8B0;
+    const uint32_t shade_color = 0x46A893;
+
+    if (arms) {
+        CreateBox(group, body_x - arm_w + 8, arm_y, arm_w, arm_h,
+                  shade_color, arm_w / 2);
+        CreateBox(group, body_x + body_w - 8, arm_y, arm_w, arm_h,
+                  shade_color, arm_w / 2);
+    }
+
+    CreateBox(group, body_x, body_y, body_w, body_h, body_color,
               body_h / 2);
+    CreateBox(group, 150 - foot_gap / 2 - foot_w / 2, foot_y, foot_w,
+              foot_h, shade_color, foot_h / 2);
+    CreateBox(group, 150 + foot_gap / 2 - foot_w / 2, foot_y, foot_w,
+              foot_h, shade_color, foot_h / 2);
 
-    const int wing_y = body_y + (adult ? 58 : teen ? 52 : 48);
-    CreateBox(group, body_x - 24, wing_y, 54, 82, 0xFACC15, 27);
-    CreateBox(group, body_x + body_w - 30, wing_y, 54, 82, 0xFACC15, 27);
+    CreateBox(group, belly_x, belly_y, belly_w, belly_h, 0xFFF7E8,
+              belly_h / 2);
 
-    const int eye_y = body_y + (adult ? 58 : teen ? 52 : 46);
-    const int eye_gap = adult ? 52 : teen ? 48 : 42;
-    const int eye_x = body_x + body_w / 2 - eye_gap / 2 - 7;
-    CreateBox(group, eye_x, eye_y, 14, 18, 0x111827, 7);
-    CreateBox(group, eye_x + eye_gap, eye_y, 14, 18, 0x111827, 7);
-    CreateBox(group, eye_x + 4, eye_y + 4, 5, 5, 0xFFFFFF, 3);
-    CreateBox(group, eye_x + eye_gap + 4, eye_y + 4, 5, 5, 0xFFFFFF, 3);
+    if (antenna) {
+        CreateBox(group, 148, adult ? 18 : 34, 4, adult ? 28 : 24,
+                  shade_color, 2);
+        s_ui.antenna_tip =
+            CreateBox(group, 150 - (adult ? 7 : 6),
+                      adult ? 7 : 22, adult ? 14 : 12, adult ? 14 : 12,
+                      0xFBBF24, LV_RADIUS_CIRCLE);
+        if (adult) {
+            CreateBox(group, 126, 28, 6, 6, 0xFBBF24, 3);
+            CreateBox(group, 168, 28, 6, 6, 0xFBBF24, 3);
+        }
+    }
 
-    const int beak_y = eye_y + 28;
-    CreateBox(group, body_x + body_w / 2 - 15, beak_y, 30, 18, 0xFB923C,
-              9);
+    lv_obj_t* glow = CreateBox(group, 150 - glow_d / 2, core_y - glow_d / 2,
+                               glow_d, glow_d, 0xFBBF24, glow_d / 2);
+    lv_obj_set_style_bg_opa(glow, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_remove_flag(glow, LV_OBJ_FLAG_CLICKABLE);
 
-    const int blush_y = eye_y + 34;
-    CreateBox(group, eye_x - 18, blush_y, 18, 10, 0xFCA5A5, 5);
-    CreateBox(group, eye_x + eye_gap + 14, blush_y, 18, 10, 0xFCA5A5, 5);
+    s_ui.core = CreateBox(group, 150 - core_d / 2, core_y - core_d / 2,
+                          core_d, core_d, 0xFBBF24, core_d / 2);
+    lv_obj_set_style_transform_pivot_x(s_ui.core, core_d / 2,
+                                       LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_y(s_ui.core, core_d / 2,
+                                       LV_PART_MAIN);
+    CreateBox(s_ui.core, 3, 4, core_d / 4, core_d / 4, 0xFFFFFF,
+              core_d / 8);
 
-    CreateBox(group, body_x + body_w / 2 - 46, body_y - 14, 28, 28,
-              0xF87171, 14);
-    CreateBox(group, body_x + body_w / 2 - 14, body_y - 24, 28, 28,
-              0xF87171, 14);
-    CreateBox(group, body_x + body_w / 2 + 18, body_y - 14, 28, 28,
-              0xF87171, 14);
+    s_eye_cx[0] = 150 - eye_gap / 2;
+    s_eye_cx[1] = 150 + eye_gap / 2;
+    s_eye_cy = eye_y;
+    s_eye_w = eye_w;
+    s_eye_h = eye_h;
+    s_mouth_cx = 150;
+    s_mouth_cy = mouth_y;
+    s_brow_cy = brow_y;
+    s_has_brows = brows;
 
-    const int foot_y = body_y + body_h - 2;
-    CreateBox(group, body_x + body_w / 2 - 46, foot_y, 38, 9, 0xFB923C, 4);
-    CreateBox(group, body_x + body_w / 2 + 8, foot_y, 38, 9, 0xFB923C, 4);
+    s_ui.left_eye = CreateBox(group, 0, 0, eye_w, eye_h, 0x1F2937,
+                              eye_w / 2);
+    CenterAt(s_ui.left_eye, s_eye_cx[0], s_eye_cy);
+    CreateBox(s_ui.left_eye, 6, 7, 8, 8, 0xFFFFFF, 4);
+    s_ui.right_eye = CreateBox(group, 0, 0, eye_w, eye_h, 0x1F2937,
+                               eye_w / 2);
+    CenterAt(s_ui.right_eye, s_eye_cx[1], s_eye_cy);
+    CreateBox(s_ui.right_eye, 6, 7, 8, 8, 0xFFFFFF, 4);
+
+    if (brows) {
+        s_ui.left_brow = CreateBox(group, 0, 0, brow_w, 6, 0x1F2937, 3);
+        CenterAt(s_ui.left_brow, s_eye_cx[0], brow_y);
+        s_ui.right_brow = CreateBox(group, 0, 0, brow_w, 6, 0x1F2937, 3);
+        CenterAt(s_ui.right_brow, s_eye_cx[1], brow_y);
+    }
+
+    s_ui.mouth = CreateBox(group, 0, 0, 18, 9, 0x1F2937, 4);
+    CenterAt(s_ui.mouth, s_mouth_cx, s_mouth_cy);
+
+    s_ui.mark = CreateText(group, 236, 40, "", 0xFBBF24, &font_puhui_30_4);
+    lv_obj_add_flag(s_ui.mark, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ApplyFace(PetMood mood) {
+    s_mood = mood;
+    if (s_ui.left_eye == nullptr || s_ui.right_eye == nullptr) {
+        return;
+    }
+
+    int eye_w = s_eye_w;
+    int eye_h = s_eye_h;
+    int eye_dy = 0;
+    int mouth_w = 18;
+    int mouth_h = 9;
+    int mouth_dy = 0;
+    int brow_l_dy = 0;
+    int brow_r_dy = 0;
+    bool show_brows = s_has_brows;
+    const char* mark = "";
+
+    switch (mood) {
+        case PetMood::Sleep:
+            eye_w += 4;
+            eye_h = 6;
+            mouth_w = 12;
+            mouth_h = 4;
+            show_brows = false;
+            mark = "Z";
+            break;
+        case PetMood::Curious:
+            eye_w += 2;
+            eye_h += 6;
+            eye_dy = -2;
+            mouth_w = 12;
+            mouth_h = 8;
+            brow_l_dy = -2;
+            brow_r_dy = -6;
+            break;
+        case PetMood::Think:
+            eye_h -= 8;
+            eye_dy = -6;
+            mouth_w = 14;
+            mouth_h = 6;
+            brow_l_dy = -8;
+            mark = "?";
+            break;
+        case PetMood::Happy:
+            eye_h = 15;
+            eye_dy = 2;
+            mouth_w = 28;
+            mouth_h = 14;
+            mouth_dy = 2;
+            brow_l_dy = -4;
+            brow_r_dy = -4;
+            break;
+        case PetMood::Celebrate:
+            eye_h -= 4;
+            mouth_w = 30;
+            mouth_h = 16;
+            mouth_dy = 2;
+            brow_l_dy = -8;
+            brow_r_dy = -8;
+            mark = "!";
+            break;
+        case PetMood::Listen:
+            eye_w += 4;
+            eye_h += 2;
+            mouth_w = 14;
+            mouth_h = 8;
+            break;
+        default:
+            break;
+    }
+
+    lv_obj_t* eyes[2] = {s_ui.left_eye, s_ui.right_eye};
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_set_size(eyes[i], eye_w, eye_h);
+        lv_obj_set_style_radius(eyes[i], eye_w / 2, LV_PART_MAIN);
+        CenterAt(eyes[i], s_eye_cx[i], s_eye_cy + eye_dy);
+    }
+
+    if (s_ui.mouth != nullptr) {
+        lv_obj_set_size(s_ui.mouth, mouth_w, mouth_h);
+        lv_obj_set_style_radius(s_ui.mouth, mouth_h / 2, LV_PART_MAIN);
+        CenterAt(s_ui.mouth, s_mouth_cx, s_mouth_cy + mouth_dy);
+    }
+
+    lv_obj_t* brows[2] = {s_ui.left_brow, s_ui.right_brow};
+    const int brow_dy[2] = {brow_l_dy, brow_r_dy};
+    for (int i = 0; i < 2; ++i) {
+        if (brows[i] == nullptr) {
+            continue;
+        }
+        if (show_brows) {
+            lv_obj_remove_flag(brows[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(brows[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        CenterAt(brows[i], s_eye_cx[i], s_brow_cy + brow_dy[i]);
+    }
+
+    if (s_ui.mark != nullptr) {
+        lv_label_set_text(s_ui.mark, mark);
+        if (mark[0] == '\0') {
+            lv_obj_add_flag(s_ui.mark, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_ui.mark, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 void BuildPetArt(const char* stage) {
@@ -186,8 +398,20 @@ void BuildPetArt(const char* stage) {
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
     }
+    if (s_ui.core != nullptr) {
+        lv_anim_delete(s_ui.core, nullptr);
+    }
     lv_obj_clean(s_ui.art);
     s_ui.body = nullptr;
+    s_ui.left_eye = nullptr;
+    s_ui.right_eye = nullptr;
+    s_ui.mouth = nullptr;
+    s_ui.left_brow = nullptr;
+    s_ui.right_brow = nullptr;
+    s_ui.core = nullptr;
+    s_ui.antenna_tip = nullptr;
+    s_ui.mark = nullptr;
+    s_has_brows = false;
 
     const bool egg = stage == nullptr || std::strcmp(stage, "egg") == 0;
     lv_obj_t* group = lv_obj_create(s_ui.art);
@@ -215,10 +439,10 @@ void BuildPetArt(const char* stage) {
                               : std::strcmp(stage, "teen") == 0 ? 360 : 320;
         s_body_base_x = 180;
         s_body_base_y = std::strcmp(stage, "adult") == 0
-                            ? 68
-                            : std::strcmp(stage, "teen") == 0 ? 52 : 34;
+                            ? 58
+                            : std::strcmp(stage, "teen") == 0 ? 51 : 22;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
-        DrawChicken(group, stage);
+        DrawCreature(group, stage);
         lv_obj_set_style_transform_pivot_x(group, 150, LV_PART_MAIN);
         lv_obj_set_style_transform_pivot_y(group, 120, LV_PART_MAIN);
         lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
@@ -226,6 +450,7 @@ void BuildPetArt(const char* stage) {
 
     s_ui.body = group;
     screen_make_input_passive(s_ui.art);
+    ApplyFace(s_base_mood);
     if (s_screen_active.load(std::memory_order_relaxed)) {
         StartIdleMotion();
     }
@@ -343,9 +568,20 @@ void SetState(const PetState& state) {
         }
     }
 
+    const PetMood mood = state.dormant
+                             ? PetMood::Sleep
+                             : state.satiety < 30 ? PetMood::Think
+                                                  : PetMood::Idle;
+    const bool mood_changed = mood != s_base_mood;
+    s_base_mood = mood;
     if (state.stage != s_stage) {
         s_stage = state.stage;
         BuildPetArt(s_stage.c_str());
+    } else {
+        ApplyFace(mood);
+    }
+    if (mood_changed && s_screen_active.load(std::memory_order_relaxed)) {
+        StartIdleMotion();
     }
     UpdateActionButton();
 }
@@ -357,6 +593,9 @@ void StopIdleTimer() {
     }
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
+    }
+    if (s_ui.core != nullptr) {
+        lv_anim_delete(s_ui.core, nullptr);
     }
 }
 
@@ -377,6 +616,11 @@ void AnimSetSpin(void* var, int32_t value) {
                                         LV_PART_MAIN);
 }
 
+void AnimSetScale(void* var, int32_t value) {
+    lv_obj_set_style_transform_scale(static_cast<lv_obj_t*>(var), value,
+                                     LV_PART_MAIN);
+}
+
 void StartIdleMotion() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
@@ -384,11 +628,28 @@ void StartIdleMotion() {
     }
 
     lv_anim_delete(body, nullptr);
+    if (s_ui.core != nullptr) {
+        lv_anim_delete(s_ui.core, nullptr);
+        lv_obj_set_style_transform_scale(s_ui.core, 256, LV_PART_MAIN);
+    }
     lv_obj_set_x(body, s_body_base_x);
     lv_obj_set_y(body, s_body_base_y);
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
 
     lv_anim_t anim;
+    if (s_ui.core != nullptr) {
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, s_ui.core);
+        lv_anim_set_exec_cb(&anim, AnimSetScale);
+        lv_anim_set_values(&anim, 256, s_mood == PetMood::Sleep ? 285 : 300);
+        lv_anim_set_duration(&anim, s_mood == PetMood::Sleep ? 1600 : 900);
+        lv_anim_set_playback_duration(&anim,
+                                      s_mood == PetMood::Sleep ? 1600 : 900);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_start(&anim);
+    }
+
     if (IsEggStage()) {
         lv_anim_init(&anim);
         lv_anim_set_var(&anim, body);
@@ -396,6 +657,32 @@ void StartIdleMotion() {
         lv_anim_set_values(&anim, -70, 70);
         lv_anim_set_duration(&anim, 900);
         lv_anim_set_playback_duration(&anim, 900);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_start(&anim);
+        return;
+    }
+
+    if (s_mood == PetMood::Sleep) {
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, body);
+        lv_anim_set_exec_cb(&anim, AnimSetY);
+        lv_anim_set_values(&anim, 0, -4);
+        lv_anim_set_duration(&anim, 1600);
+        lv_anim_set_playback_duration(&anim, 1600);
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+        lv_anim_start(&anim);
+        return;
+    }
+
+    if (s_mood == PetMood::Think) {
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, body);
+        lv_anim_set_exec_cb(&anim, AnimSetSpin);
+        lv_anim_set_values(&anim, -18, 18);
+        lv_anim_set_duration(&anim, 1500);
+        lv_anim_set_playback_duration(&anim, 1500);
         lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
         lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
         lv_anim_start(&anim);
@@ -463,6 +750,7 @@ void PlayPetRoll() {
         lv_obj_set_style_transform_rotation(pet, 0, LV_PART_MAIN);
         if (pet == s_ui.body &&
             s_screen_active.load(std::memory_order_relaxed)) {
+            ApplyFace(s_base_mood);
             lv_async_call(RestartIdleAsync, pet);
         }
     });
@@ -471,6 +759,27 @@ void PlayPetRoll() {
 
 void StartIdleTimer() {
     StartIdleMotion();
+    if (s_ui.idle_timer == nullptr) {
+        auto on_idle_tick = [](lv_timer_t*) {
+            if (!s_screen_active.load(std::memory_order_relaxed) ||
+                s_ui.left_eye == nullptr ||
+                s_base_mood != PetMood::Idle ||
+                s_mood == PetMood::Happy ||
+                s_mood == PetMood::Celebrate) {
+                return;
+            }
+            s_idle_phase = (s_idle_phase + 1) % 3;
+            ApplyFace(s_idle_phase == 1
+                          ? PetMood::Curious
+                          : s_idle_phase == 2 ? PetMood::Think
+                                              : PetMood::Idle);
+        };
+        s_ui.idle_timer = lv_timer_create(on_idle_tick, 6000, nullptr);
+        if (s_ui.idle_timer != nullptr) {
+            lv_timer_set_repeat_count(s_ui.idle_timer,
+                                      LV_ANIM_REPEAT_INFINITE);
+        }
+    }
 }
 
 void OnBackClicked(lv_event_t* /*event*/);
@@ -753,8 +1062,12 @@ void PostRequestResult(RequestResult* result) {
                 SetState(resolved->state);
                 if (resolved->kind == RequestKind::Hatch) {
                     SetStatus(I18n::T("破壳啦！"));
+                    ApplyFace(PetMood::Celebrate);
+                    PlayPetRoll();
                 } else if (resolved->kind == RequestKind::Feed) {
                     SetStatus(I18n::T("好吃！饱腹 +25"));
+                    ApplyFace(PetMood::Happy);
+                    PlayPetRoll();
                 } else {
                     SetStatus("");
                 }
@@ -831,6 +1144,7 @@ void OnPetClicked(lv_event_t* /*event*/) {
     }
     s_last_tap_ms = now;
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+    ApplyFace(PetMood::Happy);
     PlayPetRoll();
 }
 
