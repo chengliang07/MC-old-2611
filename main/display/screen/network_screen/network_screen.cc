@@ -719,8 +719,12 @@ void connect_task(void* arg) {
                                     pdFALSE, pdMS_TO_TICKS(15000));
 
     if (bits & kBitConnected) {
-        // 拿到 IP，记一笔到 SsidManager（SaveToNvs 内已经持久化，重启后生效）
-        SsidManager::GetInstance().AddSsid(ctx->ssid, ctx->password);
+        // 拿到 IP，记一笔到 SsidManager（SaveToNvs 内已经持久化，重启后生效）。
+        // 旧记录必须清掉：否则重启后自动连接会一直优先重试旧 SSID，
+        // 新网络虽然保存成功却永远连不上。
+        auto& ssid_mgr = SsidManager::GetInstance();
+        ssid_mgr.Clear();
+        ssid_mgr.AddSsid(ctx->ssid, ctx->password);
         snprintf(buf, sizeof(buf), I18n::T("连接 %s 成功，准备重启…"), ctx->ssid.c_str());
         post_status(buf, kColorSuccess);
         refresh_saved_list();
