@@ -931,6 +931,9 @@ void OnChoiceClicked(lv_event_t* event) {
     lv_obj_t* correct_button =
         s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
     PodcastPlayer::Stop();
+    Application::GetInstance().PlaySound(
+        selected == s_choice_correct ? Lang::Sounds::OGG_SUCCESS
+                                     : Lang::Sounds::OGG_EXCLAMATION);
     if (selected == s_choice_correct) {
         lv_obj_set_style_bg_color(selected_button,
                                   lv_color_hex(kColorSuccess), LV_PART_MAIN);

@@ -357,8 +357,10 @@ std::string EnglishClient::PronunciationUrl(const std::string& text,
         error = "没有可发音的内容";
         return "";
     }
+    // type=2 是英式发音；部分短语在该通道会返回空音频或长时间无响应，
+    // 统一切到 type=1 通用发音接口，减少点击后不出声的情况。
     return std::string(kPronunciationBase) + "?audio=" + UrlEncode(text) +
-           "&type=2";
+           "&type=1";
 }
 
 
