@@ -127,8 +127,11 @@ public:
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    bool PushPcmToPlaybackQueue(const int16_t* pcm, size_t samples, uint32_t generation = 0);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void AbortPlaybackGeneration();
+    void ClearPlaybackQueue();
+    bool IsPlaybackPending();
     uint32_t GetPlaybackGeneration() const {
         return playback_generation_.load(std::memory_order_relaxed);
     }
