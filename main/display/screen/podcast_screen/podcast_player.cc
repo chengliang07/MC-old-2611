@@ -408,6 +408,43 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
     return false;
 }
 
+int64_t ProbeTotalBytes(const std::string& url) {
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = 8000;
+    cfg.buffer_size = 1024;
+    cfg.buffer_size_tx = 512;
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == nullptr) {
+        return 0;
+    }
+    const bool quick = IsQuickPronunciationUrl(url);
+    if (!quick) {
+        const std::string token = PodcastClient::DeviceToken();
+        if (!token.empty()) {
+            const std::string authorization = "Bearer " + token;
+            esp_http_client_set_header(client, "Authorization",
+                                       authorization.c_str());
+        }
+    }
+    esp_http_client_set_method(client, HTTP_METHOD_HEAD);
+    int64_t total = 0;
+    if (esp_http_client_open(client, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(client);
+        const int status = esp_http_client_get_status_code(client);
+        const int64_t length =
+            static_cast<int64_t>(esp_http_client_get_content_length(client));
+        if ((status == 200 || status == 206) && length > 0) {
+            total = length;
+        }
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return total;
+}
+
 bool PrepareStreamBuffers(StreamState* state) {
     const int block_count = state->ring_block_count;
     const size_t ring_bytes =
@@ -462,6 +499,28 @@ void PodcastFetchTask(void* arg) {
     state->client.store(client, std::memory_order_release);
     state->open_ok.store(true);
     xSemaphoreGive(state->opened);
+
+    if (!state->quick && remaining <= 0) {
+        auto* probe_url = new std::string(state->url);
+        if (xTaskCreate(
+                [](void* arg) {
+                    auto* url = static_cast<std::string*>(arg);
+                    const int64_t total = ProbeTotalBytes(*url);
+                    bool current = false;
+                    {
+                        std::lock_guard<std::mutex> lock(s_player_mutex);
+                        current = s_current_url == *url;
+                    }
+                    delete url;
+                    if (current && total > 0) {
+                        s_total_bytes.store(total, std::memory_order_relaxed);
+                    }
+                    vTaskDelete(nullptr);
+                },
+                "podcast_size", 6144, probe_url, 2, nullptr) != pdPASS) {
+            delete probe_url;
+        }
+    }
 
     int64_t fetched = state->range_start;
     int resumes = 0;

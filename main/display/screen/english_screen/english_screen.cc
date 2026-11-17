@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <utility>
@@ -32,6 +33,7 @@ namespace {
 
 constexpr const char* TAG = "EnglishScreen";
 constexpr uint32_t kChoiceFeedbackMs = 650;
+constexpr int64_t kTasksCacheFreshSeconds = 5 * 60;
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kContentX = 24;
 constexpr int32_t kContentY = 100;
@@ -85,6 +87,7 @@ EnglishTaskList s_tasks;
 // 上次成功拉到的任务列表：再次进入时先显示，后台再刷新。
 EnglishTaskList s_cached_tasks;
 bool s_cache_valid = false;
+std::time_t s_tasks_cache_at = 0;
 
 constexpr const char* kTasksCachePath = "/sdcard/system/english_tasks.txt";
 
@@ -99,6 +102,7 @@ void SaveTasksCache() {
                      task.phrase_count, task.can_review ? 1 : 0);
     }
     std::fclose(file);
+    s_tasks_cache_at = std::time(nullptr);
 }
 
 // 列表写入 SD 后，冷启动首次进入也能先显示上次的任务。
@@ -145,6 +149,7 @@ void LoadTasksCache() {
     if (!tasks.empty()) {
         s_cached_tasks = std::move(tasks);
         s_cache_valid = true;
+        s_tasks_cache_at = std::time(nullptr);
     }
 }
 EnglishReview s_review;
@@ -158,6 +163,8 @@ lv_obj_t* s_choice_buttons[4] = {};
 lv_timer_t* s_choice_feedback_timer = nullptr;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
+std::atomic<int> s_busy_kind{0};
+std::atomic<uint32_t> s_busy_generation{0};
 std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
@@ -653,14 +660,22 @@ void PostRequestResult(RequestResult* result) {
                 std::unique_ptr<RequestResult> resolved(
                     static_cast<RequestResult*>(data));
                 if (!IsCurrentRequest(*resolved)) {
-                    // 同一页面里被判过期的请求也要交还 busy，
-                    // 否则后续刷新会一直被拒，永远停在“正在刷新任务”。
-                    if (resolved->session == CurrentSession()) {
+                    // 只有当前占用 busy 的请求才能交还，避免被抢占的旧请求
+                    // 把正在进行的新请求误标为空闲。
+                    if (resolved->session == CurrentSession() &&
+                        resolved->generation ==
+                            s_busy_generation.load(
+                                std::memory_order_relaxed)) {
                         s_busy.store(false, std::memory_order_release);
+                        s_busy_kind.store(0, std::memory_order_relaxed);
+                        s_busy_generation.store(0,
+                                                std::memory_order_relaxed);
                     }
                     return;
                 }
                 s_busy.store(false, std::memory_order_release);
+                s_busy_kind.store(0, std::memory_order_relaxed);
+                s_busy_generation.store(0, std::memory_order_relaxed);
                 if (!resolved->error.empty()) {
                     if (resolved->kind == RequestKind::Result) {
                         s_choice_locked = false;
@@ -700,6 +715,8 @@ void PostRequestResult(RequestResult* result) {
             },
             result) != LV_RESULT_OK) {
         s_busy.store(false, std::memory_order_release);
+        s_busy_kind.store(0, std::memory_order_relaxed);
+        s_busy_generation.store(0, std::memory_order_relaxed);
         delete result;
     }
 }
@@ -707,11 +724,21 @@ void PostRequestResult(RequestResult* result) {
 bool BeginRequest(RequestResult*& context) {
     bool expected = false;
     if (!s_busy.compare_exchange_strong(expected, true)) {
+        const bool preempt_tasks =
+            context->kind == RequestKind::Review &&
+            s_busy_kind.load(std::memory_order_relaxed) ==
+                static_cast<int>(RequestKind::Tasks);
+        if (preempt_tasks) {
+            // 用户已点进复习，后台任务刷新不应再挡路。
+            s_busy.store(true, std::memory_order_release);
+            s_busy_since_us.store(esp_timer_get_time(),
+                                  std::memory_order_relaxed);
+        }
         const int64_t since =
             s_busy_since_us.load(std::memory_order_relaxed);
         // 看门狗：请求卡死超过 5 秒后允许新的请求接管，
         // 避免网络异常时页面永久停在加载中。
-        if (since != 0 &&
+        if (!preempt_tasks && since != 0 &&
             esp_timer_get_time() - since < 5LL * 1000 * 1000) {
             delete context;
             return false;
@@ -722,6 +749,10 @@ bool BeginRequest(RequestResult*& context) {
     context->session = CurrentSession();
     context->generation =
         s_request_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    s_busy_kind.store(static_cast<int>(context->kind),
+                      std::memory_order_relaxed);
+    s_busy_generation.store(context->generation,
+                            std::memory_order_relaxed);
     return true;
 }
 
@@ -917,6 +948,7 @@ void OnChoiceClicked(lv_event_t* event) {
     (void)was_last;
     s_choice_feedback_timer = lv_timer_create(
         [](lv_timer_t* timer) {
+            s_choice_feedback_timer = nullptr;
             lv_timer_delete(timer);
             AdvanceAfterChoiceFeedback();
         },
@@ -1104,15 +1136,22 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         if (!s_cache_valid) {
             LoadTasksCache();
         }
+        const bool cache_fresh =
+            s_cache_valid && s_tasks_cache_at != 0 &&
+            std::time(nullptr) - s_tasks_cache_at <
+                kTasksCacheFreshSeconds;
         if (s_cache_valid) {
             s_tasks = s_cached_tasks;
             BuildTaskList();
-            SetStatus(I18n::T("正在刷新任务..."));
+            SetStatus(cache_fresh ? I18n::T("选择任务开始复习")
+                                  : I18n::T("正在刷新任务..."));
         } else {
             BuildTaskList();
             SetStatus(I18n::T("正在加载任务..."));
         }
-        StartTasksWorker();
+        if (!cache_fresh) {
+            StartTasksWorker();
+        }
     } else {
         ESP_LOGI(TAG, "unload: english_screen");
         s_screen_active.store(false, std::memory_order_release);
