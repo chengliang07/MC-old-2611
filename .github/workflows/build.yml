@@ -132,9 +132,10 @@ jobs:
           echo "Compile check failed (build result: $RESULT)." >&2
           exit 1
 
-  publish-latest-release:
+   publish-latest-release:
     name: Publish Latest release
-    if: github.event_name == 'push'
+    needs: [prepare, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
