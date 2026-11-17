@@ -580,6 +580,11 @@ void AudioService::ClearPlaybackQueue() {
     ResetDecoder();
 }
 
+bool AudioService::IsPlaybackPending() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return !audio_decode_queue_.empty() || !audio_playback_queue_.empty();
+}
+
 void AudioService::SetBargeInVad(bool enable, std::function<void()> on_detected,
                                  bool flush_preroll) {
     if (!wake_word_) {

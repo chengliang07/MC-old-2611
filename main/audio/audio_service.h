@@ -131,6 +131,7 @@ public:
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void AbortPlaybackGeneration();
     void ClearPlaybackQueue();
+    bool IsPlaybackPending();
     uint32_t GetPlaybackGeneration() const {
         return playback_generation_.load(std::memory_order_relaxed);
     }

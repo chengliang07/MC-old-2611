@@ -46,6 +46,7 @@ std::atomic<State> s_state{State::Idle};
 std::atomic<bool> s_stop_requested{true};
 std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
+std::atomic<bool> s_response_done_pending{false};
 std::atomic<uint32_t> s_generation{0};
 
 lv_obj_t* s_screen = nullptr;
@@ -173,12 +174,14 @@ void handle_json(const char* data, size_t len, uint32_t session) {
 
     if (std::strcmp(type, "relay.ready") == 0) {
         s_ws_ready.store(true, std::memory_order_release);
+        s_response_done_pending.store(false, std::memory_order_release);
         post_ui(session, State::Listening, "聆听中…", nullptr);
     } else if (std::strcmp(type, "relay.speech_stopped") == 0) {
         s_mic_enabled.store(false, std::memory_order_release);
         post_ui(session, State::Answering, "思考中…", nullptr);
     } else if (std::strcmp(type, "relay.response.start") == 0) {
         s_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_response_done_pending.store(false, std::memory_order_release);
         s_mic_enabled.store(false, std::memory_order_release);
         post_ui(session, State::Answering, "回答中…", nullptr);
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
@@ -187,11 +190,11 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             post_ui(session, State::Answering, "回答中…", delta->valuestring);
         }
     } else if (std::strcmp(type, "relay.response.done") == 0) {
-        vTaskDelay(pdMS_TO_TICKS(200));
         if (session_alive(session)) {
-            s_mic_enabled.store(true, std::memory_order_release);
+            s_mic_enabled.store(false, std::memory_order_release);
+            s_response_done_pending.store(true, std::memory_order_release);
             s_generation.fetch_add(1, std::memory_order_acq_rel);
-            post_ui(session, State::Listening, "聆听中…", nullptr);
+            post_ui(session, State::Answering, "回答完成，正在恢复聆听…", nullptr);
         }
     } else if (std::strcmp(type, "relay.error") == 0) {
         const cJSON* error = cJSON_GetObjectItem(root, "error");
@@ -243,8 +246,25 @@ void stream_microphone(uint32_t session) {
     auto* codec = Board::GetInstance().GetAudioCodec();
     std::vector<int16_t> frame;
     frame.reserve(kInputSamples * 2);
+    TickType_t playback_idle_tick = 0;
 
     while (!s_stop_requested.load(std::memory_order_acquire) && session_alive(session)) {
+        if (s_response_done_pending.load(std::memory_order_acquire)) {
+            if (audio.IsPlaybackPending()) {
+                playback_idle_tick = 0;
+            } else {
+                const TickType_t now = xTaskGetTickCount();
+                if (playback_idle_tick == 0) {
+                    playback_idle_tick = now;
+                } else if (now - playback_idle_tick >= pdMS_TO_TICKS(250)) {
+                    s_response_done_pending.store(false, std::memory_order_release);
+                    s_mic_enabled.store(true, std::memory_order_release);
+                    post_ui(session, State::Listening, "聆听中…", nullptr);
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         if (!s_ws_ready.load(std::memory_order_acquire) ||
             !s_mic_enabled.load(std::memory_order_acquire)) {
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -311,6 +331,7 @@ void start_session() {
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_stop_requested.store(false, std::memory_order_release);
     s_ws_ready.store(false, std::memory_order_release);
+    s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -326,6 +347,7 @@ void start_session() {
 
 void stop_session() {
     s_stop_requested.store(true, std::memory_order_release);
+    s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     auto& audio = Application::GetInstance().GetAudioService();
     audio.ClearPlaybackQueue();
