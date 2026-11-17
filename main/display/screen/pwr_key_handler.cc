@@ -8,6 +8,7 @@
 #include "IOExpander.hpp"
 #include "application.h"
 #include "home_screen/home_screen.h"
+#include "oral_screen/oral_screen.h"
 #include "standby_screen/standby_screen.h"
 #include "usb_extend_screen.h"
 
@@ -24,6 +25,7 @@ constexpr int kMaxStack = 8;
 const char* s_stack[kMaxStack] = {};
 int s_depth = 0;
 bool s_inited = false;
+void (*s_oral_short_press)() = nullptr;
 
 bool IsChatToggleScreen(const char* name) {
     return std::strcmp(name, "chat") == 0 ||
@@ -95,6 +97,12 @@ void OnShortPress() {
         return;
     }
 
+    if (std::strcmp(screen, "oral") == 0 && s_oral_short_press != nullptr) {
+        ESP_LOGI(TAG, "dispatch: oral interrupt");
+        s_oral_short_press();
+        return;
+    }
+
     ESP_LOGI(TAG, "dispatch: no-op (screen has no short-press action)");
 }
 
@@ -161,4 +169,9 @@ void PwrKey_OnScreenLifecycle(const char* name,
 
 const char* PwrKey_ActiveScreen() {
     return StackTop();
+}
+
+void PwrKey_SetShortPressHandler(const char* screen_name, void (*handler)()) {
+    if (screen_name == nullptr || std::strcmp(screen_name, "oral") != 0) return;
+    s_oral_short_press = handler;
 }

@@ -36,6 +36,7 @@
 #include "level_screen/level_screen.h"
 #include "magnet_screen/magnet_screen.h"
 #include "music_screen/music_screen.h"
+#include "oral_screen/oral_screen.h"
 #include "podcast_screen/podcast_screen.h"
 #include "podcast_screen/podcast_client.h"
 #include "english_screen/english_client.h"
@@ -232,6 +233,11 @@ void english_lifecycle_cb(screen_lifecycle_event_t event) {
 void pet_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("pet", event);
     PetScreen::LifecycleCallback(event);
+}
+
+void oral_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("oral", event);
+    OralScreen::LifecycleCallback(event);
 }
 
 void digital_people_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -553,6 +559,19 @@ void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
     }
     screen_attach_lifecycle(app, lifecycle_cb);
     lv_screen_load(app);
+}
+
+void LaunchOral(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = OralScreen::Create();
+    if (app == nullptr) {
+        return;
+    }
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        // 保留来源页，返回时由 OralScreen 新建 HomeScreen。
+    }
 }
 
 void OpenPodcastFromCurrentAsync(void* /*arg*/) {
@@ -918,6 +937,7 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
 constexpr AppEntry kApps[] = {
     {"chat",           "一丢学伴", LaunchChat,          chat_lifecycle_cb,          true},
     {"radio",          "一丢播客", LaunchPodcast,       podcast_lifecycle_cb,       true},
+    {"chat",           "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
     {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
     {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},

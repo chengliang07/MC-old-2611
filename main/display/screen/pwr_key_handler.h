@@ -16,6 +16,9 @@
 // 注册短按 / 长按。IO 扩展器就绪后调用；内部有 once 守卫。
 void PwrKey_Init();
 
+// 注册页面短按回调。当前仅一丢口语使用；同名页面重复注册会覆盖旧回调。
+void PwrKey_SetShortPressHandler(const char* screen_name, void (*handler)());
+
 // 页面生命周期联动：LOAD 压栈，UNLOAD 移除最靠上的同名页。
 void PwrKey_OnScreenLifecycle(const char* name, screen_lifecycle_event_t event);
 
