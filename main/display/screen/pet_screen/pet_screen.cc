@@ -77,6 +77,28 @@ enum class PetMood : uint8_t {
     Listen,
 };
 
+const char* PetImagePath(PetMood mood, bool egg) {
+    if (egg) {
+        return "A:ic_pet_egg.png";
+    }
+    switch (mood) {
+        case PetMood::Sleep:
+            return "A:ic_pet_sleep.png";
+        case PetMood::Curious:
+            return "A:ic_pet_curious.png";
+        case PetMood::Think:
+            return "A:ic_pet_think.png";
+        case PetMood::Happy:
+        case PetMood::Celebrate:
+            return "A:ic_pet_happy.png";
+        case PetMood::Listen:
+            return "A:ic_pet_listening.png";
+        case PetMood::Idle:
+        default:
+            return "A:ic_pet_idle.png";
+    }
+}
+
 struct RequestResult {
     uint32_t session = 0;
     uint32_t generation = 0;
@@ -113,6 +135,7 @@ std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 
 void StartIdleMotion();
+bool IsEggStage();
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -286,6 +309,9 @@ void DrawCreature(lv_obj_t* group, const char* stage) {
 void ApplyFace(PetMood mood) {
     s_mood = mood;
     if (s_ui.left_eye == nullptr || s_ui.right_eye == nullptr) {
+        if (s_ui.body != nullptr) {
+            lv_image_set_src(s_ui.body, PetImagePath(mood, IsEggStage()));
+        }
         return;
     }
 
@@ -414,7 +440,7 @@ void BuildPetArt(const char* stage) {
     s_has_brows = false;
 
     const bool egg = stage == nullptr || std::strcmp(stage, "egg") == 0;
-    lv_obj_t* group = lv_obj_create(s_ui.art);
+    lv_obj_t* group = lv_image_create(s_ui.art);
     lv_obj_remove_style_all(group);
     lv_obj_set_style_bg_opa(group, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(group, 0, LV_PART_MAIN);
@@ -422,29 +448,23 @@ void BuildPetArt(const char* stage) {
     lv_obj_add_flag(group, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_remove_flag(group, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_image_set_src(group, PetImagePath(s_base_mood, egg));
 
     if (egg) {
-        lv_obj_set_size(group, 200, 230);
-        s_body_base_x = 230;
-        s_body_base_y = 64;
+        lv_obj_set_size(group, 360, 360);
+        s_body_base_x = 150;
+        s_body_base_y = 0;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
-        lv_obj_set_style_transform_pivot_x(group, 100, LV_PART_MAIN);
-        lv_obj_set_style_transform_pivot_y(group, 115, LV_PART_MAIN);
-        lv_obj_set_style_transform_scale(group, 480, LV_PART_MAIN);
-        DrawEgg(group);
     } else {
-        lv_obj_set_size(group, 300, 240);
+        lv_obj_set_size(group, 360, 360);
         const int scale = std::strcmp(stage, "adult") == 0
-                              ? 400
-                              : std::strcmp(stage, "teen") == 0 ? 360 : 320;
-        s_body_base_x = 180;
-        s_body_base_y = std::strcmp(stage, "adult") == 0
-                            ? 58
-                            : std::strcmp(stage, "teen") == 0 ? 51 : 22;
+                              ? 108
+                              : std::strcmp(stage, "teen") == 0 ? 102 : 96;
+        s_body_base_x = 150;
+        s_body_base_y = 0;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
-        DrawCreature(group, stage);
-        lv_obj_set_style_transform_pivot_x(group, 150, LV_PART_MAIN);
-        lv_obj_set_style_transform_pivot_y(group, 120, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_x(group, 180, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(group, 180, LV_PART_MAIN);
         lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
     }
 
