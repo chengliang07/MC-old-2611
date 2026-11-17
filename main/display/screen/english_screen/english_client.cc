@@ -357,8 +357,9 @@ std::string EnglishClient::PronunciationUrl(const std::string& text,
         error = "没有可发音的内容";
         return "";
     }
+    // type=2 在部分短语上会返回空音频；type=1 更稳定。
     return std::string(kPronunciationBase) + "?audio=" + UrlEncode(text) +
-           "&type=2";
+           "&type=1";
 }
 
 

@@ -168,6 +168,18 @@ bool HttpGet(const std::string& url, const std::string& device_token,
 
 }  // namespace
 
+bool TryCachedPlayUrl(const std::string& podcast_id, PodcastPlayInfo& result) {
+    std::lock_guard<std::mutex> lock(s_play_cache_mutex);
+    const time_t now = time(nullptr);
+    for (const auto& entry : s_play_cache) {
+        if (entry.id == podcast_id && entry.expires > now) {
+            result = entry.info;
+            return true;
+        }
+    }
+    return false;
+}
+
 PodcastList PodcastClient::FetchPodcasts(std::string& error) {
     error.clear();
     std::string api_base;
@@ -223,14 +235,8 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
                                               std::string& error) {
     error.clear();
     PodcastPlayInfo result;
-    {
-        std::lock_guard<std::mutex> lock(s_play_cache_mutex);
-        const time_t now = time(nullptr);
-        for (const auto& entry : s_play_cache) {
-            if (entry.id == podcast_id && entry.expires > now) {
-                return entry.info;
-            }
-        }
+    if (TryCachedPlayUrl(podcast_id, result)) {
+        return result;
     }
     std::string api_base;
     std::string device_token;
