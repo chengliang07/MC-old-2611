@@ -57,16 +57,19 @@ lv_obj_t* s_screen = nullptr;
 lv_obj_t* s_title = nullptr;
 lv_obj_t* s_status = nullptr;
 lv_obj_t* s_text = nullptr;
+lv_obj_t* s_user_text_label = nullptr;
 lv_obj_t* s_chat = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
 std::mutex s_ws_mutex;
 std::mutex s_text_mutex;
 std::string s_answer;
+std::string s_user_text;
 int s_resample_position = 0;
 
 struct AudioChunk {
     std::vector<int16_t> pcm;
+    uint32_t generation;
 };
 std::deque<AudioChunk> s_audio_chunks;
 size_t s_audio_bytes = 0;
@@ -93,7 +96,7 @@ struct WakeWordGuard {
 };
 
 void post_ui(uint32_t session, State state, const char* status,
-             BubbleRole role, const char* text) {
+             BubbleRole role, const char* text, bool append_user = false) {
     struct UiPayload {
         uint32_t session;
         State state;
@@ -101,6 +104,8 @@ void post_ui(uint32_t session, State state, const char* status,
         char append[512];
         BubbleRole role;
         bool replace_text;
+        bool append_user;
+        uint32_t generation;
     };
     if (!session_alive(session)) state = State::Error;
     auto* payload = new UiPayload{};
@@ -110,13 +115,24 @@ void post_ui(uint32_t session, State state, const char* status,
     std::snprintf(payload->append, sizeof(payload->append), "%s", text ? text : "");
     payload->role = role;
     payload->replace_text = false;
+    payload->append_user = append_user;
+    payload->generation = s_generation.load(std::memory_order_acquire);
     if (lv_async_call([](void* data) {
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
             s_state.store(item->state, std::memory_order_release);
             if (s_status != nullptr) lv_label_set_text(s_status, item->status);
-            if (item->append[0] == '\0' || s_chat == nullptr) return;
-            if (!item->replace_text && item->role == BubbleRole::Assistant && s_text != nullptr) {
+            if (item->append[0] == '\0' || s_chat == nullptr ||
+                item->generation != s_generation.load(std::memory_order_acquire)) return;
+            if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
+                std::lock_guard<std::mutex> lock(s_text_mutex);
+                s_user_text += item->append;
+                lv_label_set_text(s_user_text_label, s_user_text.c_str());
+                lv_obj_scroll_to_y(s_chat, LV_COORD_MAX, LV_ANIM_OFF);
+                return;
+            }
+            if (!item->replace_text && item->role == BubbleRole::Assistant &&
+                s_text != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer += item->append;
                 while (s_answer.size() > kMaxTextBytes) {
@@ -164,6 +180,10 @@ void post_ui(uint32_t session, State state, const char* status,
                 s_text = label;
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer = item->append;
+            } else {
+                s_user_text_label = label;
+                std::lock_guard<std::mutex> lock(s_text_mutex);
+                s_user_text = item->append;
             }
             lv_obj_scroll_to_y(s_chat, LV_COORD_MAX, LV_ANIM_OFF);
         }, payload) != LV_RESULT_OK) {
@@ -191,6 +211,7 @@ void audio_playback_task(void* /*arg*/) {
             s_audio_chunks.pop_front();
             s_audio_bytes -= chunk.pcm.size() * sizeof(int16_t);
         }
+        if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
         auto& audio = Application::GetInstance().GetAudioService();
         for (int attempt = 0;
              attempt < 20 && !audio.PushPcmToPlaybackQueue(chunk.pcm.data(), chunk.pcm.size());
@@ -210,7 +231,7 @@ void queue_audio_output(const std::vector<int16_t>& output) {
             s_audio_bytes -= s_audio_chunks.front().pcm.size() * sizeof(int16_t);
             s_audio_chunks.pop_front();
         }
-        s_audio_chunks.push_back(AudioChunk{output});
+        s_audio_chunks.push_back(AudioChunk{output, s_generation.load(std::memory_order_acquire)});
         s_audio_bytes += bytes;
     }
     if (!s_audio_task_running.load(std::memory_order_acquire)) {
@@ -284,7 +305,7 @@ void handle_json(const char* data, size_t len, uint32_t session) {
     } else if (std::strcmp(type, "relay.user_transcript.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr) {
-            post_ui(session, State::Listening, "聆听中…", BubbleRole::User, delta->valuestring);
+            post_ui(session, State::Listening, "聆听中…", BubbleRole::User, delta->valuestring, true);
         }
     } else if (std::strcmp(type, "relay.user_transcript.done") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
@@ -446,10 +467,12 @@ void start_session() {
     s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     s_text = nullptr;
+    s_user_text_label = nullptr;
     clear_audio_queue();
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
         s_answer.clear();
+        s_user_text.clear();
         s_resample_position = 0;
     }
     if (xTaskCreate(worker_task, "oral_ws", 4096, nullptr, 4, &s_worker_task) != pdPASS) {
@@ -480,6 +503,7 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_title = nullptr;
     s_status = nullptr;
     s_text = nullptr;
+    s_user_text_label = nullptr;
     s_chat = nullptr;
 }
 
