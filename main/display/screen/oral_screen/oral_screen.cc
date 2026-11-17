@@ -369,7 +369,7 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_text = nullptr;
 }
 
-lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t* font, lv_color_t color) {
+lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font, lv_color_t color) {
     lv_obj_t* label = lv_label_create(parent);
     lv_label_set_text(label, text);
     lv_obj_set_width(label, lv_pct(100));
