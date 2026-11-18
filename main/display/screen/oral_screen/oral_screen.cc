@@ -164,21 +164,6 @@ void resize_bubble(lv_obj_t* bubble, lv_obj_t* label, const char* text, bool is_
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
 }
 
-uint32_t now_ms() {
-    return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
-void flush_stream_text(uint32_t session) {
-    std::string text;
-    {
-        std::lock_guard<std::mutex> lock(s_text_mutex);
-        if (s_stream_text.empty()) return;
-        text.swap(s_stream_text);
-        s_stream_text_ms = 0;
-    }
-    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
-}
-
 struct WakeWordGuard {
     AudioService& audio;
     bool disabled = false;
@@ -299,6 +284,21 @@ void post_ui(uint32_t session, State state, const char* status,
         }, payload) != LV_RESULT_OK) {
         delete payload;
     }
+}
+
+uint32_t now_ms() {
+    return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+void flush_stream_text(uint32_t session) {
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(s_text_mutex);
+        if (s_stream_text.empty()) return;
+        text.swap(s_stream_text);
+        s_stream_text_ms = 0;
+    }
+    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
 }
 
 void clear_audio_queue() {
