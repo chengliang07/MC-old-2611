@@ -302,9 +302,13 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
                 }
             }
         }
-        if (!entry.word_id.empty()) {
-            review.entries.push_back(std::move(entry));
+        if (entry.word_id.empty()) {
+            entry.word_id = entry.term;
         }
+        if (entry.word_id.empty()) {
+            entry.word_id = "entry_" + std::to_string(review.entries.size());
+        }
+        review.entries.push_back(std::move(entry));
     }
     cJSON_Delete(root);
     return review;
