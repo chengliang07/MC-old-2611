@@ -21,10 +21,10 @@ extern "C" {
 
 static const char *const PET_IMG_BODY = PET_ASSET_ROOT "ic_pet_idle.spng";
 
-static const char *const PET_EYES_OPEN    = PET_ASSET_ROOT "0.png";
-static const char *const PET_EYES_HALF    = PET_ASSET_ROOT "0.png";
-static const char *const PET_EYES_CLOSED  = PET_ASSET_ROOT "0.png";
-static const char *const PET_EYES_HAPPY   = PET_ASSET_ROOT "0.png";
+static const char *const PET_EYES_OPEN    = PET_ASSET_ROOT "pet_eyes_open.png";
+static const char *const PET_EYES_HALF    = PET_ASSET_ROOT "pet_eyes_half.png";
+static const char *const PET_EYES_CLOSED  = PET_ASSET_ROOT "pet_eyes_closed.png";
+static const char *const PET_EYES_HAPPY   = PET_ASSET_ROOT "pet_eyes_happy.png";
 static const char *const PET_EYES_WIDE    = PET_ASSET_ROOT "pet_eyes_wide.png";
 static const char *const PET_EYES_TIRED   = PET_ASSET_ROOT "pet_eyes_tired.png";
 
@@ -41,8 +41,8 @@ static const char *const PET_BROWS_RAISED = PET_ASSET_ROOT "pet_brows_raised.png
 static const char *const PET_BROWS_THINK  = PET_ASSET_ROOT "pet_brows_think.png";
 static const char *const PET_BROWS_HAPPY  = PET_ASSET_ROOT "pet_brows_happy.png";
 
-static const char *const PET_MOUTH_SMILE        = PET_ASSET_ROOT "0.png";
-static const char *const PET_MOUTH_OPEN_BIG     = PET_ASSET_ROOT "0.png";
+static const char *const PET_MOUTH_SMILE        = PET_ASSET_ROOT "pet_mouth_smile.png";
+static const char *const PET_MOUTH_OPEN_BIG     = PET_ASSET_ROOT "pet_mouth_open_big.png";
 static const char *const PET_MOUTH_O_SMALL      = PET_ASSET_ROOT "pet_mouth_o_small.png";
 static const char *const PET_MOUTH_SPEAK_OPEN   = PET_ASSET_ROOT "pet_mouth_speak_open.png";
 static const char *const PET_MOUTH_SPEAK_MID    = PET_ASSET_ROOT "pet_mouth_speak_mid.png";
@@ -61,7 +61,7 @@ static const char *const PET_IMG_ARM_L = PET_ASSET_ROOT "pet_arm_l.png";
 static const char *const PET_IMG_ARM_R = PET_ASSET_ROOT "pet_arm_r.png";
 
 static const char *const PET_SPROUT_STAGES[] = {
-    PET_ASSET_ROOT "0.png",
+    PET_ASSET_ROOT "pet_sprout_stage0.png",
     PET_ASSET_ROOT "pet_sprout_stage1.png",
     PET_ASSET_ROOT "pet_sprout_stage2.png",
 };

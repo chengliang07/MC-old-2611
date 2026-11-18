@@ -8,12 +8,14 @@
 - 不成立/需更新：当前 HEAD 已有一丢宠物屏（ca3aa3f 没有），其资源路径已用 `A:*.spng`；`DeviceStateEventManager::RegisterStateChangeCallback()` 实际是 vector 追加，文档“无反注册、只可注册一次”并非接口限制。
 - 未接：设备状态桥接、情绪桥接、幅度输入、EAF 路径验证均仍待办。
 
-## 本次最小接入
+## 本次最小接入（独立“一丢宠物2”）
 
 - `sdkconfig`：启用 `CONFIG_LV_USE_ANIMIMG=y`。
 - `main/display/pet_widget/`：加入 `pet_widget.h/.c`、`pet_assets.h` 骨架；第一阶段只启用待机呼吸、眨眼调度、点按弹跳，占位层默认隐藏，不覆盖现有美术。
 - `main/CMakeLists.txt`：编译 `pet_widget.c` 并加入 include 目录。
-- `main/display/screen/pet_screen/pet_screen.cc`：旧宠物屏创建该组件；点按/孵化/喂食触发开心弹跳。
+- 旧 `pet_screen.cc` 已恢复到 HEAD，不再混合新组件。
+- `main/display/screen/pet2_screen/pet2_screen.cc/.h`：新增独立“一丢宠物2”页面；HomeScreen 增加独立入口。
+- 独立页面第一阶段只做：512×512 容器、待机呼吸、眨眼调度、点按弹跳；不接旧 `PetClient`、状态机、EAF、28 张图或 8 个完整状态。
 - 已定事项保持：识别点小芽、第一阶段不做能量核、画布 512×512。
 
 ## V1–V20 状态
@@ -61,9 +63,9 @@ V20 待验证：`dp_delay_ms` 四档 EAF 未测试。
 ## 真机验证清单（按 README §9 顺序）
 
 1. 安装 ESP-IDF 5.5.x（需含 ESP32-P4 工具链），在 `_mc4_build106` 执行 `idf.py reconfigure`、`idf.py build`；记录 V2 编译结果。`CONFIG_LV_USE_ANIMIMG=y` 已写入 `sdkconfig`。
-2. 烧录固件，打开一丢宠物页；记录启动日志与屏幕是否正常，观察现有宠物美术不被遮挡（占位层隐藏）。
+2. 烧录固件，打开“一丢宠物2”页；记录启动日志与屏幕是否正常。旧“一丢宠物”应完全不受影响。
 3. 串口打印 `lv_display_get_color_format()`，记录 V1 实际格式；有条件时记录 panel 帧缓冲字节数。
-4. 静置宠物页，观察呼吸节奏；统计 2.8–6s 内是否触发眨眼调度（当前占位层隐藏，只能看日志/计时，不视为视觉眨眼通过）。
+4. 静置“一丢宠物2”页，观察呼吸节奏；统计 2.8–6s 内是否触发眨眼调度（当前占位层隐藏，只能看日志/计时，不视为视觉眨眼通过）。
 5. 点按宠物，记录从触摸到弹跳首帧的时间（V9，目标 <200ms）与 900ms 后是否复位。
 6. 在屏创建前、创建后、动画 60s 后分别打印 `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)`（V10）。
 7. 再接 `DeviceStateEventManager` 桥接前，先确认是否已有其他注册；避免重复注册导致多实例响应（V12）。
@@ -75,5 +77,7 @@ V20 待验证：`dp_delay_ms` 四档 EAF 未测试。
 ## 验证结论
 
 - 已完成静态复核和最小代码接线；`git diff --check` 通过。
+- 已把新组件从旧 `pet_screen.cc` 拆出；旧屏当前工作树与 HEAD 无差异。
+- 当前新增独立“一丢宠物2”页面仅在 HomeScreen 增加一个入口；旧“一丢宠物”保持不变。
 - 未做编译、烧录、真机测试；V1–V20 均不得标记为完成。V18 仅有静态路径证据。
 - 8 张实验图、28 张正式图和 8 个完整状态未一次性铺开。

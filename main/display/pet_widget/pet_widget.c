@@ -51,6 +51,7 @@ static const void *kMouthHappySrc[] = { PET_MOUTH_OPEN_BIG };
 
 typedef struct pet_ctx {
     lv_obj_t *container;
+    lv_obj_t *body;
     lv_obj_t *eyes;
     lv_obj_t *mouth;
     lv_obj_t *sprout;
@@ -83,8 +84,8 @@ static void pet_apply_transform(pet_ctx_t *ctx)
     const int32_t zoom = PET_ZOOM_NORMAL +
         (PET_ZOOM_BREATH_PEAK - PET_ZOOM_NORMAL) * ctx->breath_phase / 100;
     const int32_t y = -3 * ctx->breath_phase / 100 - ctx->bounce_y;
-    lv_obj_set_style_transform_scale(ctx->container, (uint16_t)zoom,
-                                     LV_PART_MAIN);
+    lv_obj_set_style_transform_scale(ctx->body, (uint16_t)zoom, LV_PART_MAIN);
+    lv_obj_set_pos(ctx->body, PET_BODY_X, PET_BODY_Y);
     lv_obj_set_pos(ctx->eyes, PET_EYES_X, PET_EYES_Y + y);
     lv_obj_set_pos(ctx->mouth, PET_MOUTH_X, PET_MOUTH_Y + y);
     lv_obj_set_pos(ctx->sprout, PET_SPROUT_X, PET_SPROUT_Y + y);
@@ -144,25 +145,22 @@ static void pet_start_bounce(pet_ctx_t *ctx)
 
 static void pet_set_happy(pet_ctx_t *ctx)
 {
-    /* 8 张实验图阶段占位层保持隐藏，点按只验证弹跳时序。 */
-    (void)kEyesHappySrc;
-    (void)kMouthHappySrc;
+    pet_animimg_set(ctx->eyes, kEyesHappySrc, 1, 100);
+    pet_animimg_set(ctx->mouth, kMouthHappySrc, 1, 100);
     ctx->transient_end = lv_tick_get() + PET_TIMING_HAPPY_MS;
     pet_start_bounce(ctx);
 }
 
 static void pet_set_idle(pet_ctx_t *ctx)
 {
-    /* 占位层隐藏，不切图。 */
-    (void)kEyesOpenSrc;
-    (void)kMouthSmileSrc;
+    pet_animimg_set(ctx->eyes, kEyesOpenSrc, 1, 100);
+    pet_animimg_set(ctx->mouth, kMouthSmileSrc, 1, 100);
     ctx->transient_end = 0;
 }
 
 static void pet_do_blink(pet_ctx_t *ctx)
 {
-    /* 8 张实验图阶段占位层保持隐藏；眨眼调度先验证定时器节奏。 */
-    (void)kEyesBlinkSrc;
+    pet_animimg_set(ctx->eyes, kEyesBlinkSrc, 3, PET_TIMING_BLINK_SEQ_MS / 3);
     ctx->next_blink = lv_tick_get() +
         (uint32_t)(PET_TIMING_BLINK_MIN_MS +
                    rand() % (PET_TIMING_BLINK_MAX_MS -
@@ -248,25 +246,28 @@ lv_obj_t *pet_widget_create(const pet_widget_config_t *config)
     lv_obj_add_flag(container, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_user_data(container, ctx);
 
+    ctx->body = lv_image_create(container);
+    lv_obj_set_pos(ctx->body, PET_BODY_X, PET_BODY_Y);
+    lv_obj_set_size(ctx->body, PET_BODY_W, PET_BODY_H);
+    lv_image_set_src(ctx->body, PET_IMG_BODY);
+    lv_obj_remove_flag(ctx->body, LV_OBJ_FLAG_CLICKABLE);
+
     ctx->eyes = lv_animimg_create(container);
     lv_obj_set_pos(ctx->eyes, PET_EYES_X, PET_EYES_Y);
     lv_obj_set_size(ctx->eyes, PET_EYES_W, PET_EYES_H);
     pet_animimg_set(ctx->eyes, kEyesOpenSrc, 1, 100);
-    lv_obj_add_flag(ctx->eyes, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(ctx->eyes, LV_OBJ_FLAG_CLICKABLE);
 
     ctx->mouth = lv_animimg_create(container);
     lv_obj_set_pos(ctx->mouth, PET_MOUTH_X, PET_MOUTH_Y);
     lv_obj_set_size(ctx->mouth, PET_MOUTH_W, PET_MOUTH_H);
     pet_animimg_set(ctx->mouth, kMouthSmileSrc, 1, 100);
-    lv_obj_add_flag(ctx->mouth, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(ctx->mouth, LV_OBJ_FLAG_CLICKABLE);
 
     ctx->sprout = lv_image_create(container);
     lv_obj_set_pos(ctx->sprout, PET_SPROUT_X, PET_SPROUT_Y);
     lv_obj_set_size(ctx->sprout, PET_SPROUT_W, PET_SPROUT_H);
     lv_image_set_src(ctx->sprout, PET_SPROUT_STAGES[0]);
-    lv_obj_add_flag(ctx->sprout, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(ctx->sprout, LV_OBJ_FLAG_CLICKABLE);
     if (!config->sprout_enabled) {
         lv_obj_add_flag(ctx->sprout, LV_OBJ_FLAG_HIDDEN);
@@ -276,7 +277,7 @@ lv_obj_t *pet_widget_create(const pet_widget_config_t *config)
     ctx->timer = lv_timer_create(pet_timer_cb, PET_TIMING_MOUTH_TICK_MS, ctx);
     pet_start_breath(ctx);
     pet_apply_transform(ctx);
-    PET_LOGI("created; placeholder layers hidden; assets=%s", PET_ASSET_ROOT);
+    PET_LOGI("created; assets=%s", PET_ASSET_ROOT);
     return container;
 }
 
