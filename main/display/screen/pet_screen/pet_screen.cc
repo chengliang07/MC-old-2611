@@ -16,6 +16,7 @@
 #include "home_screen/home_screen.h"
 #include "i18n.h"
 #include "pet_client.h"
+#include "pet_widget.h"
 #include "pet_types.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
@@ -65,6 +66,8 @@ struct PetUi {
     lv_obj_t* action_label = nullptr;
     lv_obj_t* status = nullptr;
     lv_timer_t* idle_timer = nullptr;
+    lv_obj_t* pet_widget = nullptr;
+    bool use_image_art = true;
 };
 
 enum class PetMood : uint8_t {
@@ -78,24 +81,25 @@ enum class PetMood : uint8_t {
 };
 
 const char* PetImagePath(PetMood mood, bool egg) {
+    (void)mood;
     if (egg) {
-        return "A:ic_pet_egg.png";
+        return "A:ic_pet_egg.spng";
     }
     switch (mood) {
         case PetMood::Sleep:
-            return "A:ic_pet_sleep.png";
+            return "A:ic_pet_sleep.spng";
         case PetMood::Curious:
-            return "A:ic_pet_curious.png";
+            return "A:ic_pet_curious.spng";
         case PetMood::Think:
-            return "A:ic_pet_think.png";
+            return "A:ic_pet_think.spng";
         case PetMood::Happy:
         case PetMood::Celebrate:
-            return "A:ic_pet_happy.png";
+            return "A:ic_pet_happy.spng";
         case PetMood::Listen:
-            return "A:ic_pet_listening.png";
+            return "A:ic_pet_listening.spng";
         case PetMood::Idle:
         default:
-            return "A:ic_pet_idle.png";
+            return "A:ic_pet_idle.spng";
     }
 }
 
@@ -308,10 +312,14 @@ void DrawCreature(lv_obj_t* group, const char* stage) {
 
 void ApplyFace(PetMood mood) {
     s_mood = mood;
-    if (s_ui.left_eye == nullptr || s_ui.right_eye == nullptr) {
-        if (s_ui.body != nullptr) {
-            lv_image_set_src(s_ui.body, PetImagePath(mood, IsEggStage()));
+    if (s_ui.pet_widget != nullptr) {
+        return;
+    }
+    if (s_ui.use_image_art) {
+        if (s_ui.body == nullptr) {
+            return;
         }
+        lv_image_set_src(s_ui.body, PetImagePath(mood, IsEggStage()));
         return;
     }
 
@@ -421,6 +429,12 @@ void BuildPetArt(const char* stage) {
     if (s_ui.art == nullptr) {
         return;
     }
+    if (s_ui.pet_widget == nullptr) {
+        s_ui.pet_widget = pet_widget_create_simple(s_ui.art);
+    }
+    if (s_ui.pet_widget != nullptr) {
+        return;
+    }
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
     }
@@ -440,7 +454,8 @@ void BuildPetArt(const char* stage) {
     s_has_brows = false;
 
     const bool egg = stage == nullptr || std::strcmp(stage, "egg") == 0;
-    lv_obj_t* group = lv_image_create(s_ui.art);
+    lv_obj_t* group = s_ui.use_image_art ? lv_image_create(s_ui.art)
+                                         : lv_obj_create(s_ui.art);
     lv_obj_remove_style_all(group);
     lv_obj_set_style_bg_opa(group, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(group, 0, LV_PART_MAIN);
@@ -448,24 +463,46 @@ void BuildPetArt(const char* stage) {
     lv_obj_add_flag(group, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_remove_flag(group, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
-    lv_image_set_src(group, PetImagePath(s_base_mood, egg));
 
-    if (egg) {
+    if (s_ui.use_image_art) {
+        lv_image_set_src(group, PetImagePath(s_base_mood, egg));
         lv_obj_set_size(group, 360, 360);
         s_body_base_x = 150;
         s_body_base_y = 0;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+        if (!egg) {
+            const int scale = std::strcmp(stage, "adult") == 0
+                                  ? 108
+                                  : std::strcmp(stage, "teen") == 0 ? 102 : 96;
+            lv_obj_set_style_transform_pivot_x(group, 180, LV_PART_MAIN);
+            lv_obj_set_style_transform_pivot_y(group, 180, LV_PART_MAIN);
+            lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
+        }
     } else {
-        lv_obj_set_size(group, 360, 360);
-        const int scale = std::strcmp(stage, "adult") == 0
-                              ? 108
-                              : std::strcmp(stage, "teen") == 0 ? 102 : 96;
-        s_body_base_x = 150;
-        s_body_base_y = 0;
-        lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
-        lv_obj_set_style_transform_pivot_x(group, 180, LV_PART_MAIN);
-        lv_obj_set_style_transform_pivot_y(group, 180, LV_PART_MAIN);
-        lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
+        if (egg) {
+            lv_obj_set_size(group, 200, 230);
+            s_body_base_x = 230;
+            s_body_base_y = 64;
+            lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+            lv_obj_set_style_transform_pivot_x(group, 100, LV_PART_MAIN);
+            lv_obj_set_style_transform_pivot_y(group, 115, LV_PART_MAIN);
+            lv_obj_set_style_transform_scale(group, 480, LV_PART_MAIN);
+            DrawEgg(group);
+        } else {
+            lv_obj_set_size(group, 300, 240);
+            const int scale = std::strcmp(stage, "adult") == 0
+                                  ? 400
+                                  : std::strcmp(stage, "teen") == 0 ? 360 : 320;
+            s_body_base_x = 180;
+            s_body_base_y = std::strcmp(stage, "adult") == 0
+                                ? 58
+                                : std::strcmp(stage, "teen") == 0 ? 51 : 22;
+            lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+            DrawCreature(group, stage);
+            lv_obj_set_style_transform_pivot_x(group, 150, LV_PART_MAIN);
+            lv_obj_set_style_transform_pivot_y(group, 120, LV_PART_MAIN);
+            lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
+        }
     }
 
     s_ui.body = group;
@@ -642,6 +679,9 @@ void AnimSetScale(void* var, int32_t value) {
 }
 
 void StartIdleMotion() {
+    if (s_ui.pet_widget != nullptr) {
+        return;
+    }
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
@@ -748,6 +788,10 @@ void RestartIdleAsync(void* arg) {
 }
 
 void PlayPetRoll() {
+    if (s_ui.pet_widget != nullptr) {
+        pet_widget_trigger_happy(s_ui.pet_widget);
+        return;
+    }
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
@@ -1167,6 +1211,10 @@ void OnPetClicked(lv_event_t* /*event*/) {
     }
     s_last_tap_ms = now;
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+    if (s_ui.pet_widget != nullptr) {
+        pet_widget_trigger_happy(s_ui.pet_widget);
+        return;
+    }
     ApplyFace(PetMood::Happy);
     PlayPetRoll();
 }
