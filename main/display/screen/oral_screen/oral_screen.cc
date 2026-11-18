@@ -31,6 +31,18 @@ namespace {
 constexpr const char* TAG = "OralScreen";
 constexpr int32_t kPanelW = 720;
 constexpr int32_t kPanelH = 720;
+constexpr int32_t kHeaderH = 88;
+constexpr int32_t kBackBtnSize = 72;
+constexpr int32_t kHeaderRightPad = 16;
+constexpr int32_t kListPadH = 18;
+constexpr int32_t kListPadTop = 102;
+constexpr int32_t kListPadBottom = 32;
+constexpr int32_t kRowGap = 12;
+constexpr int32_t kBubblePadX = 18;
+constexpr int32_t kBubblePadY = 14;
+constexpr int32_t kBubbleRadius = 18;
+constexpr int32_t kSideMargin = 8;
+constexpr int32_t kMaxMessages = 12;
 constexpr const char* kRelayUrl =
     "wss://oemsbxavqkmtuyasxsba.supabase.co/functions/v1/oral-coach-relay-probe";
 constexpr int kInputSampleRate = 16000;
@@ -41,6 +53,18 @@ constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
 constexpr size_t kMaxAudioChunks = 8;
 constexpr size_t kMaxAudioBytes = 96 * 1024;
+constexpr uint32_t kColorBg = 0x0E1116;
+constexpr uint32_t kColorHeaderBg = 0x12151C;
+constexpr uint32_t kColorDivider = 0x2A2F3A;
+constexpr uint32_t kColorHeaderText = 0xFFFFFF;
+constexpr uint32_t kColorLeftBubble = 0x202736;
+constexpr uint32_t kColorRightBubble = 0x1E3A2F;
+constexpr uint32_t kColorLeftBubbleText = 0xE5E7EB;
+constexpr uint32_t kColorRightBubbleText = 0xE8F5E9;
+constexpr uint32_t kColorStatusListening = 0x34D399;
+constexpr uint32_t kColorStatusAnswering = 0x60A5FA;
+constexpr uint32_t kColorStatusConnecting = 0xFBBF24;
+constexpr uint32_t kColorStatusError = 0xF87171;
 
 enum class State { Idle, Connecting, Listening, Answering, Error };
 enum class BubbleRole { User, Assistant };
@@ -52,12 +76,17 @@ std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
 std::atomic<bool> s_response_done_pending{false};
 std::atomic<uint32_t> s_generation{0};
+std::atomic<uint32_t> s_last_done_response_id{0};
 
 lv_obj_t* s_screen = nullptr;
 lv_obj_t* s_title = nullptr;
 lv_obj_t* s_status = nullptr;
 lv_obj_t* s_text = nullptr;
+lv_obj_t* s_text_bubble = nullptr;
+lv_obj_t* s_assistant_row = nullptr;
 lv_obj_t* s_user_text_label = nullptr;
+lv_obj_t* s_user_text_bubble = nullptr;
+lv_obj_t* s_user_row = nullptr;
 lv_obj_t* s_chat = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
@@ -79,6 +108,58 @@ std::atomic<bool> s_audio_task_running{false};
 bool session_alive(uint32_t session) {
     return session == s_session.load(std::memory_order_acquire) &&
            s_state.load(std::memory_order_acquire) != State::Idle;
+}
+
+uint32_t status_color(State state) {
+    switch (state) {
+        case State::Listening:
+            return kColorStatusListening;
+        case State::Connecting:
+            return kColorStatusConnecting;
+        case State::Error:
+            return kColorStatusError;
+        case State::Answering:
+            return kColorStatusAnswering;
+        default:
+            return kColorStatusConnecting;
+    }
+}
+
+void trim_messages() {
+    if (s_chat == nullptr) return;
+    while (lv_obj_get_child_count(s_chat) > kMaxMessages) {
+        lv_obj_t* oldest = lv_obj_get_child(s_chat, 0);
+        if (oldest == nullptr) break;
+        if (oldest == s_assistant_row) {
+            s_assistant_row = nullptr;
+            s_text = nullptr;
+            s_text_bubble = nullptr;
+        }
+        if (oldest == s_user_row) {
+            s_user_row = nullptr;
+            s_user_text_label = nullptr;
+            s_user_text_bubble = nullptr;
+        }
+        lv_obj_delete(oldest);
+    }
+}
+
+int32_t bubble_width_for_text(const char* text, bool is_right) {
+    const lv_font_t* font = &font_puhui_20_4;
+    const int32_t max_bubble_w = kPanelW * (is_right ? 72 : 90) / 100;
+    int32_t text_w = lv_txt_get_width(text, std::strlen(text), font, 0);
+    if (text_w < 24) text_w = 24;
+    int32_t bubble_w = text_w + kBubblePadX * 2;
+    if (bubble_w > max_bubble_w) bubble_w = max_bubble_w;
+    return bubble_w;
+}
+
+void resize_bubble(lv_obj_t* bubble, lv_obj_t* label, const char* text, bool is_right) {
+    if (bubble == nullptr || label == nullptr) return;
+    const int32_t width = bubble_width_for_text(text, is_right);
+    lv_obj_set_width(bubble, width);
+    lv_obj_set_width(label, width - kBubblePadX * 2);
+    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
 }
 
 struct WakeWordGuard {
@@ -121,14 +202,18 @@ void post_ui(uint32_t session, State state, const char* status,
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
             s_state.store(item->state, std::memory_order_release);
-            if (s_status != nullptr) lv_label_set_text(s_status, item->status);
+            if (s_status != nullptr) {
+                lv_label_set_text(s_status, item->status);
+                lv_obj_set_style_text_color(s_status, lv_color_hex(status_color(item->state)), LV_PART_MAIN);
+            }
             if (item->append[0] == '\0' || s_chat == nullptr ||
                 item->generation != s_generation.load(std::memory_order_acquire)) return;
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text += item->append;
                 lv_label_set_text(s_user_text_label, s_user_text.c_str());
-                lv_obj_scroll_to_y(s_chat, LV_COORD_MAX, LV_ANIM_OFF);
+                resize_bubble(s_user_text_bubble, s_user_text_label, s_user_text.c_str(), true);
+                lv_obj_scroll_to_view_recursive(s_user_row, LV_ANIM_OFF);
                 return;
             }
             if (!item->replace_text && item->role == BubbleRole::Assistant &&
@@ -143,49 +228,57 @@ void post_ui(uint32_t session, State state, const char* status,
                     }
                 }
                 lv_label_set_text(s_text, s_answer.c_str());
-                lv_obj_scroll_to_y(s_chat, LV_COORD_MAX, LV_ANIM_OFF);
+                resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
+                lv_obj_scroll_to_view_recursive(s_assistant_row, LV_ANIM_OFF);
                 return;
             }
             bool is_user = item->role == BubbleRole::User;
             lv_obj_t* row = lv_obj_create(s_chat);
-            lv_obj_remove_style_all(row);
-            lv_obj_set_width(row, 660);
+            screen_strip_obj_chrome(row);
+            lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_pad_bottom(row, kRowGap, LV_PART_MAIN);
+            lv_obj_set_width(row, LV_PCT(100));
             lv_obj_set_height(row, LV_SIZE_CONTENT);
-            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(row,
-                                  LV_FLEX_ALIGN_START,
-                                  is_user ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
-                                  LV_FLEX_ALIGN_START);
-            lv_obj_set_style_pad_top(row, 4, LV_PART_MAIN);
-            lv_obj_set_style_pad_bottom(row, 4, LV_PART_MAIN);
 
             lv_obj_t* bubble = lv_obj_create(row);
-            lv_obj_remove_style_all(bubble);
-            lv_obj_set_width(bubble, 500);
+            screen_strip_obj_chrome(bubble);
             lv_obj_set_height(bubble, LV_SIZE_CONTENT);
-            lv_obj_set_style_bg_color(bubble,
-                                      lv_color_hex(is_user ? 0x2563EB : 0x1E293B),
-                                      LV_PART_MAIN);
+            lv_obj_set_style_radius(bubble, kBubbleRadius, LV_PART_MAIN);
+            lv_obj_set_style_border_width(bubble, 0, LV_PART_MAIN);
+            lv_obj_set_style_pad_hor(bubble, kBubblePadX, LV_PART_MAIN);
+            lv_obj_set_style_pad_ver(bubble, kBubblePadY, LV_PART_MAIN);
+            lv_obj_set_style_shadow_width(bubble, 0, LV_PART_MAIN);
+            lv_obj_remove_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(bubble, lv_color_hex(is_user ? kColorRightBubble : kColorLeftBubble), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_radius(bubble, 16, LV_PART_MAIN);
-            lv_obj_set_style_pad_all(bubble, 12, LV_PART_MAIN);
+            const int32_t width = bubble_width_for_text(item->append, is_user);
+            lv_obj_set_width(bubble, width);
+            if (is_user) lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, -kSideMargin, 0);
+            else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, kSideMargin, 0);
 
             lv_obj_t* label = lv_label_create(bubble);
             lv_label_set_text(label, item->append);
-            lv_obj_set_width(label, lv_pct(100));
+            lv_obj_set_width(label, width - kBubblePadX * 2);
             lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
-            lv_obj_set_style_text_color(label, lv_color_hex(0xF8FAFC), LV_PART_MAIN);
+            lv_obj_set_style_text_color(label, lv_color_hex(is_user ? kColorRightBubbleText : kColorLeftBubbleText), LV_PART_MAIN);
+            screen_make_input_passive(row);
             if (!is_user) {
                 s_text = label;
+                s_text_bubble = bubble;
+                s_assistant_row = row;
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer = item->append;
             } else {
                 s_user_text_label = label;
+                s_user_text_bubble = bubble;
+                s_user_row = row;
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text = item->append;
             }
-            lv_obj_scroll_to_y(s_chat, LV_COORD_MAX, LV_ANIM_OFF);
+            trim_messages();
+            lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
         }, payload) != LV_RESULT_OK) {
         delete payload;
     }
@@ -321,6 +414,9 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         s_generation.fetch_add(1, std::memory_order_acq_rel);
         s_response_done_pending.store(false, std::memory_order_release);
         s_mic_enabled.store(false, std::memory_order_release);
+        s_text = nullptr;
+        s_text_bubble = nullptr;
+        s_assistant_row = nullptr;
         post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
@@ -329,6 +425,14 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         }
     } else if (std::strcmp(type, "relay.response.done") == 0) {
         if (session_alive(session)) {
+            uint32_t response_id = 0;
+            const cJSON* response_item = cJSON_GetObjectItem(root, "responseId");
+            if (cJSON_IsNumber(response_item)) response_id = static_cast<uint32_t>(response_item->valuedouble);
+            if (response_id != 0 && response_id == s_last_done_response_id.load(std::memory_order_acquire)) {
+                cJSON_Delete(root);
+                return;
+            }
+            if (response_id != 0) s_last_done_response_id.store(response_id, std::memory_order_release);
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
             post_ui(session, State::Answering, "回答完成，正在恢复聆听…", BubbleRole::Assistant, nullptr);
@@ -396,6 +500,7 @@ void stream_microphone(uint32_t session) {
                 } else if (now - playback_idle_tick >= pdMS_TO_TICKS(250)) {
                     s_response_done_pending.store(false, std::memory_order_release);
                     s_mic_enabled.store(true, std::memory_order_release);
+                    send_ws_json("{\"type\":\"resume_mic\"}");
                     post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
                 }
             }
@@ -471,7 +576,11 @@ void start_session() {
     s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     s_text = nullptr;
+    s_text_bubble = nullptr;
+    s_assistant_row = nullptr;
     s_user_text_label = nullptr;
+    s_user_text_bubble = nullptr;
+    s_user_row = nullptr;
     clear_audio_queue();
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -496,8 +605,13 @@ void stop_session() {
 }
 
 void on_back(lv_event_t* /*event*/) {
+    lv_indev_t* indev = lv_indev_active();
+    if (indev != nullptr) lv_indev_wait_release(indev);
+    lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* home = HomeScreen::Create();
-    if (home != nullptr) lv_screen_load(home);
+    if (home == nullptr) return;
+    lv_screen_load(home);
+    if (old_scr != nullptr && old_scr != home) lv_obj_delete_async(old_scr);
 }
 
 void on_screen_unloaded(lv_event_t* /*event*/) {
@@ -507,7 +621,11 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_title = nullptr;
     s_status = nullptr;
     s_text = nullptr;
+    s_text_bubble = nullptr;
+    s_assistant_row = nullptr;
     s_user_text_label = nullptr;
+    s_user_text_bubble = nullptr;
+    s_user_row = nullptr;
     s_chat = nullptr;
 }
 
@@ -538,42 +656,64 @@ lv_obj_t* OralScreen::Create() {
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* header = lv_obj_create(screen);
-    lv_obj_remove_style_all(header);
-    lv_obj_set_size(header, lv_pct(100), 64);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(header, 12, LV_PART_MAIN);
+    screen_strip_obj_chrome(header);
+    lv_obj_add_flag(header, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(header, kPanelW, kHeaderH);
+    lv_obj_set_pos(header, 0, 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(kColorHeaderBg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* divider = lv_obj_create(header);
+    screen_strip_obj_chrome(divider);
+    lv_obj_set_size(divider, kPanelW, 1);
+    lv_obj_align(divider, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(divider, lv_color_hex(kColorDivider), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
+    screen_make_input_passive(divider);
 
     lv_obj_t* back = lv_button_create(header);
-    lv_obj_set_size(back, 52, 40);
-    lv_obj_set_style_radius(back, 12, LV_PART_MAIN);
-    lv_obj_t* back_label = lv_label_create(back);
-    lv_label_set_text(back_label, "←");
-    lv_obj_center(back_label);
+    lv_obj_remove_style_all(back);
+    lv_obj_set_size(back, kBackBtnSize, kBackBtnSize);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, 16, 0);
+    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(back, on_back, LV_EVENT_CLICKED, nullptr);
+    screen_swipe_back_ignore(back, true);
+    lv_obj_t* back_icon = lv_image_create(back);
+    lv_image_set_src(back_icon, "A:ic_app_back.spng");
+    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(back_icon);
 
-    s_title = create_label(header, "一丢口语", font_puhui_30_4, lv_color_hex(0xFFFFFF));
-    lv_obj_set_flex_grow(s_title, 1);
-    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    s_title = lv_label_create(header);
+    lv_label_set_text(s_title, "一丢口语");
+    lv_obj_set_style_text_color(s_title, lv_color_hex(kColorHeaderText), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_title, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_align(s_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 12, 0);
 
-    lv_obj_t* status_bar = lv_obj_create(screen);
-    lv_obj_remove_style_all(status_bar);
-    lv_obj_set_size(status_bar, lv_pct(100) - 48, 44);
-    lv_obj_set_pos(status_bar, 24, 76);
-    lv_obj_set_style_bg_color(status_bar, lv_color_hex(0x1E293B), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(status_bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(status_bar, 14, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(status_bar, 10, LV_PART_MAIN);
-    s_status = create_label(status_bar, "准备中…", font_puhui_20_4, lv_color_hex(0x93C5FD));
+    s_status = lv_label_create(header);
+    lv_label_set_text(s_status, "连接中…");
+    lv_obj_set_style_text_font(s_status, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_status, lv_color_hex(kColorStatusConnecting), LV_PART_MAIN);
+    lv_obj_align_to(s_status, s_title, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
+    screen_make_input_passive(s_status);
 
     s_chat = lv_obj_create(screen);
     lv_obj_remove_style_all(s_chat);
-    lv_obj_set_size(s_chat, lv_pct(100) - 48, 508);
-    lv_obj_set_pos(s_chat, 24, 132);
+    lv_obj_set_size(s_chat, kPanelW, kPanelH - kHeaderH);
+    lv_obj_set_pos(s_chat, 0, kHeaderH);
     lv_obj_set_flex_flow(s_chat, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chat, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_all(s_chat, 4, LV_PART_MAIN);
-    lv_obj_set_style_pad_gap(s_chat, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(s_chat, kListPadH, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(s_chat, kListPadH, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(s_chat, kListPadTop - kHeaderH, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_chat, kListPadBottom, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(s_chat, kRowGap, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_chat, lv_color_hex(kColorBg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_chat, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_add_flag(s_chat, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chat, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_AUTO);
