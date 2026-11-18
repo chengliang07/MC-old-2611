@@ -179,7 +179,7 @@ void flush_stream_text(uint32_t session) {
         text.swap(s_stream_text);
         s_stream_text_ms = 0;
     }
-    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
+    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str(), false);
 }
 
 struct WakeWordGuard {
