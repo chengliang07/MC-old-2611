@@ -44,6 +44,7 @@
 #include "recording_screen/recording_screen.h"
 #include "openclaw_screen/openclaw_screen.h"
 #include "pet_screen/pet_screen.h"
+#include "pet2_screen/pet2_screen.h"
 #include "ai_image_gen_screen/ai_image_gen_screen.h"
 #include "translate_screen/translate_screen.h"
 #include "secondary_screen/secondary_screen.h"
@@ -233,6 +234,11 @@ void english_lifecycle_cb(screen_lifecycle_event_t event) {
 void pet_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("pet", event);
     PetScreen::LifecycleCallback(event);
+}
+
+void pet2_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("pet2", event);
+    Pet2Screen::LifecycleCallback(event);
 }
 
 void oral_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -554,6 +560,16 @@ void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
 void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = PetScreen::Create(old_scr);
+    if (app == nullptr) {
+        return;
+    }
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+}
+
+void LaunchPet2(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = Pet2Screen::Create(old_scr);
     if (app == nullptr) {
         return;
     }
@@ -940,6 +956,7 @@ constexpr AppEntry kApps[] = {
     {"chat",           "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
     {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
     {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
+    {"pet",            "一丢宠物2", LaunchPet2,          pet2_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     // {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},

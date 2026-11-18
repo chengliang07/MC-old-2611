@@ -44,6 +44,8 @@ set(SOURCES "audio/audio_codec.cc"
             "display/screen/english_screen/english_screen.cc"
             "display/screen/pet_screen/pet_client.cc"
             "display/screen/pet_screen/pet_screen.cc"
+            "display/screen/pet2_screen/pet2_screen.cc"
+            "display/pet_widget/pet_widget.c"
             "display/screen/recording_screen/recording_screen.cc"
             "display/screen/weather_screen/weather_screen.cc"
             "display/screen/weather_screen/weather_icon_map.cc"
@@ -127,7 +129,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "i18n" "display" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/podcast_screen" "display/screen/english_screen" "display/screen/pet_screen" "display/screen/oral_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/camera_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/openclaw_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/secondary_screen" "display/screen/theme_screen" "display/screen/info_screen" "display/screen/standby_screen" "usb_extend_screen" "usb_extend_screen/include" "usb_extend_screen/tusb" "audio" "protocols")
+set(INCLUDE_DIRS "." "i18n" "display" "display/pet_widget" "display/font" "display/lvgl_display" "display/lvgl_display/jpg" "display/screen" "display/screen/boot_screen" "display/screen/ota_screen" "display/screen/home_screen" "display/screen/game_2048_screen" "display/screen/calculator_screen" "display/screen/calendar_screen" "display/screen/music_screen" "display/screen/radio_screen" "display/screen/podcast_screen" "display/screen/english_screen" "display/screen/pet_screen" "display/screen/pet2_screen" "display/screen/oral_screen" "display/screen/recording_screen" "display/screen/weather_screen" "display/screen/gps_screen" "display/screen/camera_screen" "display/screen/vibrate_screen" "display/screen/backlight_screen" "display/screen/settings_screen" "display/screen/call_screen" "display/screen/bluetooth_screen" "display/screen/chat_screen" "display/screen/network_screen" "display/screen/digital_people_screen" "display/screen/level_screen" "display/screen/magnet_screen" "display/screen/sd_card_screen" "display/screen/pin_test_screen" "display/screen/test_screen" "display/screen/openclaw_screen" "display/screen/ai_image_gen_screen" "display/screen/translate_screen" "display/screen/secondary_screen" "display/screen/theme_screen" "display/screen/info_screen" "display/screen/standby_screen" "usb_extend_screen" "usb_extend_screen/include" "usb_extend_screen/tusb" "audio" "protocols")
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
@@ -307,6 +309,34 @@ idf_component_register(SRCS ${SOURCES}
                     )
 
 target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_tsens)
+
+# Build provenance: stamp the git commit into the firmware so the boot banner
+# always tells which source tree produced this binary.
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT APP_GIT_COMMIT)
+    set(APP_GIT_COMMIT "unknown")
+endif()
+if(APP_GIT_STATUS)
+    set(APP_GIT_DIRTY 1)
+else()
+    set(APP_GIT_DIRTY 0)
+endif()
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    APP_GIT_COMMIT="${APP_GIT_COMMIT}"
+    APP_GIT_DIRTY=${APP_GIT_DIRTY})
+message(STATUS "Firmware provenance: ${APP_GIT_COMMIT} dirty=${APP_GIT_DIRTY}")
+
 
 # panic 写 Flash coredump 分区（需 partitions 含 subtype=coredump）
 target_link_libraries(${COMPONENT_LIB} PRIVATE idf::espcoredump)

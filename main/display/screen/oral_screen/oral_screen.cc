@@ -77,6 +77,7 @@ std::atomic<bool> s_mic_enabled{false};
 std::atomic<bool> s_response_done_pending{false};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<uint32_t> s_last_done_response_id{0};
+std::atomic<uint32_t> s_active_response_id{0};
 
 lv_obj_t* s_screen = nullptr;
 lv_obj_t* s_title = nullptr;
@@ -301,6 +302,20 @@ void flush_stream_text(uint32_t session) {
     post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
 }
 
+void clear_audio_queue();
+
+void close_websocket();
+
+void fail_session(uint32_t session, const char* message) {
+    s_stop_requested.store(true, std::memory_order_release);
+    s_ws_ready.store(false, std::memory_order_release);
+    s_mic_enabled.store(false, std::memory_order_release);
+    s_response_done_pending.store(false, std::memory_order_release);
+    s_active_response_id.store(0, std::memory_order_release);
+    post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
+    close_websocket();
+}
+
 void clear_audio_queue() {
     std::lock_guard<std::mutex> lock(s_audio_mutex);
     s_audio_chunks.clear();
@@ -329,7 +344,8 @@ void audio_playback_task(void* /*arg*/) {
         if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
         auto& audio = Application::GetInstance().GetAudioService();
         for (int attempt = 0;
-             attempt < 20 && !audio.PushPcmToPlaybackQueue(chunk.pcm.data(), chunk.pcm.size());
+             attempt < 20 && !audio.PushPcmToPlaybackQueue(
+                 chunk.pcm.data(), chunk.pcm.size(), chunk.generation);
              ++attempt) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -428,6 +444,12 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             post_ui(session, State::Answering, "思考中…", BubbleRole::User, text->valuestring);
         }
     } else if (std::strcmp(type, "relay.response.start") == 0) {
+        uint32_t response_id = 0;
+        const cJSON* response_item = cJSON_GetObjectItem(root, "responseId");
+        if (cJSON_IsNumber(response_item)) {
+            response_id = static_cast<uint32_t>(response_item->valuedouble);
+        }
+        s_active_response_id.store(response_id, std::memory_order_release);
         s_generation.fetch_add(1, std::memory_order_acq_rel);
         s_response_done_pending.store(false, std::memory_order_release);
         s_mic_enabled.store(false, std::memory_order_release);
@@ -442,6 +464,13 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
+        const cJSON* response_item = cJSON_GetObjectItem(root, "responseId");
+        const uint32_t response_id = cJSON_IsNumber(response_item)
+            ? static_cast<uint32_t>(response_item->valuedouble) : 0;
+        if (response_id != 0 && response_id != s_active_response_id.load(std::memory_order_acquire)) {
+            cJSON_Delete(root);
+            return;
+        }
         if (cJSON_IsString(delta) && delta->valuestring != nullptr) {
             {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -460,10 +489,15 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             uint32_t response_id = 0;
             const cJSON* response_item = cJSON_GetObjectItem(root, "responseId");
             if (cJSON_IsNumber(response_item)) response_id = static_cast<uint32_t>(response_item->valuedouble);
+            if (response_id != 0 && response_id != s_active_response_id.load(std::memory_order_acquire)) {
+                cJSON_Delete(root);
+                return;
+            }
             if (response_id != 0 && response_id == s_last_done_response_id.load(std::memory_order_acquire)) {
                 cJSON_Delete(root);
                 return;
             }
+            s_active_response_id.store(0, std::memory_order_release);
             if (response_id != 0) s_last_done_response_id.store(response_id, std::memory_order_release);
             flush_stream_text(session);
             s_mic_enabled.store(false, std::memory_order_release);
@@ -475,7 +509,9 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         const char* detail = cJSON_IsString(error) ? error->valuestring : "服务错误";
         char message[256];
         std::snprintf(message, sizeof(message), "错误：%s", detail);
-        post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
+        cJSON_Delete(root);
+        fail_session(session, message);
+        return;
     }
     cJSON_Delete(root);
 }
@@ -498,13 +534,12 @@ bool connect_websocket(uint32_t session, std::string& error) {
         else handle_json(data, len, session);
     });
     ws->OnDisconnected([]() {
-        s_ws_ready.store(false, std::memory_order_release);
-        s_stop_requested.store(true, std::memory_order_release);
+        fail_session(s_session.load(), "连接已断开，请返回重试");
     });
     ws->OnError([session](int code) {
         char message[128];
         std::snprintf(message, sizeof(message), "WebSocket 错误：%d", code);
-        post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
+        fail_session(session, message);
     });
     if (!ws->Connect(kRelayUrl)) {
         error = "连接口语服务失败";
@@ -608,6 +643,8 @@ void start_session() {
     s_ws_ready.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
+    s_last_done_response_id.store(0, std::memory_order_release);
+    s_active_response_id.store(0, std::memory_order_release);
     s_text = nullptr;
     s_text_bubble = nullptr;
     s_assistant_row = nullptr;
@@ -619,6 +656,8 @@ void start_session() {
         std::lock_guard<std::mutex> lock(s_text_mutex);
         s_answer.clear();
         s_user_text.clear();
+        s_stream_text.clear();
+        s_stream_text_ms = 0;
         s_resample_position = 0;
     }
     if (xTaskCreate(worker_task, "oral_ws", 4096, nullptr, 4, &s_worker_task) != pdPASS) {
@@ -768,11 +807,14 @@ bool OralScreen::IsActive() {
 void OralScreen::Interrupt() {
     if (!IsActive()) return;
     auto& audio = Application::GetInstance().GetAudioService();
+    audio.AbortPlaybackGeneration();
     audio.ClearPlaybackQueue();
     clear_audio_queue();
     s_generation.fetch_add(1, std::memory_order_acq_rel);
     s_response_done_pending.store(false, std::memory_order_release);
+    s_active_response_id.store(0, std::memory_order_release);
     send_ws_json("{\"type\":\"interrupt\"}");
+    vTaskDelay(pdMS_TO_TICKS(150));
     send_ws_json("{\"type\":\"resume_mic\"}");
     s_mic_enabled.store(true, std::memory_order_release);
     post_ui(s_session.load(), State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
