@@ -197,6 +197,11 @@ void clear_audio_queue() {
     s_audio_bytes = 0;
 }
 
+bool has_queued_audio() {
+    std::lock_guard<std::mutex> lock(s_audio_mutex);
+    return !s_audio_chunks.empty();
+}
+
 void audio_playback_task(void* /*arg*/) {
     while (true) {
         AudioChunk chunk;
@@ -326,7 +331,6 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         if (session_alive(session)) {
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
-            s_generation.fetch_add(1, std::memory_order_acq_rel);
             post_ui(session, State::Answering, "回答完成，正在恢复聆听…", BubbleRole::Assistant, nullptr);
         }
     } else if (std::strcmp(type, "relay.error") == 0) {
@@ -383,7 +387,7 @@ void stream_microphone(uint32_t session) {
 
     while (!s_stop_requested.load(std::memory_order_acquire) && session_alive(session)) {
         if (s_response_done_pending.load(std::memory_order_acquire)) {
-            if (audio.IsPlaybackPending()) {
+            if (audio.IsPlaybackPending() || has_queued_audio()) {
                 playback_idle_tick = 0;
             } else {
                 const TickType_t now = xTaskGetTickCount();
