@@ -1391,10 +1391,10 @@ int GetSavedNetworkType() {
 }
 
 // 与 network_screen 共用 "network/sim_slot" 这一 NVS key。
-// 返回 0 = 外置卡 / 1 = 内置卡（默认）。
+// 返回 0 = 外置卡（默认）/ 1 = 内置卡。
 int GetSavedSimSlot() {
     Settings settings("network", true);
-    int v = settings.GetInt("sim_slot", 1);
+    int v = settings.GetInt("sim_slot", 0);
     return (v == 1) ? 1 : 0;
 }
 
