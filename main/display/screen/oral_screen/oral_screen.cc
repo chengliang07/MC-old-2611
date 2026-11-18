@@ -168,6 +168,9 @@ uint32_t now_ms() {
     return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+void post_ui(uint32_t session, State state, const char* status,
+             BubbleRole role, const char* text, bool append);
+
 void flush_stream_text(uint32_t session) {
     std::string text;
     {
