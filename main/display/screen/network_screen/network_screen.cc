@@ -151,13 +151,13 @@ constexpr int        kNetTypeWifi     = 0;
 constexpr int        kNetTypeCellular = 1;
 
 // SIM 卡相关。
-//   - kSimSlotExternal = 0：外置卡
-//   - kSimSlotInternal = 1：内置卡（默认）
+//   - kSimSlotExternal = 0：外置卡（默认）
+//   - kSimSlotInternal = 1：内置卡
 // 切换通过 AT+ECSIMCFG=SimSlot,X 完成，需要 AT+CFUN=0 / AT+CFUN=1 包夹。
 // s_sim_switch_pending 用来在切换期间禁止重复按按钮。
 constexpr int        kSimSlotExternal = 0;
 constexpr int        kSimSlotInternal = 1;
-constexpr int        kSimSlotDefault = kSimSlotInternal;
+constexpr int        kSimSlotDefault = kSimSlotExternal;
 bool                 s_sim_switch_pending = false;
 
 // 前向声明
@@ -264,7 +264,7 @@ Nt26Board* GetNt26Board() {
     return dynamic_cast<Nt26Board*>(&board);
 }
 
-// 读取/写入用户选择的 SIM 槽位。默认 1 = 内置卡。这个值只用于 UI 高亮，
+// 读取/写入用户选择的 SIM 槽位。默认 0 = 外置卡。这个值只用于 UI 高亮，
 // 模组本身的当前槽位由 AT+ECSIMCFG 命令直接持久化在模组里。
 int GetSavedSimSlot() {
     Settings settings("network", true);
