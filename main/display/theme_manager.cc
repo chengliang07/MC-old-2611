@@ -14,8 +14,9 @@ constexpr const char* kKeyThemeId = "theme_id";
 }  // namespace
 
 int GetCurrentThemeId() {
-    Settings s(kSettingsNs, false);
-    int id = s.GetInt(kKeyThemeId, kDefaultThemeId);
+    // 启动/重建主屏阶段只读 NVS，禁止在 LVGL 线程写 Flash。
+    Settings reader(kSettingsNs, false);
+    int id = reader.GetInt(kKeyThemeId, kDefaultThemeId);
     if (id < kMinThemeId || id > kMaxThemeId) {
         id = kDefaultThemeId;
     }

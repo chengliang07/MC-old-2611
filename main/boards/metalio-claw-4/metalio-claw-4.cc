@@ -597,6 +597,8 @@ private:
     void InitializeNoLCD() { display_ = new NoDisplay(); }
 
 public:
+    // 默认内置 4G：设备自带流量，避免每次整包刷机后都要手动配 WiFi。
+    // 4G 初始化失败时保留 AT 通道，不关 modem、不触发重启循环。
     METALIO_CLAW_4() : DualNetworkBoard(NT26_TX_PIN, NT26_RX_PIN, NT26_MRDY_PIN, NT26_SRDY_PIN, 1) {
         InitializeI2C();
 

@@ -2,6 +2,7 @@
 #define SETTINGS_H
 
 #include <string>
+#include <functional>
 #include <nvs_flash.h>
 
 class Settings {
@@ -18,11 +19,17 @@ public:
     void EraseKey(const std::string& key);
     void EraseAll();
 
+    // 在内部 RAM 栈的专用任务上串行执行所有 NVS 写入。
+    static void EnqueueWrite(const std::string& ns,
+                             const std::function<void(nvs_handle_t)>& fn);
+
 private:
+    // 写入型对象不在构造时打开 NVS，避免在 LVGL 任务里触发 Flash 操作。
+    nvs_handle_t Handle();
+
     std::string ns_;
     nvs_handle_t nvs_handle_ = 0;
     bool read_write_ = false;
-    bool dirty_ = false;
 };
 
 #endif

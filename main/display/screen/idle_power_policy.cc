@@ -14,8 +14,8 @@ namespace {
 
 constexpr const char* TAG = "IdlePower";
 
-constexpr int kDefaultShutdownMin = 5;
-constexpr int kDefaultStandbyMin = 1;
+constexpr int kDefaultShutdownMin = 10;
+constexpr int kDefaultStandbyMin = 10;
 constexpr int kMaxMinutes = 60;
 constexpr const char* kShutdownNvsKey = "idle_off_min";
 constexpr const char* kStandbyNvsKey = "idle_stby_min";

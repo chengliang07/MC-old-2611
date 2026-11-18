@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cctype>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <esp_log.h>
@@ -29,14 +30,20 @@
 #include "camera_screen/camera_screen.h"
 #include "chat_screen/chat_screen.h"
 #include "digital_people_screen/digital_people_screen.h"
+#include "english_screen/english_screen.h"
 #include "game_2048_screen/game_2048_screen.h"
 #include "gps_screen/gps_screen.h"
 #include "level_screen/level_screen.h"
 #include "magnet_screen/magnet_screen.h"
 #include "music_screen/music_screen.h"
+#include "oral_screen/oral_screen.h"
+#include "podcast_screen/podcast_screen.h"
+#include "podcast_screen/podcast_client.h"
+#include "english_screen/english_client.h"
 #include "radio_screen/radio_screen.h"
 #include "recording_screen/recording_screen.h"
 #include "openclaw_screen/openclaw_screen.h"
+#include "pet_screen/pet_screen.h"
 #include "ai_image_gen_screen/ai_image_gen_screen.h"
 #include "translate_screen/translate_screen.h"
 #include "secondary_screen/secondary_screen.h"
@@ -211,6 +218,26 @@ void wifi_lifecycle_cb(screen_lifecycle_event_t event) {
 void chat_lifecycle_cb(screen_lifecycle_event_t event) {
     PwrKey_OnScreenLifecycle("chat", event);
     ChatScreen::LifecycleCallback(event);
+}
+
+void podcast_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("podcast", event);
+    PodcastScreen::LifecycleCallback(event);
+}
+
+void english_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("english", event);
+    EnglishScreen::LifecycleCallback(event);
+}
+
+void pet_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("pet", event);
+    PetScreen::LifecycleCallback(event);
+}
+
+void oral_lifecycle_cb(screen_lifecycle_event_t event) {
+    PwrKey_OnScreenLifecycle("oral", event);
+    OralScreen::LifecycleCallback(event);
 }
 
 void digital_people_lifecycle_cb(screen_lifecycle_event_t event) {
@@ -508,6 +535,105 @@ void LaunchChat(screen_lifecycle_cb_t lifecycle_cb) {
     if (old_scr != nullptr && old_scr != app) {
         lv_obj_delete_async(old_scr);
     }
+}
+
+void LaunchPodcast(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = PodcastScreen::Create(old_scr);
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+}
+
+void LaunchEnglish(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = EnglishScreen::Create(old_scr);
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+}
+
+void LaunchPet(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = PetScreen::Create(old_scr);
+    if (app == nullptr) {
+        return;
+    }
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+}
+
+void LaunchOral(screen_lifecycle_cb_t lifecycle_cb) {
+    lv_obj_t* old_scr = lv_screen_active();
+    lv_obj_t* app = OralScreen::Create();
+    if (app == nullptr) {
+        return;
+    }
+    screen_attach_lifecycle(app, lifecycle_cb);
+    lv_screen_load(app);
+    if (old_scr != nullptr && old_scr != app) {
+        // 保留来源页，返回时由 OralScreen 新建 HomeScreen。
+    }
+}
+
+void OpenPodcastFromCurrentAsync(void* /*arg*/) {
+    lv_obj_t* origin = lv_screen_active();
+    if (origin == nullptr) {
+        return;
+    }
+    lv_obj_t* podcast = PodcastScreen::Create(origin);
+    if (podcast == nullptr) {
+        return;
+    }
+    if (origin == ChatScreen::CurrentScreen()) {
+        ChatScreen::PrepareTemporaryLeave();
+    }
+    screen_attach_lifecycle(podcast, podcast_lifecycle_cb);
+    lv_screen_load(podcast);
+    // 不删除来源屏：返回时必须回到同一个学伴页面。
+}
+
+void OpenEnglishFromCurrentAsync(void* /*arg*/) {
+    lv_obj_t* origin = lv_screen_active();
+    if (origin == nullptr) {
+        return;
+    }
+    lv_obj_t* english = EnglishScreen::Create(origin);
+    if (english == nullptr) {
+        return;
+    }
+    if (origin == ChatScreen::CurrentScreen()) {
+        ChatScreen::PrepareTemporaryLeave();
+    }
+    screen_attach_lifecycle(english, english_lifecycle_cb);
+    lv_screen_load(english);
+}
+
+void OpenPetFromCurrentAsync(void* /*arg*/) {
+    lv_obj_t* origin = lv_screen_active();
+    if (origin == nullptr) {
+        return;
+    }
+    const bool from_chat = origin == ChatScreen::CurrentScreen();
+    lv_obj_t* return_screen = from_chat ? origin : HomeScreen::Create();
+    lv_obj_t* pet = PetScreen::Create(return_screen);
+    if (pet == nullptr) {
+        if (!from_chat && return_screen != nullptr) {
+            lv_obj_delete_async(return_screen);
+        }
+        return;
+    }
+    if (from_chat) {
+        ChatScreen::PrepareTemporaryLeave();
+    }
+    screen_attach_lifecycle(pet, pet_lifecycle_cb);
+    lv_screen_load(pet);
+    // 保留来源页；返回时回到点击进入前的页面。
+    if (!from_chat && origin != pet) {
+        // 不删除来源屏，避免逐次点击后累积 LVGL 异步删除任务。
+    }
+}
+
+void OpenChatAsync(void* /*arg*/) {
+    LaunchChat(chat_lifecycle_cb);
 }
 
 void LaunchDigitalPeople(screen_lifecycle_cb_t lifecycle_cb) {
@@ -809,34 +935,38 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
 // 主题图标，资源 ic_app_home_themeN_magnet.spng 缺失时该格会显示为空。
 // name 存 zh-CN msgid（源文案）；显示时用 I18n::T(entry.name)。
 constexpr AppEntry kApps[] = {
-    {"chat",           "聊天",     LaunchChat,          chat_lifecycle_cb,          true},
+    {"chat",           "一丢学伴", LaunchChat,          chat_lifecycle_cb,          true},
+    {"radio",          "一丢播客", LaunchPodcast,       podcast_lifecycle_cb,       true},
+    {"chat",           "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
+    {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
+    {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
-    {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
-    {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
-    {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
-    {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
-    {"openclaw",       "OpenClaw", LaunchOpenClaw,      openclaw_lifecycle_cb,      true},
-    {"espclaw",        "ESPClaw",  LaunchEspClaw,       nullptr,                    false},
-    {"camera",         "相机",     LaunchCamera,        camera_lifecycle_cb,        false},
-    {"gps",            "定位",     LaunchGps,           gps_lifecycle_cb,           true},
-    {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
-    {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
-    {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
-    {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
-    {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
-    {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
-    {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
-    {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
-    {"info",           "系统信息", LaunchInfo,          info_lifecycle_cb,          false},
-    {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
-    {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
-    {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
+    // {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
+    // {"call",           "电话",     LaunchCall,          call_lifecycle_cb,          false},
+    // {"music",          "音乐",     LaunchMusic,         music_lifecycle_cb,         false},
+    // {"calendar",       "日历",     LaunchCalendar,      calendar_lifecycle_cb,      false},
+    // {"openclaw",       "OpenClaw", LaunchOpenClaw,      openclaw_lifecycle_cb,      true},
+    // {"espclaw",        "ESPClaw",  LaunchEspClaw,       nullptr,                    false},
+    // {"camera",         "相机",     LaunchCamera,        camera_lifecycle_cb,        false},
+    // {"gps",            "定位",     LaunchGps,           gps_lifecycle_cb,           true},
+    // {"spirit_level",   "水平仪",   LaunchLevel,         level_lifecycle_cb,         false},
+    // {"magnet",         "磁场",     LaunchMagnet,        magnet_lifecycle_cb,        false},
+    // {"vibrate",        "震动",     LaunchVibrate,       vibrate_lifecycle_cb,       false},
+    // {"calculator",     "计算器",   LaunchCalculator,    calculator_lifecycle_cb,    false},
+    // {"weather",        "天气",     LaunchWeather,       weather_lifecycle_cb,       true},
+    {"sd",             "SD卡",     LaunchSdCard,        sd_card_lifecycle_cb,       false},
+    // {"pin",            "引脚测试", LaunchPinTest,       pin_test_lifecycle_cb,      false},
+    // {"2048",           "2048",     LaunchGame2048,      game_2048_lifecycle_cb,     false},
+    // {"info",           "系统信息", LaunchInfo,          info_lifecycle_cb,          false},
+    {"theme",          "主题",     LaunchTheme,         theme_lifecycle_cb,         false},
+    // {"test",           "测试",     LaunchTest,          test_lifecycle_cb,          false},
+    // {"radio",          "电台",     LaunchRadio,         radio_lifecycle_cb,         true},
     // 录音本地可用；仅「录音转写」按钮需要联网（见 recording_screen）。
-    {"recording",      "录音",     LaunchRecording,     recording_lifecycle_cb,     false},
-    {"ai_image_gen",   "AI生图",   LaunchAiImageGen,    ai_image_gen_lifecycle_cb,  true},
-    {"translate",      "翻译",     LaunchTranslate,     translate_lifecycle_cb,     true},
-    {"secondary_screen", "副屏",   LaunchSecondaryScreen, secondary_screen_lifecycle_cb, false},
+    // {"recording",      "录音",     LaunchRecording,     recording_lifecycle_cb,     false},
+    // {"ai_image_gen",   "AI生图",   LaunchAiImageGen,    ai_image_gen_lifecycle_cb,  true},
+    // {"translate",      "翻译",     LaunchTranslate,     translate_lifecycle_cb,     true},
+    // {"secondary_screen", "副屏",   LaunchSecondaryScreen, secondary_screen_lifecycle_cb, false},
 };
 
 constexpr int kTotalApps = static_cast<int>(sizeof(kApps) / sizeof(kApps[0]));
@@ -860,7 +990,9 @@ void EnsureIconPathsBuilt() {
     for (int i = 0; i < kTotalApps; ++i) {
         std::snprintf(s_icon_paths[i], kIconPathBufSize,
                       "A:ic_app_home_theme%d_%s.spng",
-                      tid, kApps[i].icon_suffix);
+                      tid,
+                      kApps[i].icon_suffix != nullptr ? kApps[i].icon_suffix
+                                                      : "unknown");
     }
     s_built_theme_id = tid;
     built = true;
@@ -1038,6 +1170,48 @@ lv_obj_t* CreateAppCellSkeleton(lv_obj_t* cell) {
     return skeleton;
 }
 
+lv_obj_t* CreatePetAppIcon(lv_obj_t* cell) {
+    // 宠物暂无主题 spng 资源。用与一丢英语（music）、一丢播客（radio）
+    // 主题2图标一致的白色底 + 橙色主体 + 黑色描边。
+    lv_obj_t* icon = lv_obj_create(cell);
+    lv_obj_remove_style_all(icon);
+    lv_obj_set_size(icon, kIconSize, kIconSize);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_radius(icon, 22, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon, 4, LV_PART_MAIN);
+    lv_obj_set_style_border_color(icon, lv_color_hex(0x111111),
+                                  LV_PART_MAIN);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 橙色爪印：大掌垫 + 四个小趾垫。
+    lv_obj_t* pad = lv_obj_create(icon);
+    lv_obj_remove_style_all(pad);
+    lv_obj_set_size(pad, 52, 42);
+    lv_obj_align(pad, LV_ALIGN_CENTER, 0, 14);
+    lv_obj_set_style_radius(pad, 22, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pad, lv_color_hex(0xF97316), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(pad, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(pad, LV_OBJ_FLAG_CLICKABLE);
+
+    const int toe_x[4] = {-30, -10, 12, 32};
+    const int toe_y[4] = {-22, -34, -34, -22};
+    const int toe_size[4] = {17, 18, 18, 17};
+    for (int i = 0; i < 4; ++i) {
+        lv_obj_t* toe = lv_obj_create(icon);
+        lv_obj_remove_style_all(toe);
+        lv_obj_set_size(toe, toe_size[i], toe_size[i] + 5);
+        lv_obj_align(toe, LV_ALIGN_CENTER, toe_x[i], toe_y[i]);
+        lv_obj_set_style_radius(toe, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(toe, lv_color_hex(0xF97316), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(toe, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_remove_flag(toe, LV_OBJ_FLAG_CLICKABLE);
+    }
+    return icon;
+}
+
 lv_obj_t* CreateAppCell(lv_obj_t* parent, const AppEntry& entry, int idx) {
     lv_obj_t* cell = lv_obj_create(parent);
     lv_obj_remove_style_all(cell);
@@ -1060,12 +1234,18 @@ lv_obj_t* CreateAppCell(lv_obj_t* parent, const AppEntry& entry, int idx) {
                                        LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_transform_scale(cell, 262, LV_PART_MAIN | LV_STATE_PRESSED);
 
-    // 路径取自 s_icon_paths[idx]：已按当前主题前缀解析好（ic_app_home_themeN_xxx）。
-    lv_obj_t* icon = lv_image_create(cell);
-    lv_image_set_src(icon, s_icon_paths[idx]);
-    lv_obj_set_size(icon, kIconSize, kIconSize);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    // child[0] 始终是图标容器，保证 skeleton 的 child[1] 下标不变。
+    lv_obj_t* icon = nullptr;
+    if (std::strcmp(entry.icon_suffix, "pet") == 0) {
+        icon = CreatePetAppIcon(cell);
+    } else {
+        // 路径取自 s_icon_paths[idx]：已按当前主题前缀解析好（ic_app_home_themeN_xxx）。
+        icon = lv_image_create(cell);
+        lv_image_set_src(icon, s_icon_paths[idx]);
+        lv_obj_set_size(icon, kIconSize, kIconSize);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     // child[1]：翻页骨架（与 icon 同位同尺寸），见 SetPagerSkeletonMode。
     CreateAppCellSkeleton(cell);
@@ -1204,7 +1384,7 @@ void UpdateHomeStatusBar(HomeStatusState* st);
 
 int GetSavedNetworkType() {
     // 与 DualNetworkBoard / network_screen 共用 NVS 读取逻辑
-    constexpr int kDefaultNetType = 1;  // 默认 4G，与 metalio-claw-4 板级一致
+    constexpr int kDefaultNetType = 1;  // 默认 4G；整包刷机后不再要求输入 WiFi
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kDefaultNetType);
     return type == NetworkType::ML307 ? 1 : 0;
@@ -1645,11 +1825,15 @@ lv_obj_t* CreateStatusBar(lv_obj_t* screen, HomeStatusState* st) {
 }
 
 void HighlightDot(PagerState* state, int page) {
-    if (page < 0 || page >= state->page_count) {
+    if (state == nullptr || page < 0 || page >= state->page_count ||
+        state->indicator == nullptr) {
         return;
     }
     state->current_page = page;
     for (int i = 0; i < state->page_count; ++i) {
+        if (state->dots[i] == nullptr) {
+            continue;
+        }
         // Active dot is fully opaque, idle dots are subtle.  We keep both
         // the color the same so the row reads as a connected element.
         lv_opa_t opa = (i == page) ? LV_OPA_COVER : LV_OPA_40;
@@ -2397,7 +2581,6 @@ lv_obj_t* HomeScreen::Create() {
     // 主题相关：根据 NVS 里的当前主题 id 把 kApps 的 icon_suffix 拼成完整
     // 路径，写入 s_icon_paths 缓存。后续 CreateAppCell 直接索引这份缓存。
     EnsureIconPathsBuilt();
-
     lv_obj_t* screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
@@ -2505,6 +2688,30 @@ int HomeScreen::GetIdleStandbyMinutes() {
 void HomeScreen::SetIdleStandbyMinutes(int minutes) {
     IdlePower_SetStandbyMinutes(minutes);
     IdlePower_NotifyActivity();
+}
+
+void HomeScreen::RequestOpenPodcastFromCurrentScreen() {
+    if (lv_async_call(OpenPodcastFromCurrentAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open podcast request dropped");
+    }
+}
+
+void HomeScreen::RequestOpenEnglishFromCurrentScreen() {
+    if (lv_async_call(OpenEnglishFromCurrentAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open english request dropped");
+    }
+}
+
+void HomeScreen::RequestOpenPetFromCurrentScreen() {
+    if (lv_async_call(OpenPetFromCurrentAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open pet request dropped");
+    }
+}
+
+void HomeScreen::RequestOpenChat() {
+    if (lv_async_call(OpenChatAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open chat request dropped");
+    }
 }
 
 void HomeScreen::RequestSystemShutdown(const char* reason) {

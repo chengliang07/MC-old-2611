@@ -33,6 +33,9 @@ void AudioService::Initialize(AudioCodec* codec) {
     codec_ = codec;
     codec_->Start();
 
+    // 预分配 AEC 自供参考环形缓冲（2 秒），运行期不再扩容，避免读写竞争
+    aec_ref_ring_.assign(32000, 0);
+
     /* Setup the audio codec */
     opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
     opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
@@ -50,11 +53,46 @@ void AudioService::Initialize(AudioCodec* codec) {
 #endif
 
     audio_processor_->OnOutput([this](std::vector<int16_t>&& data) {
+        if (voice_upload_muted_) {
+            // 回声诊断期间不上传任何麦克风数据，避免设备听到自己
+            return;
+        }
+        if (barge_in_active_ && !voice_detected_ &&
+            esp_timer_get_time() > voice_active_until_us_) {
+            // TTS 播放期间不上传回声，但保留最后 300ms 作为打断预录，
+            // 等 VAD 确认外部人声后补发，避免打断句子的开头被吃掉。
+            {
+                std::lock_guard<std::mutex> lock(preroll_mutex_);
+                barge_in_preroll_samples_ += data.size();
+                barge_in_preroll_.push_back(std::move(data));
+                while (barge_in_preroll_samples_ > 4800 &&
+                       !barge_in_preroll_.empty()) {
+                    barge_in_preroll_samples_ -= barge_in_preroll_.front().size();
+                    barge_in_preroll_.pop_front();
+                }
+            }
+            return;
+        }
+        if (barge_in_active_ && voice_detected_ && !preroll_flushed_) {
+            preroll_flushed_ = true;
+            std::deque<std::vector<int16_t>> preroll;
+            {
+                std::lock_guard<std::mutex> lock(preroll_mutex_);
+                preroll.swap(barge_in_preroll_);
+                barge_in_preroll_samples_ = 0;
+            }
+            for (auto& frame : preroll) {
+                PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue,
+                                      std::move(frame));
+            }
+        }
         PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(data));
     });
 
     audio_processor_->OnVadStateChange([this](bool speaking) {
         voice_detected_ = speaking;
+        // 语音结束后保留 400ms 尾巴，保证最后一个字能完整上行。
+        voice_active_until_us_ = esp_timer_get_time() + 400000;
         if (callbacks_.on_vad_change) {
             callbacks_.on_vad_change(speaking);
         }
@@ -170,6 +208,20 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
         data.resize(samples * codec_->input_channels());
         if (!codec_->InputData(data)) {
             return false;
+        }
+    }
+
+    // 自供 AEC 参考：把模组静音的 R 通道替换成设备自己播放过的 PCM，
+    // 按设定延迟回放，让 AEC 有可对齐的参考信号。
+    if (self_aec_ref_ && codec_->input_channels() == 2 && !aec_ref_ring_.empty()) {
+        constexpr int64_t kRing = 32000;
+        const uint32_t w = aec_ref_write_.load(std::memory_order_acquire);
+        const int n = static_cast<int>(data.size() / 2);
+        const int64_t delay = static_cast<int64_t>(aec_ref_delay_ms_.load()) * 16;
+        const int64_t start = static_cast<int64_t>(w) - delay - n;
+        for (int i = 0; i < n; ++i) {
+            const int64_t idx = start + i;
+            data[2 * i + 1] = (idx >= 0) ? aec_ref_ring_[idx % kRing] : 0;
         }
     }
 
@@ -293,7 +345,31 @@ void AudioService::AudioOutputTask() {
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
             codec_->EnableOutput(true);
         }
+        if (task->generation != 0 &&
+            task->generation != playback_generation_.load(std::memory_order_relaxed)) {
+            continue;
+        }
         codec_->OutputData(task->pcm);
+
+        // 服务端 AEC：记录这一帧下行音频的播放时间戳（FIFO，供上行帧对齐）
+        if (task->timestamp > 0) {
+            std::lock_guard<std::mutex> ts_lock(audio_queue_mutex_);
+            if (timestamp_queue_.size() >= 3) {
+                timestamp_queue_.pop_front();
+            }
+            timestamp_queue_.push_back(task->timestamp);
+        }
+
+        // 自供 AEC 参考：记录实际播放的 PCM。延迟固定使用已验证的最佳值。
+        if (self_aec_ref_ && !task->pcm.empty()) {
+            constexpr uint32_t kRing = 32000;
+            uint32_t w = aec_ref_write_.load(std::memory_order_relaxed);
+            for (int16_t sample : task->pcm) {
+                aec_ref_ring_[w % kRing] = sample;
+                ++w;
+            }
+            aec_ref_write_.store(w, std::memory_order_release);
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -327,6 +403,7 @@ void AudioService::OpusCodecTask() {
             auto task = std::make_unique<AudioTask>();
             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
             task->timestamp = packet->timestamp;
+            task->generation = packet->generation;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
@@ -339,6 +416,11 @@ void AudioService::OpusCodecTask() {
                 }
 
                 lock.lock();
+                if (task->generation != 0 &&
+                    task->generation !=
+                        playback_generation_.load(std::memory_order_relaxed)) {
+                    continue;
+                }
                 audio_playback_queue_.push_back(std::move(task));
                 audio_queue_cv_.notify_all();
             } else {
@@ -356,6 +438,7 @@ void AudioService::OpusCodecTask() {
             lock.unlock();
 
             auto packet = std::make_unique<AudioStreamPacket>();
+            packet->generation = playback_generation_.load(std::memory_order_relaxed);
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
             packet->sample_rate = 16000;
             packet->timestamp = task->timestamp;
@@ -407,13 +490,21 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
     
     /* Push the task to the encode queue */
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-
+    // 服务端 AEC：上行帧按 FIFO 取当前下行播放时间戳，供服务端对齐回声
+    if (type == kAudioTaskTypeEncodeToSendQueue && !timestamp_queue_.empty()) {
+        task->timestamp = timestamp_queue_.front();
+        timestamp_queue_.pop_front();
+    }
     audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
     audio_encode_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
 }
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
+    if (packet->generation != 0 &&
+        packet->generation != playback_generation_.load(std::memory_order_relaxed)) {
+        return true;
+    }
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
@@ -423,6 +514,24 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
         }
     }
     audio_decode_queue_.push_back(std::move(packet));
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
+bool AudioService::PushPcmToPlaybackQueue(const int16_t* pcm, size_t samples, uint32_t generation) {
+    if (pcm == nullptr || samples == 0) {
+        return false;
+    }
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task->pcm.assign(pcm, pcm + samples);
+    task->generation = generation;
+
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    if (audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE) {
+        return false;
+    }
+    audio_playback_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
     return true;
 }
@@ -454,6 +563,47 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
         return packet;
     }
     return nullptr;
+}
+
+void AudioService::AbortPlaybackGeneration() {
+    ResetDecoder();
+}
+
+void AudioService::ClearPlaybackQueue() {
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        audio_decode_queue_.clear();
+        audio_playback_queue_.clear();
+        timestamp_queue_.clear();
+        audio_queue_cv_.notify_all();
+    }
+    ResetDecoder();
+}
+
+bool AudioService::IsPlaybackPending() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return !audio_decode_queue_.empty() || !audio_playback_queue_.empty();
+}
+
+void AudioService::SetBargeInVad(bool enable, std::function<void()> on_detected,
+                                 bool flush_preroll) {
+    if (!wake_word_) {
+        return;
+    }
+    if (flush_preroll) {
+        for (auto& frame : wake_word_->TakeBargeInPreroll()) {
+            PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(frame));
+        }
+    }
+    if (!enable) {
+        wake_word_->SetBargeInVadCallback(nullptr);
+        return;
+    }
+    wake_word_->SetBargeInVadCallback([this, callback = std::move(on_detected)]() {
+        if (callback) {
+            callback();
+        }
+    });
 }
 
 void AudioService::EnableWakeWordDetection(bool enable) {
@@ -499,24 +649,51 @@ void AudioService::ReleaseWakeWordEngine() {
     }
 }
 
-void AudioService::EnableVoiceProcessing(bool enable) {
+void AudioService::EnableVoiceProcessing(bool enable, bool reset_decoder) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
     if (enable) {
+        voice_detected_ = false;
+        voice_active_until_us_ = 0;
         if (!audio_processor_initialized_) {
             audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
             audio_processor_initialized_ = true;
         }
-        // 每次启动都同步打断偏好，避免仅首次 init 后 AEC 状态漂移
+        // 每次启动都同步回声保护偏好，避免仅首次 init 后 AEC 状态漂移
         audio_processor_->EnableDeviceAec(device_aec_enabled_);
 
-        /* We should make sure no audio is playing */
-        ResetDecoder();
+        // 打断采集时播放仍在继续，不能清空 TTS 解码队列。
+        if (reset_decoder) {
+            ResetDecoder();
+        }
         audio_input_need_warmup_ = true;
         audio_processor_->Start();
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
     } else {
         audio_processor_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+    }
+}
+
+void AudioService::ReleaseVoiceProcessor() {
+    if (!audio_processor_initialized_) {
+        return;
+    }
+    ESP_LOGI(TAG, "Releasing voice processor (free AEC buffers)");
+    audio_processor_->Stop();
+    audio_processor_->Deinitialize();
+    audio_processor_initialized_ = false;
+    xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+}
+
+void AudioService::SetBargeInActive(bool active) {
+    barge_in_active_ = active;
+    if (active) {
+        voice_detected_ = false;
+        voice_active_until_us_ = 0;
+        std::lock_guard<std::mutex> lock(preroll_mutex_);
+        barge_in_preroll_.clear();
+        barge_in_preroll_samples_ = 0;
+        preroll_flushed_ = false;
     }
 }
 
@@ -656,6 +833,8 @@ bool AudioService::IsIdle() {
 void AudioService::ResetDecoder() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     opus_decoder_->ResetState();
+    playback_generation_.fetch_add(1, std::memory_order_relaxed);
+    timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();

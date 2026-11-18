@@ -20,6 +20,8 @@ public:
     virtual ~AudioCodec();
     
     virtual void SetOutputVolume(int volume);
+    // 只改硬件音量，不写 NVS（拖动预览用）。
+    virtual void SetOutputVolumeTransient(int volume);
     virtual void SetInputGain(float gain);
     virtual void EnableInput(bool enable);
     virtual void EnableOutput(bool enable);
@@ -51,7 +53,7 @@ protected:
     int output_sample_rate_ = 0;
     int input_channels_ = 1;
     int output_channels_ = 1;
-    int output_volume_ = 70;
+    int output_volume_ = 45;
     float input_gain_ = 0.0;
 
     virtual int Read(int16_t* dest, int samples) = 0;

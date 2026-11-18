@@ -17,13 +17,10 @@ MqttProtocol::MqttProtocol() {
     esp_timer_create_args_t reconnect_timer_args = {
         .callback = [](void* arg) {
             MqttProtocol* protocol = (MqttProtocol*)arg;
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateIdle) {
-                ESP_LOGI(TAG, "Reconnecting to MQTT server");
-                app.Schedule([protocol]() {
-                    protocol->StartMqttClient(false);
-                });
-            }
+            ESP_LOGI(TAG, "Reconnecting to MQTT server");
+            Application::GetInstance().Schedule([protocol]() {
+                protocol->StartMqttClient(false);
+            });
         },
         .arg = this,
     };
@@ -132,7 +129,12 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint, code=%d", mqtt_->GetLastError());
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
+        if (reconnect_timer_ != nullptr) {
+            esp_timer_start_once(reconnect_timer_, MQTT_RECONNECT_INTERVAL_MS * 1000);
+        }
         return false;
     }
 
@@ -188,7 +190,9 @@ void MqttProtocol::CloseAudioChannel() {
     message += "\"session_id\":\"" + session_id_ + "\",";
     message += "\"type\":\"goodbye\"";
     message += "}";
-    SendText(message);
+    if (mqtt_ != nullptr && mqtt_->IsConnected()) {
+        SendText(message);
+    }
 
     if (on_audio_channel_closed_ != nullptr) {
         on_audio_channel_closed_();
@@ -196,6 +200,9 @@ void MqttProtocol::CloseAudioChannel() {
 }
 
 bool MqttProtocol::OpenAudioChannel() {
+    if (IsAudioChannelOpened()) {
+        CloseAudioChannel();
+    }
     if (mqtt_ == nullptr || !mqtt_->IsConnected()) {
         ESP_LOGI(TAG, "MQTT is not connected, try to connect now");
         if (!StartMqttClient(true)) {

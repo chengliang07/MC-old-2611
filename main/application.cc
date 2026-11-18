@@ -11,6 +11,7 @@
 #include "settings.h"
 
 #include <cstring>
+#include <atomic>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <cJSON.h>
@@ -21,9 +22,22 @@
 #include <ssid_manager.h>
 #include <inttypes.h>
 
+void DiagLogEnableUdp(bool enable);
+
 #if CONFIG_ESP_HOSTED_ENABLED
 #include "esp_hosted.h"
 #endif
+
+// 回声诊断：播放 TTS 时运行通信 AFE 并打印 mic/ref/aec_out 能量，
+// 但不上传音频、不触发 VAD 打断，用于确认参考通道是否有效。
+// 自供 AEC 参考 + 双讲门限已验证可用，这里切换为生产行为：
+// 播放 TTS 时仍运行通信 AFE，但正常上行语音，并据双讲门限触发打断。
+constexpr bool kEchoDiagnostics = false;
+constexpr bool kBargeInByVad = true;
+// 自供 AEC 参考延迟：实测 40~100ms 效果最好，固定使用，不再轮换
+constexpr int kSelfAecDelayMs = 40;
+std::atomic<bool> g_barge_in_pending{false};
+Application* g_barge_in_app = nullptr;
 
 #ifdef HAVE_LVGL
 #include "ota_screen.h"
@@ -52,7 +66,7 @@ static const char* const STATE_STRINGS[] = {
 Application::Application() {
     event_group_ = xEventGroupCreate();
 
-    // 打断(AEC)默认关；开机后由 ApplyInterruptPreferenceFromNvs() 按 NVS 恢复
+    // 回声保护(AEC)默认关；开机后由 ApplyInterruptPreferenceFromNvs() 按 NVS 恢复
     aec_mode_ = kAecOff;
 
     esp_timer_create_args_t clock_timer_args = {
@@ -359,11 +373,12 @@ void Application::ToggleChatState() {
             if (!protocol_->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
                 if (!protocol_->OpenAudioChannel()) {
+                    SetDeviceState(kDeviceStateIdle);
                     return;
                 }
             }
 
-            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+            SetListeningMode(kListeningModeAutoStop);
         });
     } else if (device_state_ == kDeviceStateSpeaking) {
         Schedule([this]() {
@@ -406,6 +421,7 @@ void Application::StartListening() {
             if (!protocol_->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
                 if (!protocol_->OpenAudioChannel()) {
+                    SetDeviceState(kDeviceStateIdle);
                     return;
                 }
             }
@@ -528,6 +544,9 @@ void Application::Start() {
 
     /* Wait for the network to be ready */
     board.StartNetwork();
+    // lwIP 就绪后再启用 UDP 诊断通道（提前创建 socket 会导致启动崩溃）
+    // kSelfAecDelayMs 为自供 AEC 参考延迟，由 SetDeviceState 在播放时设置
+    DiagLogEnableUdp(true);
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
@@ -542,7 +561,7 @@ void Application::Start() {
     //加载唤醒词模型
     GetAudioService().SetModelsList(esp_srmodel_init("model"));
     GetAudioService().EnableWakeWordDetection(false);
-    // 模型就绪后再同步打断(AEC)偏好，避免处理器尚未初始化
+    // 模型就绪后再同步回声保护(AEC)偏好，避免处理器尚未初始化
     ApplyInterruptPreferenceFromNvs();
 
     // Initialize the protocol
@@ -570,8 +589,27 @@ void Application::Start() {
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
+    protocol_->OnDisconnected([this]() {
+        // 通道中途断开时如果仍停在 listening，麦克风会一直往空通道推流，
+        // 表现为“聆听中但说话没反应”。这里统一退回 idle，等自动重连。
+        Schedule([this]() {
+            if (device_state_ != kDeviceStateListening &&
+                device_state_ != kDeviceStateSpeaking) {
+                return;
+            }
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetChatMessage("system", "");
+            abort_suppress_until_us_ = 0;
+            aborted_ = false;
+            SetDeviceState(kDeviceStateIdle);
+        });
+    });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        if (aborted_) {
+            return;
+        }
         if (device_state_ == kDeviceStateSpeaking) {
+            packet->generation = audio_service_.GetPlaybackGeneration();
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -587,6 +625,8 @@ void Application::Start() {
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
+            abort_suppress_until_us_ = 0;
+            aborted_ = false;
             SetDeviceState(kDeviceStateIdle);
         });
     });
@@ -596,7 +636,14 @@ void Application::Start() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
+                    if (esp_timer_get_time() < abort_suppress_until_us_) {
+                        // 本地打断后服务端可能还在发旧 TTS，忽略迟到的 start，
+                        // 否则会被拉回 Speaking 继续播放，导致用户这句话识别不到。
+                        ESP_LOGW(TAG, "ignore stale tts start after abort");
+                        return;
+                    }
+                    display->BeginAssistantRound();
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
@@ -628,7 +675,60 @@ void Application::Start() {
                 Schedule([this, display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
                 });
+#ifdef HAVE_LVGL
+                // 后端未接入设备 MCP 时的本地兜底：
+                // “打开/听/一丢 + 播客”直接进入播客页，不再等 LLM 调工具。
+                std::string user_text(text->valuestring);
+                // 语音识别对“播客”常给出“博客/电台/广播”等近似词，统一归到播客。
+                const bool mentions_podcast =
+                    user_text.find("播客") != std::string::npos ||
+                    user_text.find("博客") != std::string::npos ||
+                    user_text.find("电台") != std::string::npos ||
+                    user_text.find("广播") != std::string::npos;
+                // 只说“播客/一丢播客/博客”也要能进，不再要求带“打开/听”。
+                const bool wants_podcast = mentions_podcast;
+                const bool wants_english =
+                    user_text.find("英语") != std::string::npos &&
+                    (user_text.find("打开") != std::string::npos ||
+                     user_text.find("一丢") != std::string::npos ||
+                     user_text.find("复习") != std::string::npos);
+                const bool wants_pet =
+                    user_text.find("宠物") != std::string::npos &&
+                    (user_text.find("打开") != std::string::npos ||
+                     user_text.find("一丢") != std::string::npos ||
+                     user_text.find("看看") != std::string::npos ||
+                     user_text.find("喂") != std::string::npos ||
+                     user_text.find("孵化") != std::string::npos);
+                if (wants_podcast || wants_english || wants_pet) {
+                    Schedule([this, wants_podcast, wants_pet]() {
+                        ESP_LOGI(TAG, "local intent: open %s",
+                                 wants_podcast ? "podcast" :
+                                 (wants_pet ? "pet" : "english"));
+                        if (device_state_ == kDeviceStateSpeaking) {
+                            AbortSpeaking(kAbortReasonNone);
+                        } else if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                            protocol_->SendStopListening();
+                        }
+                        if (wants_podcast) {
+                            HomeScreen::RequestOpenPodcastFromCurrentScreen();
+                        } else if (wants_pet) {
+                            HomeScreen::RequestOpenPetFromCurrentScreen();
+                        } else {
+                            HomeScreen::RequestOpenEnglishFromCurrentScreen();
+                        }
+                    });
+                }
+#endif
             }
+        } else if (strcmp(type->valuestring, "abort") == 0) {
+            // 服务端主动下发中断：停播放并切回聆听（对应方案中的 server→device abort）。
+            ESP_LOGI(TAG, "server abort received");
+            Schedule([this]() {
+                if (device_state_ == kDeviceStateSpeaking) {
+                    aborted_ = true;
+                    SetListeningMode(kListeningModeAutoStop);
+                }
+            });
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
@@ -685,7 +785,6 @@ void Application::Start() {
     // 启动流水线完成（联网/OTA/激活/协议）后才标记就绪；勿把 starting 或中途 Idle 当已激活
     boot_ready_ = true;
     SetDeviceState(kDeviceStateIdle);
-    audio_service_.EnableWakeWordDetection(false);
 
     has_server_time_ = ota.HasServerTime();
     if (protocol_started) {
@@ -715,6 +814,7 @@ void Application::MainEventLoop() {
             MAIN_EVENT_SEND_AUDIO |
             MAIN_EVENT_WAKE_WORD_DETECTED |
             MAIN_EVENT_VAD_CHANGE |
+            MAIN_EVENT_BARGE_IN |
             MAIN_EVENT_CLOCK_TICK |
             MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
 
@@ -737,10 +837,37 @@ void Application::MainEventLoop() {
             }
         }
 
+        if (bits & MAIN_EVENT_BARGE_IN) {
+            if (device_state_ == kDeviceStateSpeaking &&
+                aec_mode_ != kAecOff && kBargeInByVad &&
+                g_barge_in_pending.exchange(false, std::memory_order_relaxed)) {
+                ESP_LOGI(TAG, "local VAD barge-in, abort speaking");
+                audio_service_.SetVoiceUploadMuted(false);
+                audio_service_.SetBargeInVad(false, nullptr, true);
+                audio_service_.AbortPlaybackGeneration();
+                AbortSpeaking(kAbortReasonNone);
+                SetListeningMode(kListeningModeAutoStop);
+                if (protocol_) {
+                    protocol_->SendStartListening(listening_mode_);
+                }
+            }
+        }
+
         if (bits & MAIN_EVENT_VAD_CHANGE) {
             if (device_state_ == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
+            } else if (kBargeInByVad &&
+                       device_state_ == kDeviceStateSpeaking &&
+                       aec_mode_ == kAecOnDeviceSide &&
+                       audio_service_.IsAudioProcessorRunning() &&
+                       esp_timer_get_time() >= barge_in_ready_at_us_ &&
+                       audio_service_.IsVoiceDetected()) {
+                // 本地 VAD 只会在 AEC 之后检测到外部语音时触发；
+                // 立即停止本轮 TTS 并转入聆听，不再依赖服务端判断。
+                ESP_LOGI(TAG, "barge-in detected, abort speaking");
+                AbortSpeaking(kAbortReasonNone);
+                SetListeningMode(kListeningModeAutoStop);
             }
         }
 
@@ -782,6 +909,7 @@ void Application::OnWakeWordDetected() {
                 if (voice_ui_active_) {
                     audio_service_.EnableWakeWordDetection(true);
                 }
+                SetDeviceState(kDeviceStateIdle);
                 return;
             }
         }
@@ -794,15 +922,26 @@ void Application::OnWakeWordDetected() {
             protocol_->SendAudio(std::move(packet));
         }
         // Set the chat state to wake word detected
-        protocol_->SendWakeWordDetected("Hi 钛灵");
-        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+        protocol_->SendWakeWordDetected(wake_word);
+        SetListeningMode(kListeningModeAutoStop);
 #else
-        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+        SetListeningMode(kListeningModeAutoStop);
         // Play the pop up sound to indicate the wake word is detected
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
     } else if (device_state_ == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonWakeWordDetected);
+        // 打断开启时，播放中听到唤醒词立即停止本轮回答并进入聆听。
+        if (aec_mode_ != kAecOff) {
+            ESP_LOGI(TAG, "wake word during speaking, interrupt");
+            audio_service_.SetVoiceUploadMuted(false);
+            audio_service_.SetBargeInVad(false, nullptr, true);
+            audio_service_.AbortPlaybackGeneration();
+            AbortSpeaking(kAbortReasonNone);
+            SetListeningMode(kListeningModeAutoStop);
+            if (protocol_) {
+                protocol_->SendStartListening(listening_mode_);
+            }
+        }
     } else if (device_state_ == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
     }
@@ -811,6 +950,7 @@ void Application::OnWakeWordDetected() {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    abort_suppress_until_us_ = esp_timer_get_time() + 2500000;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
@@ -843,6 +983,10 @@ void Application::SetDeviceState(DeviceState state) {
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
+            audio_service_.SetBargeInActive(false);
+            audio_service_.SetBargeInVad(false, nullptr);
+            audio_service_.SetVoiceUploadMuted(false);
+            audio_service_.SetSelfAecReference(false);
             audio_service_.EnableVoiceProcessing(false);
             // 唤醒词仅在聊天/数字人会话内开启；桌面必须 Release 掉 AFE。
             if (voice_ui_active_) {
@@ -857,28 +1001,69 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening:
+        case kDeviceStateListening: {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            // 打断后进入聆听：继续保留通信 AFE 与自供参考，仅关闭打断门限；
+            // 恢复正常上行与人声判定，等待用户说话。
+            audio_service_.SetVoiceUploadMuted(false);
+            audio_service_.SetBargeInVad(false, nullptr);
+            audio_service_.SetSelfAecReference(false);
+            audio_service_.SetBargeInActive(false);
+            if (aec_mode_ == kAecOnDeviceSide) {
+                audio_service_.GetAudioProcessor()->SetEchoGate(false);
+            }
 
-            // Make sure the audio processor is running
-            if (!audio_service_.IsAudioProcessorRunning()) {
-                // Send the start listening command
-                protocol_->SendStartListening(listening_mode_);
+            // 从 Speaking（本地打断）进入 Listening 时 AFE 已在运行，
+            // 仍需补发 listen start，否则服务端不会开始接收本轮语音。
+            bool need_start_listening = (previous_state == kDeviceStateSpeaking);
+            if (previous_state == kDeviceStateSpeaking ||
+                !audio_service_.IsAudioProcessorRunning()) {
+                // 打断后必须清空未播放完的 TTS 并重置 AFE：
+                // 否则设备会继续放自己的尾音，服务端只能听到回声，识别不到用户。
+                need_start_listening = true;
                 audio_service_.EnableVoiceProcessing(true);
                 audio_service_.EnableWakeWordDetection(false);
             }
+            if (need_start_listening && protocol_) {
+                protocol_->SendStartListening(listening_mode_);
+            }
             break;
+        }
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
 
-            if (listening_mode_ != kListeningModeRealtime) {
+            // 该模组的 AEC 参考通道无法消掉外放回声，通信 AFE 的 VAD 会把
+            // 自己的声音当成用户语音，导致每句话都被自己打断。
+            // 因此播放 TTS 时只保留唤醒词引擎（带 AEC）：
+            // 用户说“你好一丢”即可打断，且不会被任意回声误触发。
+            if (aec_mode_ != kAecOff) {
+                // 本机 AEC 参考通道无效（ref 恒为 0），全双工上行必然把扬声器
+                // 回声送给服务端并触发误打断。因此播放 TTS 时不上行麦克风，
+                // 但唤醒词 AFE 同样依赖 R 通道做 AEC；把实际播放 PCM 注入参考
+                // 通道，外放时说“你好一丢”才能被检测到并打断本轮回答。
+                audio_service_.SetVoiceUploadMuted(true);
+                audio_service_.SetSelfAecReference(true);
+                audio_service_.SetSelfAecDelayMs(kSelfAecDelayMs);
+                audio_service_.GetAudioProcessor()->SetEchoGate(false);
+                audio_service_.SetBargeInActive(false);
+                barge_in_ready_at_us_ = esp_timer_get_time() + 1200000;
                 audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(
-                    voice_ui_active_ && audio_service_.IsAfeWakeWord());
+                audio_service_.EnableWakeWordDetection(true);
+                if (kBargeInByVad) {
+                    g_barge_in_pending.store(false, std::memory_order_relaxed);
+                    g_barge_in_app = this;
+                    audio_service_.SetBargeInVad(true, nullptr);
+                }
+            } else {
+                audio_service_.SetVoiceUploadMuted(false);
+                audio_service_.SetSelfAecReference(false);
+                audio_service_.GetAudioProcessor()->SetEchoGate(false);
+                audio_service_.SetBargeInActive(false);
+                audio_service_.EnableVoiceProcessing(false);
+                audio_service_.EnableWakeWordDetection(false);
+                audio_service_.SetBargeInVad(false, nullptr);
             }
-            audio_service_.ResetDecoder();
             break;
         default:
             // Do nothing
@@ -985,6 +1170,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
                 if (voice_ui_active_) {
                     audio_service_.EnableWakeWordDetection(true);
                 }
+                SetDeviceState(kDeviceStateIdle);
                 return;
             }
         }
@@ -997,9 +1183,9 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         }
         // Set the chat state to wake word detected
         protocol_->SendWakeWordDetected(wake_word);
-        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+        SetListeningMode(kListeningModeAutoStop);
 #else
-        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+        SetListeningMode(kListeningModeAutoStop);
         // Play the pop up sound to indicate the wake word is detected
         audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
 #endif
@@ -1049,31 +1235,35 @@ void Application::SendMcpMessage(const std::string& payload) {
 }
 
 void Application::SetAecMode(AecMode mode) {
-    if (mode != kAecOff && mode != kAecOnDeviceSide) {
+    if (mode != kAecOff && mode != kAecOnDeviceSide && mode != kAecOnServerSide) {
         ESP_LOGW(TAG, "unsupported AecMode %d, fallback Off", static_cast<int>(mode));
         mode = kAecOff;
     }
 
     aec_mode_ = mode;
     {
-        // NVS 键最长 15 字符；interrupt 记忆「是否开启打断」
+        // NVS 键最长 15 字符；interrupt 记忆「是否开启回声保护」
         Settings settings("audio", true);
         settings.SetBool("interrupt", aec_mode_ != kAecOff);
     }
-
-    // 同步写入偏好，避免 Schedule 前已按 Realtime 进聆听却尚未 EnableDeviceAec
-    audio_service_.EnableDeviceAec(aec_mode_ == kAecOnDeviceSide);
+    // 只更新偏好，不在播放/聆听中重建 AFE；下一轮 EnableVoiceProcessing
+    // 会读取该偏好并应用。
+    if (!audio_service_.IsAudioProcessorRunning()) {
+        audio_service_.EnableDeviceAec(aec_mode_ == kAecOnDeviceSide);
+    }
 
     Schedule([this]() {
         auto& board = Board::GetInstance();
         auto display = board.GetDisplay();
-        if (aec_mode_ == kAecOnDeviceSide) {
+        // 点击瞬间不创建/销毁 AFE：空闲态两套 AFE 同时常驻会硬复位。
+        // 偏好由下一次 EnableVoiceProcessing 时同步到通信 AFE。
+        if (aec_mode_ != kAecOff) {
             display->ShowNotification(Lang::Strings::RTC_MODE_ON);
         } else {
             display->ShowNotification(Lang::Strings::RTC_MODE_OFF);
         }
 
-        // If the AEC mode is changed, close the audio channel
+        // 切换偏好后关闭长连接，下一轮重新建立聆听会话。
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();
         }
@@ -1081,12 +1271,19 @@ void Application::SetAecMode(AecMode mode) {
 }
 
 void Application::ApplyInterruptPreferenceFromNvs() {
-    Settings settings("audio");
-    // 无记录时默认关打断，避免上电即全双工
-    const bool interrupt_on = settings.GetBool("interrupt", false);
+    Settings settings("audio", true);
+    // 播放期间的“打断”依赖唤醒词 AFE：把实际播放 PCM 注入 R 参考通道，
+    // 说“你好一丢”即可停 TTS 并进入聆听；不做麦克风持续上行。
+    // 2.0.96 一次性迁移：旧版可能把 interrupt 存成 false，首次启动强制恢复。
+    Settings migration("firmware", true);
+    if (!migration.GetBool("interrupt_v296", false)) {
+        settings.SetBool("interrupt", true);
+        migration.SetBool("interrupt_v296", true);
+    }
+    const bool interrupt_on = settings.GetBool("interrupt", true);
     aec_mode_ = interrupt_on ? kAecOnDeviceSide : kAecOff;
-    audio_service_.EnableDeviceAec(interrupt_on);
-    ESP_LOGI(TAG, "interrupt preference: %s (device AEC)", interrupt_on ? "on" : "off");
+    audio_service_.EnableDeviceAec(aec_mode_ == kAecOnDeviceSide);
+    ESP_LOGI(TAG, "interrupt preference: %s (wake-word AEC)", interrupt_on ? "on" : "off");
 }
 
 void Application::PlaySound(const std::string_view& sound) {
@@ -1097,8 +1294,10 @@ void Application::PlaySound(const std::string_view& sound) {
 }
 
 void Application::SoftStopVoiceAudioPaths() {
+    audio_service_.SetBargeInActive(false);
     audio_service_.EnableWakeWordDetection(false);
     audio_service_.EnableVoiceProcessing(false);
+    audio_service_.ReleaseVoiceProcessor();
 }
 
 void Application::TearDownVoiceAudioPaths(bool release_wake_word) {
@@ -1201,6 +1400,11 @@ bool Application::TryEnableWakeWordForVoiceUi() {
 void Application::SetVoiceUiDesired(bool desired) {
     if (voice_ui_desired_ == desired) {
         ESP_LOGD(TAG, "voice UI desired unchanged (%d)", desired ? 1 : 0);
+        if (desired) {
+            abort_suppress_until_us_ = 0;
+            aborted_ = false;
+            Schedule([this]() { SyncVoiceUiSession(); });
+        }
         return;
     }
     voice_ui_desired_ = desired;
@@ -1221,6 +1425,8 @@ void Application::SetVoiceUiDesired(bool desired) {
     }
 
     CancelVoiceUiHardRelease();
+    abort_suppress_until_us_ = 0;
+    aborted_ = false;
     Schedule([this]() { SyncVoiceUiSession(); });
 }
 

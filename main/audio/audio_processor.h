@@ -21,6 +21,10 @@ public:
     virtual void OnVadStateChange(std::function<void(bool speaking)> callback) = 0;
     virtual size_t GetFeedSize() = 0;
     virtual void EnableDeviceAec(bool enable) = 0;
+    // 释放底层音频处理器占用的内存（无内部资源的实现可为空）
+    virtual void Deinitialize() {}
+    // 双讲门限：播放 TTS 时只把明显高于回声基线的人声判定为打断
+    virtual void SetEchoGate(bool enable) { (void)enable; }
 };
 
 #endif

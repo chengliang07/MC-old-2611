@@ -27,10 +27,19 @@ class ChatScreen {
  public:
     static lv_obj_t* Create();
     static void LifecycleCallback(screen_lifecycle_event_t event);
+    // 临时切到其他应用（播客）：保留本页对象和静态状态，返回时原样恢复。
+    static void PrepareTemporaryLeave();
+    // 从临时应用返回：重新拉起语音会话，避免返回后学伴无声。
+    static void ResumeAfterTemporaryLeave();
+    static lv_obj_t* CurrentScreen();
 
     // 由 LVAdapterDisplay::SetChatMessage 在持有 esp_lv_adapter 锁后调用。
     // 屏幕未加载时 no-op。
     static void AddMessage(const char* text, ChatMsgDir dir);
+
+    // 一轮 TTS 开始时重置助手气泡；后续 sentence_start 追加到同一气泡。
+    static void BeginAssistantRound();
+    static void AppendAssistantMessage(const char* text);
 
     // 清空消息列表（"清空" 按钮 / 外部调用）。
     static void ClearMessages();

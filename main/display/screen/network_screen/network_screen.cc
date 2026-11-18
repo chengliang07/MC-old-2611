@@ -157,6 +157,7 @@ constexpr int        kNetTypeCellular = 1;
 // s_sim_switch_pending 用来在切换期间禁止重复按按钮。
 constexpr int        kSimSlotExternal = 0;
 constexpr int        kSimSlotInternal = 1;
+constexpr int        kSimSlotDefault = kSimSlotExternal;
 bool                 s_sim_switch_pending = false;
 
 // 前向声明
@@ -235,7 +236,7 @@ const char* rssi_quality_text(int8_t rssi) {
 bool screen_alive() { return s_screen_active && s_ui.screen != nullptr; }
 
 int GetSavedNetworkType() {
-    // 与 DualNetworkBoard 启动时读 NVS 的逻辑一致（默认 4G=1，与 metalio-claw-4 板级一致）
+    // 与 DualNetworkBoard 启动时读 NVS 的逻辑一致（默认 4G=1，见金属爪 4 板级）
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeCellular);
     return type == NetworkType::ML307 ? kNetTypeCellular : kNetTypeWifi;
@@ -267,7 +268,7 @@ Nt26Board* GetNt26Board() {
 // 模组本身的当前槽位由 AT+ECSIMCFG 命令直接持久化在模组里。
 int GetSavedSimSlot() {
     Settings settings("network", true);
-    int v = settings.GetInt("sim_slot", kSimSlotExternal);
+    int v = settings.GetInt("sim_slot", kSimSlotDefault);
     return (v == kSimSlotInternal) ? kSimSlotInternal : kSimSlotExternal;
 }
 
@@ -680,7 +681,10 @@ void connect_task(void* arg) {
     // 准备：停止扫描 + 断开当前连接，然后写新配置 + connect
     esp_wifi_scan_stop();
     esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 12298 = ESP_ERR_WIFI_WOULD_BLOCK：扫描/上一次连接尚未完全退出时，
+    // esp_wifi_set_config / esp_wifi_connect 会被驱动拒绝。给 STA 状态机
+    // 足够时间完成 scan_stop + disconnect，避免删掉旧网络后首次连接失败。
+    vTaskDelay(pdMS_TO_TICKS(800));
 
     wifi_config_t wc = {};
     strlcpy(reinterpret_cast<char*>(wc.sta.ssid), ctx->ssid.c_str(), 32);
@@ -703,6 +707,11 @@ void connect_task(void* arg) {
     }
 
     err = esp_wifi_connect();
+    if (err == ESP_ERR_WIFI_WOULD_BLOCK) {
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        err = esp_wifi_connect();
+    }
     if (err != ESP_OK) {
         snprintf(buf, sizeof(buf), I18n::T("esp_wifi_connect 失败 (err=%d)"), err);
         post_status(buf, kColorError);
@@ -719,8 +728,12 @@ void connect_task(void* arg) {
                                     pdFALSE, pdMS_TO_TICKS(15000));
 
     if (bits & kBitConnected) {
-        // 拿到 IP，记一笔到 SsidManager（SaveToNvs 内已经持久化，重启后生效）
-        SsidManager::GetInstance().AddSsid(ctx->ssid, ctx->password);
+        // 拿到 IP，记一笔到 SsidManager（SaveToNvs 内已经持久化，重启后生效）。
+        // 旧记录必须清掉：否则重启后自动连接会一直优先重试旧 SSID，
+        // 新网络虽然保存成功却永远连不上。
+        auto& ssid_mgr = SsidManager::GetInstance();
+        ssid_mgr.Clear();
+        ssid_mgr.AddSsid(ctx->ssid, ctx->password);
         snprintf(buf, sizeof(buf), I18n::T("连接 %s 成功，准备重启…"), ctx->ssid.c_str());
         post_status(buf, kColorSuccess);
         refresh_saved_list();

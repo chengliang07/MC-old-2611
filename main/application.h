@@ -24,11 +24,13 @@
 #define MAIN_EVENT_ERROR (1 << 4)
 #define MAIN_EVENT_CHECK_NEW_VERSION_DONE (1 << 5)
 #define MAIN_EVENT_CLOCK_TICK (1 << 6)
+#define MAIN_EVENT_BARGE_IN (1 << 7)
 
 
 enum AecMode {
     kAecOff,
     kAecOnDeviceSide,
+    kAecOnServerSide,
 };
 
 class Application {
@@ -59,6 +61,7 @@ public:
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
+    EventGroupHandle_t GetEventGroup() const { return event_group_; }
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
@@ -124,6 +127,8 @@ private:
 
     bool has_server_time_ = false;
     bool aborted_ = false;
+    int64_t barge_in_ready_at_us_ = 0;
+    int64_t abort_suppress_until_us_ = 0;
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
     TaskHandle_t main_event_loop_task_handle_ = nullptr;
@@ -133,7 +138,7 @@ private:
     void CheckAssetsVersion();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
-    // 从 NVS 恢复「打断」偏好到 aec_mode_，并同步到音频处理器（开机静默，不弹通知）。
+    // 从 NVS 恢复「回声保护」偏好到 aec_mode_，并同步到音频处理器（开机静默，不弹通知）。
     void ApplyInterruptPreferenceFromNvs();
 };
 

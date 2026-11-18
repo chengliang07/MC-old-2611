@@ -1,4 +1,5 @@
 #include "afe_audio_processor.h"
+#include <cmath>
 #include <esp_log.h>
 
 #define PROCESSOR_RUNNING 0x01
@@ -39,8 +40,10 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
-    afe_config->vad_mode = VAD_MODE_0;
-    afe_config->vad_min_noise_ms = 100;
+    // 打断开启时 AFE 与 TTS 同时运行。VAD 用最不敏感的档位，
+    // 避免扬声器残留回声被当成用户说话而反复自打断。
+    afe_config->vad_mode = VAD_MODE_3;
+    afe_config->vad_min_noise_ms = 300;
     if (vad_model_name != nullptr) {
         afe_config->vad_model_name = vad_model_name;
     }
@@ -56,28 +59,65 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     afe_config->agc_init = false;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
-    // AEC 模块预创建，运行时由 EnableDeviceAec() 在 AEC/VAD 间切换（勿与唤醒词 AFE 同时常驻）
+    // AEC + VAD 均在创建时初始化；运行时动态启停会重分配 AFE 内部缓冲，
+    // 在 P4 + PSRAM 上容易触发重启。
     afe_config->aec_init = true;
-    afe_config->vad_init = false;
+    afe_config->vad_init = true;
 
-    afe_iface_ = esp_afe_handle_from_config(afe_config);
-    afe_data_ = afe_iface_->create_from_config(afe_config);
-    
-    xTaskCreate([](void* arg) {
-        auto this_ = (AfeAudioProcessor*)arg;
-        this_->AudioProcessorTask();
-        vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    {
+        std::lock_guard<std::mutex> lock(afe_mutex_);
+        if (afe_data_ != nullptr) {
+            return;
+        }
+        afe_iface_ = esp_afe_handle_from_config(afe_config);
+        afe_data_ = afe_iface_->create_from_config(afe_config);
+    }
+
+    // 任务只建一次：释放 AFE 后任务停在 PROCESSOR_RUNNING 上，重建时复用。
+    if (task_handle_ == nullptr) {
+        xTaskCreate([](void* arg) {
+            auto this_ = (AfeAudioProcessor*)arg;
+            this_->AudioProcessorTask();
+            vTaskDelete(NULL);
+        }, "audio_communication", 4096, this, 3, &task_handle_);
+    }
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
-    if (afe_data_ != nullptr) {
-        afe_iface_->destroy(afe_data_);
-    }
+    DestroyAfe();
     vEventGroupDelete(event_group_);
 }
 
+void AfeAudioProcessor::DestroyAfe() {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
+    if (afe_data_ != nullptr) {
+        if (afe_iface_ != nullptr) {
+            afe_iface_->destroy(afe_data_);
+        }
+        afe_data_ = nullptr;
+    }
+    afe_iface_ = nullptr;
+    release_requested_.store(false, std::memory_order_release);
+}
+
+void AfeAudioProcessor::Deinitialize() {
+    // 由 AFE 自己的 fetch 线程执行 destroy，避免 fetch 中途被释放。
+    xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    release_requested_.store(true, std::memory_order_release);
+    for (int i = 0; i < 60; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(afe_mutex_);
+            if (afe_data_ == nullptr) {
+                return;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGW(TAG, "Deinitialize: AFE release timed out");
+}
+
 size_t AfeAudioProcessor::GetFeedSize() {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ == nullptr) {
         return 0;
     }
@@ -85,18 +125,49 @@ size_t AfeAudioProcessor::GetFeedSize() {
 }
 
 void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ == nullptr) {
         return;
+    }
+    // 回声诊断：累计输入麦克风与参考通道能量（1 秒打印一次）
+    if (codec_ != nullptr && codec_->input_channels() >= 2) {
+        for (size_t i = 0; i + 1 < data.size(); i += 2) {
+            const int32_t mic = data[i];
+            const int32_t ref = data[i + 1];
+            diag_mic_sq_ += static_cast<uint64_t>(mic * mic);
+            diag_ref_sq_ += static_cast<uint64_t>(ref * ref);
+            diag_in_samples_++;
+        }
+        diag_frames_++;
     }
     afe_iface_->feed(afe_data_, data.data());
 }
 
 void AfeAudioProcessor::Start() {
+    // 重新进入采集时清掉上一轮的 VAD/音频残留，避免旧状态立即触发打断。
+    is_speaking_ = false;
+    speech_frames_ = 0;
+    output_buffer_.clear();
+    std::lock_guard<std::mutex> lock(afe_mutex_);
+    if (afe_data_ != nullptr) {
+        afe_iface_->reset_buffer(afe_data_);
+    }
     xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
+}
+
+void AfeAudioProcessor::SetEchoGate(bool enable) {
+    echo_gate_ = enable;
+    if (enable) {
+        // 重新进入播放：前 60 帧（约 1 秒）只用于收敛回声基线，
+        // 期间不判定打断，避免播放起始阶段被回声误触发。
+        echo_gate_frames_ = 0;
+        echo_baseline_ = 0.0f;
+    }
 }
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
@@ -115,15 +186,40 @@ void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> call
 }
 
 void AfeAudioProcessor::AudioProcessorTask() {
-    auto fetch_size = afe_iface_->get_fetch_chunksize(afe_data_);
-    auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
-    ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
-        feed_size, fetch_size);
+    {
+        std::lock_guard<std::mutex> lock(afe_mutex_);
+        if (afe_iface_ != nullptr && afe_data_ != nullptr) {
+            auto fetch_size = afe_iface_->get_fetch_chunksize(afe_data_);
+            auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
+            ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
+                feed_size, fetch_size);
+        }
+    }
 
     while (true) {
-        xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
+        xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE,
+                            pdMS_TO_TICKS(200));
+        if (release_requested_.load(std::memory_order_acquire)) {
+            DestroyAfe();
+            continue;
+        }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        const esp_afe_sr_iface_t* iface = nullptr;
+        esp_afe_sr_data_t* data = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(afe_mutex_);
+            iface = afe_iface_;
+            data = afe_data_;
+        }
+        if (iface == nullptr || data == nullptr) {
+            continue;
+        }
+
+        auto res = iface->fetch_with_delay(data, pdMS_TO_TICKS(100));
+        if (release_requested_.load(std::memory_order_acquire)) {
+            DestroyAfe();
+            continue;
+        }
         if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
             continue;
         }
@@ -134,14 +230,97 @@ void AfeAudioProcessor::AudioProcessorTask() {
             continue;
         }
 
-        // VAD state change
+        if (res->data != nullptr && res->data_size > 0) {
+            const int16_t* out = reinterpret_cast<const int16_t*>(res->data);
+            const int out_samples = res->data_size / static_cast<int>(sizeof(int16_t));
+            for (int i = 0; i < out_samples; ++i) {
+                const int32_t v = out[i];
+                diag_out_sq_ += static_cast<uint64_t>(v * v);
+                diag_out_samples_++;
+            }
+        }
+        if (diag_in_samples_ >= 16000) {
+          if (diag_enabled_) {
+            const uint32_t mic_rms = static_cast<uint32_t>(
+                sqrt(static_cast<double>(diag_mic_sq_) / diag_in_samples_));
+            const uint32_t ref_rms = static_cast<uint32_t>(
+                sqrt(static_cast<double>(diag_ref_sq_) / diag_in_samples_));
+            const uint32_t out_rms = diag_out_samples_ > 0
+                ? static_cast<uint32_t>(
+                      sqrt(static_cast<double>(diag_out_sq_) / diag_out_samples_))
+                : 0;
+            ESP_LOGI(TAG,
+                     "echo diag: mic=%u ref=%u aec_out=%u vad=%d gate=%d peak=%d",
+                     mic_rms, ref_rms, out_rms,
+                     res->vad_state == VAD_SPEECH ? 1 : 0, last_gate_speech_,
+                     static_cast<int>(echo_peak_ratio_));
+            echo_peak_ratio_ = 0.0f;
+          }
+            diag_frames_ = 0;
+            diag_mic_sq_ = 0;
+            diag_ref_sq_ = 0;
+            diag_in_samples_ = 0;
+            diag_out_sq_ = 0;
+            diag_out_samples_ = 0;
+        }
+
+        // 双讲门限：AEC 只能压掉约 9dB 回声，VAD 仍可能被残留回声触发。
+        // 这里用回声基线做门限：只有明显高于当前回声电平的人声才算打断。
+        bool speech = res->vad_state == VAD_SPEECH;
+        last_gate_speech_ = speech ? 1 : 0;
+        float frame_rms = 0.0f;
+        if (echo_gate_ && res->data != nullptr && res->data_size > 0) {
+            const int16_t* out = reinterpret_cast<const int16_t*>(res->data);
+            const int count = res->data_size / static_cast<int>(sizeof(int16_t));
+            uint64_t sum = 0;
+            for (int i = 0; i < count; ++i) {
+                sum += static_cast<uint64_t>(static_cast<int32_t>(out[i]) * out[i]);
+            }
+            frame_rms = sqrt(static_cast<double>(sum) / count);
+            if (echo_gate_frames_ < 30) {
+                // 收敛期：快速跟踪回声电平，期间一律不判定打断
+                ++echo_gate_frames_;
+                speech = false;
+                echo_baseline_ = echo_baseline_ * 0.9f + frame_rms * 0.1f;
+                if (echo_baseline_ < 100.0f) {
+                    echo_baseline_ = 100.0f;
+                }
+            } else {
+                const float ratio =
+                    frame_rms / (echo_baseline_ > 1.0f ? echo_baseline_ : 1.0f);
+                if (ratio > echo_peak_ratio_) {
+                    echo_peak_ratio_ = ratio;
+                }
+                // 合成参考只能压约 9dB，残留回声仍可能触发 VAD。
+                // 2.5 倍（约 +8dB）是"正常音量能打断"和"不被扬声器回声
+                // 误触发"之间的折中，仍然只认持续人声。
+                if (speech && ratio < 2.5f) {
+                    speech = false;
+                }
+                if (!speech) {
+                    // 快升慢降：跟上句子内重音，避免响音节突破门限
+                    const float rate = frame_rms > echo_baseline_ ? 0.10f : 0.005f;
+                    echo_baseline_ += (frame_rms - echo_baseline_) * rate;
+                }
+            }
+        }
+
+        // VAD state change：连续语音约 300ms 才上报，滤掉短促回声。
         if (vad_state_change_callback_) {
-            if (res->vad_state == VAD_SPEECH && !is_speaking_) {
-                is_speaking_ = true;
-                vad_state_change_callback_(true);
+            if (speech) {
+                if (speech_frames_ < 30) {
+                    speech_frames_++;
+                }
+                if (!is_speaking_ && speech_frames_ >= 12) {
+                    is_speaking_ = true;
+                    vad_state_change_callback_(true);
+                }
             } else if (res->vad_state == VAD_SILENCE && is_speaking_) {
+                speech_frames_ = 0;
                 is_speaking_ = false;
                 vad_state_change_callback_(false);
+            } else if (res->vad_state == VAD_SILENCE) {
+                speech_frames_ = 0;
             }
         }
 
@@ -173,11 +352,8 @@ void AfeAudioProcessor::EnableDeviceAec(bool enable) {
         ESP_LOGE(TAG, "EnableDeviceAec: AFE not initialized");
         return;
     }
-    if (enable) {
-        afe_iface_->disable_vad(afe_data_);
-        afe_iface_->enable_aec(afe_data_);
-    } else {
-        afe_iface_->disable_aec(afe_data_);
-        afe_iface_->enable_vad(afe_data_);
-    }
+    // AEC/VAD 已随实例常驻。这里只保留接口兼容，不再动态 enable/disable：
+    // 动态切换会重分配 PSRAM 缓冲并导致重启。打断开关由上层决定是否
+    // 使用 VAD 结果和上行门控。
+    (void)enable;
 }

@@ -6,6 +6,11 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <opus_encoder.h>
+#include <cmath>
+#include "application.h"
+
+extern Application* g_barge_in_app;
+extern std::atomic<bool> g_barge_in_pending;
 #include <memory>
 #include <sstream>
 #include <cstring>
@@ -155,6 +160,22 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
     wake_word_detected_callback_ = callback;
 }
 
+void AfeWakeWord::SetBargeInVadCallback(std::function<void()> callback) {
+    barge_in_vad_callback_ = std::move(callback);
+    barge_in_vad_enabled_.store(callback != nullptr, std::memory_order_relaxed);
+}
+
+std::vector<std::vector<int16_t>> AfeWakeWord::TakeBargeInPreroll() {
+    std::lock_guard<std::mutex> lock(wake_word_mutex_);
+    std::vector<std::vector<int16_t>> preroll;
+    preroll.reserve(wake_word_pcm_.size());
+    for (auto& frame : wake_word_pcm_) {
+        preroll.emplace_back(std::move(frame));
+    }
+    wake_word_pcm_.clear();
+    return preroll;
+}
+
 void AfeWakeWord::Start() {
     std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ == nullptr || afe_iface_ == nullptr) {
@@ -162,11 +183,18 @@ void AfeWakeWord::Start() {
         return;
     }
     afe_iface_->enable_wakenet(afe_data_);
+    speech_frames_ = 0;
+    is_speaking_ = false;
+    barge_in_warmup_frames_ = 0;
+    barge_in_rms_baseline_ = 500;
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
 }
 
 void AfeWakeWord::Stop() {
     xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+    speech_frames_ = 0;
+    is_speaking_ = false;
+    barge_in_warmup_frames_ = 0;
     std::lock_guard<std::mutex> lock(afe_mutex_);
     if (afe_data_ != nullptr && afe_iface_ != nullptr) {
         afe_iface_->disable_wakenet(afe_data_);
@@ -233,6 +261,46 @@ void AfeWakeWord::AudioDetectionTask() {
 
         StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
 
+        if (barge_in_vad_enabled_.load(std::memory_order_relaxed) &&
+            res->data != nullptr && res->data_size > 0) {
+            const auto* samples = reinterpret_cast<const int16_t*>(res->data);
+            const size_t count = res->data_size / sizeof(int16_t);
+            uint64_t sum = 0;
+            for (size_t i = 0; i < count; ++i) {
+                sum += static_cast<uint64_t>(static_cast<int32_t>(samples[i]) * samples[i]);
+            }
+            const uint32_t frame_rms = static_cast<uint32_t>(
+                sqrt(static_cast<double>(sum) / count));
+            // SR AFE 不保证输出可靠 vad_state；用 AEC 后能量相对基线的
+            // 持续突增作为插话证据，避免依赖未启用的 VAD 模型。
+            const bool speech = barge_in_warmup_frames_ >= 10 &&
+                                frame_rms > barge_in_rms_baseline_ * 2 &&
+                                frame_rms > 300;
+            if (barge_in_warmup_frames_ < 10) {
+                ++barge_in_warmup_frames_;
+            }
+            if (speech) {
+                if (speech_frames_ < 3) {
+                    ++speech_frames_;
+                }
+                if (!is_speaking_ && speech_frames_ >= 2) {
+                    is_speaking_ = true;
+                    if (g_barge_in_app != nullptr) {
+                        g_barge_in_pending.store(true, std::memory_order_relaxed);
+                        xEventGroupSetBits(g_barge_in_app->GetEventGroup(),
+                                           MAIN_EVENT_BARGE_IN);
+                    }
+                }
+            } else {
+                speech_frames_ = 0;
+                is_speaking_ = false;
+            }
+            if (frame_rms < barge_in_rms_baseline_) {
+                const uint32_t next = (barge_in_rms_baseline_ * 99 + frame_rms) / 100;
+                barge_in_rms_baseline_ = next < 100 ? 100 : next;
+            }
+        }
+
         if (res->wakeup_state == WAKENET_DETECTED) {
             Stop();
             last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
@@ -246,6 +314,7 @@ void AfeWakeWord::AudioDetectionTask() {
 }
 
 void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
+    std::lock_guard<std::mutex> lock(wake_word_mutex_);
     wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
     while (wake_word_pcm_.size() > 2000 / 30) {
         wake_word_pcm_.pop_front();
@@ -257,7 +326,7 @@ void AfeWakeWord::EncodeWakeWordData() {
     wake_word_opus_.clear();
     if (wake_word_encode_task_stack_ == nullptr) {
         wake_word_encode_task_stack_ =
-            (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
+            (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_INTERNAL);
         assert(wake_word_encode_task_stack_ != nullptr);
     }
     if (wake_word_encode_task_buffer_ == nullptr) {
@@ -276,7 +345,16 @@ void AfeWakeWord::EncodeWakeWordData() {
                 encoder->SetComplexity(0);
 
                 int packets = 0;
-                for (auto& pcm : this_->wake_word_pcm_) {
+                std::vector<std::vector<int16_t>> pcm_frames;
+                {
+                    std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
+                    pcm_frames.reserve(this_->wake_word_pcm_.size());
+                    for (auto& pcm : this_->wake_word_pcm_) {
+                        pcm_frames.emplace_back(std::move(pcm));
+                    }
+                    this_->wake_word_pcm_.clear();
+                }
+                for (auto& pcm : pcm_frames) {
                     encoder->Encode(std::move(pcm), [this_](std::vector<uint8_t>&& opus) {
                         std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
                         this_->wake_word_opus_.emplace_back(std::move(opus));
@@ -284,7 +362,6 @@ void AfeWakeWord::EncodeWakeWordData() {
                     });
                     packets++;
                 }
-                this_->wake_word_pcm_.clear();
 
                 auto end_time = esp_timer_get_time();
                 ESP_LOGI(TAG, "Encode wake word opus %d packets in %ld ms", packets,

@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -75,6 +76,7 @@ struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
     uint32_t timestamp;
+    uint32_t generation = 0;
 };
 
 struct DebugStatistics {
@@ -109,14 +111,33 @@ public:
     // 销毁唤醒词 AFE/引擎（回桌面用）。Enable(false) 只是软停，内部任务仍可能占 CPU。
     void ReleaseWakeWordEngine();
     bool IsWakeWordEngineReady() const { return wake_word_initialized_; }
-    void EnableVoiceProcessing(bool enable);
+    void EnableVoiceProcessing(bool enable, bool reset_decoder = true);
+    void ReleaseVoiceProcessor();
+    AudioProcessor* GetAudioProcessor() { return audio_processor_.get(); }
+    // 播放 TTS 期间只上传本地 VAD 判定为外部语音的音频，避免回声上行。
+    void SetBargeInActive(bool active);
+    // 诊断用：静音上行，只保留本地 AFE 处理
+    void SetVoiceUploadMuted(bool muted) { voice_upload_muted_ = muted; }
+    // 自供 AEC 参考：用实际播放的 PCM 替代模组参考通道
+    void SetSelfAecReference(bool enable) { self_aec_ref_ = enable; }
+    void SetSelfAecDelayMs(int ms) { aec_ref_delay_ms_.store(ms); }
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    bool PushPcmToPlaybackQueue(const int16_t* pcm, size_t samples, uint32_t generation = 0);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+    void AbortPlaybackGeneration();
+    void ClearPlaybackQueue();
+    bool IsPlaybackPending();
+    uint32_t GetPlaybackGeneration() const {
+        return playback_generation_.load(std::memory_order_relaxed);
+    }
+    void SetBargeInVad(bool enable,
+                       std::function<void()> on_detected = nullptr,
+                       bool flush_preroll = false);
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
@@ -149,11 +170,26 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    // 服务端 AEC：下行播放时间戳 FIFO，逐个分配给上行帧（v2 帧头）
+    std::deque<uint32_t> timestamp_queue_;
+    std::atomic<uint32_t> playback_generation_{0};
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
     bool device_aec_enabled_ = false;  // 偏好；等语音处理器创建后再落到 AFE
     bool voice_detected_ = false;
+    std::atomic<bool> barge_in_active_{false};
+    std::atomic<bool> voice_upload_muted_{false};
+    std::atomic<bool> self_aec_ref_{false};
+    std::atomic<int> aec_ref_delay_ms_{40};
+    std::atomic<uint32_t> aec_ref_write_{0};
+    std::vector<int16_t> aec_ref_ring_;
+    std::atomic<int64_t> voice_active_until_us_{0};
+    // 打断预录：缓存播放期间被丢弃的最近 300ms 音频，确认人声后补发
+    std::mutex preroll_mutex_;
+    std::deque<std::vector<int16_t>> barge_in_preroll_;
+    size_t barge_in_preroll_samples_ = 0;
+    bool preroll_flushed_ = false;
     bool service_stopped_ = true;
     bool audio_input_need_warmup_ = false;
     std::mutex wake_word_mutex_;
