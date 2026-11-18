@@ -94,8 +94,6 @@ std::mutex s_ws_mutex;
 std::mutex s_text_mutex;
 std::string s_answer;
 std::string s_user_text;
-std::string s_stream_text;
-uint32_t s_stream_text_ms = 0;
 int s_resample_position = 0;
 
 struct AudioChunk {
@@ -214,9 +212,8 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text += item->append;
                 lv_label_set_text(s_user_text_label, s_user_text.c_str());
-                if (s_user_text.size() >= 24) {
-                    resize_bubble(s_user_text_bubble, s_user_text_label, s_user_text.c_str(), true);
-                }
+                resize_bubble(s_user_text_bubble, s_user_text_label, s_user_text.c_str(), true);
+                lv_obj_scroll_to_view_recursive(s_user_row, LV_ANIM_OFF);
                 return;
             }
             if (!item->replace_text && item->role == BubbleRole::Assistant &&
@@ -231,9 +228,8 @@ void post_ui(uint32_t session, State state, const char* status,
                     }
                 }
                 lv_label_set_text(s_text, s_answer.c_str());
-                if (s_answer.size() >= 24) {
-                    resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
-                }
+                resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
+                lv_obj_scroll_to_view_recursive(s_assistant_row, LV_ANIM_OFF);
                 return;
             }
             bool is_user = item->role == BubbleRole::User;
@@ -281,24 +277,11 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text = item->append;
             }
+            trim_messages();
+            lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
         }, payload) != LV_RESULT_OK) {
         delete payload;
     }
-}
-
-uint32_t now_ms() {
-    return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
-void flush_stream_text(uint32_t session) {
-    std::string text;
-    {
-        std::lock_guard<std::mutex> lock(s_text_mutex);
-        if (s_stream_text.empty()) return;
-        text.swap(s_stream_text);
-        s_stream_text_ms = 0;
-    }
-    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
 }
 
 void clear_audio_queue() {
@@ -434,26 +417,11 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         s_text = nullptr;
         s_text_bubble = nullptr;
         s_assistant_row = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(s_text_mutex);
-            s_stream_text.clear();
-            s_stream_text_ms = 0;
-        }
         post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr) {
-            {
-                std::lock_guard<std::mutex> lock(s_text_mutex);
-                s_stream_text += delta->valuestring;
-                if (s_stream_text.size() > kMaxTextBytes) {
-                    s_stream_text.erase(0, s_stream_text.size() - kMaxTextBytes);
-                }
-                if (s_stream_text_ms == 0) s_stream_text_ms = now_ms();
-            }
-            if (s_stream_text.size() >= 48 || now_ms() - s_stream_text_ms >= 220) {
-                flush_stream_text(session);
-            }
+            post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, delta->valuestring);
         }
     } else if (std::strcmp(type, "relay.response.done") == 0) {
         if (session_alive(session)) {
@@ -465,7 +433,6 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                 return;
             }
             if (response_id != 0) s_last_done_response_id.store(response_id, std::memory_order_release);
-            flush_stream_text(session);
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
             post_ui(session, State::Answering, "回答完成，正在恢复聆听…", BubbleRole::Assistant, nullptr);
@@ -638,8 +605,13 @@ void stop_session() {
 }
 
 void on_back(lv_event_t* /*event*/) {
+    lv_indev_t* indev = lv_indev_active();
+    if (indev != nullptr) lv_indev_wait_release(indev);
+    lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* home = HomeScreen::Create();
-    if (home != nullptr) lv_screen_load(home);
+    if (home == nullptr) return;
+    lv_screen_load(home);
+    if (old_scr != nullptr && old_scr != home) lv_obj_delete_async(old_scr);
 }
 
 void on_screen_unloaded(lv_event_t* /*event*/) {
