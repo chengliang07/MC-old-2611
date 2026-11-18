@@ -25,6 +25,8 @@
 #define PET_CANVAS_SIZE      512
 #define PET_BODY_X           0
 #define PET_BODY_Y           0
+#define PET_BODY_W           480
+#define PET_BODY_H           470
 #define PET_EYES_X           104
 #define PET_EYES_Y           86
 #define PET_EYES_W           248
