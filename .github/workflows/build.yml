@@ -97,7 +97,7 @@ jobs:
         include: ${{ fromJson(needs.prepare.outputs.variants) }}
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:release-v5.5@sha256:0c439ea923cd42700f9bbbe82542749d980712edb0ead0ea6db7eef35619b812
+      image: espressif/idf:release-v5.5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,33 +135,25 @@ jobs:
   publish-latest-release:
     name: Publish Latest release
     needs: [prepare, build]
-    if: github.event_name == 'push' && needs.build.result == 'success'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          pattern: xiaozhi_*_${{ github.sha }}.bin
-          path: firmware
 
       - name: Prepare release artifact
         id: artifact
         shell: bash
         run: |
-          FIRMWARE="$(find firmware -name merged-binary.bin -print -quit)"
-          if [[ -z "$FIRMWARE" ]]; then
-            echo "merged-binary.bin not found in build artifact" >&2
+          if [[ ! -f Metalio_Claw4_Latest.bin ]]; then
+            echo "Metalio_Claw4_Latest.bin not found in repository" >&2
             exit 1
           fi
           TIMESTAMP="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M)"
           ARTIFACT="Metalio_Claw4_Latest_${TIMESTAMP}.bin"
-          cp "$FIRMWARE" "$ARTIFACT"
+          cp Metalio_Claw4_Latest.bin "$ARTIFACT"
           echo "path=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release title and notes from PR
