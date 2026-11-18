@@ -21,6 +21,7 @@
 #include "board.h"
 #include "home_screen/home_screen.h"
 #include "pwr_key_handler.h"
+#include "settings.h"
 #include <web_socket.h>
 
 LV_FONT_DECLARE(font_puhui_20_4);
@@ -164,6 +165,24 @@ void resize_bubble(lv_obj_t* bubble, lv_obj_t* label, const char* text, bool is_
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
 }
 
+uint32_t now_ms() {
+    return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+void post_ui(uint32_t session, State state, const char* status,
+             BubbleRole role, const char* text, bool append);
+
+void flush_stream_text(uint32_t session) {
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(s_text_mutex);
+        if (s_stream_text.empty()) return;
+        text.swap(s_stream_text);
+        s_stream_text_ms = 0;
+    }
+    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str(), false);
+}
+
 struct WakeWordGuard {
     AudioService& audio;
     bool disabled = false;
@@ -284,21 +303,6 @@ void post_ui(uint32_t session, State state, const char* status,
         }, payload) != LV_RESULT_OK) {
         delete payload;
     }
-}
-
-uint32_t now_ms() {
-    return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
-void flush_stream_text(uint32_t session) {
-    std::string text;
-    {
-        std::lock_guard<std::mutex> lock(s_text_mutex);
-        if (s_stream_text.empty()) return;
-        text.swap(s_stream_text);
-        s_stream_text_ms = 0;
-    }
-    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, text.c_str());
 }
 
 void clear_audio_queue() {
@@ -481,6 +485,8 @@ void handle_json(const char* data, size_t len, uint32_t session) {
 }
 
 bool connect_websocket(uint32_t session, std::string& error) {
+    Settings settings("oral", false);
+    const std::string relay_url = settings.GetString("relay_url", kRelayUrl);
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         error = "网络未就绪";
@@ -506,8 +512,10 @@ bool connect_websocket(uint32_t session, std::string& error) {
         std::snprintf(message, sizeof(message), "WebSocket 错误：%d", code);
         post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
     });
-    if (!ws->Connect(kRelayUrl)) {
-        error = "连接口语服务失败";
+    if (!ws->Connect(relay_url.c_str())) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "连接口语服务失败：%d", ws->GetLastError());
+        error = message;
         return false;
     }
     std::lock_guard<std::mutex> lock(s_ws_mutex);
