@@ -938,15 +938,12 @@ void OnPronounceClicked(lv_event_t* /*event*/) {
     }
     std::string error;
     const EnglishEntry& entry = s_review.entries[s_current_index];
-    const std::string pronounce_text =
-        entry.phrase.empty() ? entry.term : entry.phrase;
-    const std::string url = EnglishClient::PronunciationUrl(pronounce_text, error);
-    if (url.empty()) {
-        SetStatus(error.c_str());
+    if (entry.audio_url.empty()) {
+        SetStatus(I18n::T("暂无发音音频"));
         return;
     }
     PodcastPlayer::SetEventCallback(nullptr, nullptr);
-    if (!PodcastPlayer::Start(url, error)) {
+    if (!PodcastPlayer::Start(entry.audio_url, error)) {
         SetStatus(error.c_str());
     }
 }
@@ -1033,7 +1030,17 @@ void ReturnHome() {
     }
     lv_screen_load(target);
     if (target == ChatScreen::CurrentScreen()) {
-        ChatScreen::ResumeAfterTemporaryLeave();
+        lv_timer_create(
+            [](lv_timer_t* timer) {
+                lv_timer_delete(timer);
+                lv_timer_create(
+                    [](lv_timer_t* retry_timer) {
+                        lv_timer_delete(retry_timer);
+                        ChatScreen::ResumeAfterTemporaryLeave();
+                    },
+                    300, nullptr);
+            },
+            1200, nullptr);
     }
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);

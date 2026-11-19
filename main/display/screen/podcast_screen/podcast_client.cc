@@ -28,6 +28,10 @@ constexpr const char* kKeyDeviceToken = "device_token";
 constexpr int kHttpTimeoutMs = 10000;
 
 std::mutex s_http_mutex;
+// 列表响应缓存：接口本身约 2-3 秒，避免同一次入口/下拉刷新重复请求。
+std::mutex s_list_cache_mutex;
+PodcastList s_list_cache;
+time_t s_list_cache_at = 0;
 
 // 播放地址缓存：签名地址 60 分钟有效，但设备切到不同 WiFi / 网络后
 // JSON 内的签名主机可能暂时不可达；缩短缓存让下一次播放尽快重新换地址。
@@ -192,6 +196,14 @@ time_t ParseExpiresAt(const std::string& value) {
 
 PodcastList PodcastClient::FetchPodcasts(std::string& error) {
     error.clear();
+    const time_t now = time(nullptr);
+    {
+        std::lock_guard<std::mutex> lock(s_list_cache_mutex);
+        if (!s_list_cache.empty() && s_list_cache_at > 0 &&
+            now - s_list_cache_at < 60) {
+            return s_list_cache;
+        }
+    }
     std::string api_base;
     std::string device_token;
     if (!LoadConfig(api_base, device_token, error)) {
@@ -238,6 +250,11 @@ PodcastList PodcastClient::FetchPodcasts(std::string& error) {
         }
     }
     cJSON_Delete(root);
+    {
+        std::lock_guard<std::mutex> lock(s_list_cache_mutex);
+        s_list_cache = result;
+        s_list_cache_at = time(nullptr);
+    }
     return result;
 }
 

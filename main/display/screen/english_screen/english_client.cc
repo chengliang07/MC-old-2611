@@ -21,7 +21,6 @@ constexpr const char* TAG = "EnglishClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
-constexpr const char* kPronunciationBase = "https://dict.youdao.com/dictvoice";
 constexpr const char* kReviewCacheDir = "/sdcard/system";
 constexpr int kHttpTimeoutMs = 6000;
 
@@ -259,6 +258,8 @@ EnglishReview ParseReview(const std::string& body, std::string& error,
         entry.meaning = JsonString(item, "meaning");
         entry.phrase = JsonString(item, "phrase");
         entry.example = JsonString(item, "example");
+        entry.audio_url = JsonString(item, "audio_url", "pronunciation_url");
+        entry.has_audio = !entry.audio_url.empty();
         const cJSON* options = cJSON_GetObjectItem(item, "options");
         const cJSON* option = nullptr;
         cJSON_ArrayForEach(option, options) {
@@ -366,18 +367,6 @@ bool EnglishClient::SubmitResult(const std::string& task_id,
     }
     return true;
 }
-
-std::string EnglishClient::PronunciationUrl(const std::string& text,
-                                            std::string& error) {
-    error.clear();
-    if (text.empty()) {
-        error = "没有可发音的内容";
-        return "";
-    }
-    return std::string(kPronunciationBase) + "?audio=" + UrlEncode(text) +
-           "&type=2";
-}
-
 
 void EnglishClient::PrefetchTasksAsync() {
     static std::atomic<bool> started{false};

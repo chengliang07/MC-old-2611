@@ -20,6 +20,7 @@
 #include "audio_service.h"
 #include "board.h"
 #include "home_screen/home_screen.h"
+#include "chat_screen/chat_screen.h"
 #include "pwr_key_handler.h"
 #include <web_socket.h>
 
@@ -74,6 +75,8 @@ std::atomic<State> s_state{State::Idle};
 std::atomic<bool> s_stop_requested{true};
 std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
+std::atomic<bool> s_reconnect_requested{false};
+std::atomic<bool> s_user_exit{false};
 std::atomic<bool> s_response_done_pending{false};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<uint32_t> s_last_done_response_id{0};
@@ -88,6 +91,7 @@ lv_obj_t* s_user_text_label = nullptr;
 lv_obj_t* s_user_text_bubble = nullptr;
 lv_obj_t* s_user_row = nullptr;
 lv_obj_t* s_chat = nullptr;
+lv_obj_t* s_return_screen = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
 std::mutex s_ws_mutex;
@@ -371,6 +375,8 @@ void close_websocket() {
     s_ws_ready.store(false, std::memory_order_release);
 }
 
+void start_session();
+
 void send_ws_text(const char* text) {
     std::lock_guard<std::mutex> lock(s_ws_mutex);
     if (s_ws && s_ws->IsConnected()) s_ws->Send(text);
@@ -503,7 +509,9 @@ bool connect_websocket(uint32_t session, std::string& error) {
     });
     ws->OnDisconnected([]() {
         s_ws_ready.store(false, std::memory_order_release);
-        s_stop_requested.store(true, std::memory_order_release);
+        if (!s_user_exit.load(std::memory_order_acquire)) {
+            s_reconnect_requested.store(true, std::memory_order_release);
+        }
     });
     ws->OnError([session](int code) {
         char message[128];
@@ -526,7 +534,9 @@ void stream_microphone(uint32_t session) {
     frame.reserve(kInputSamples * 2);
     TickType_t playback_idle_tick = 0;
 
-    while (!s_stop_requested.load(std::memory_order_acquire) && session_alive(session)) {
+    while (!s_stop_requested.load(std::memory_order_acquire) &&
+           !s_reconnect_requested.load(std::memory_order_acquire) &&
+           session_alive(session)) {
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending() || has_queued_audio()) {
                 playback_idle_tick = 0;
@@ -577,30 +587,50 @@ void worker_task(void* /*arg*/) {
         return;
     }
 
-    post_ui(session, State::Connecting, "连接中…", BubbleRole::Assistant, nullptr);
-    std::string error;
-    if (!connect_websocket(session, error)) {
-        post_ui(session, State::Error, error.c_str(), BubbleRole::Assistant, nullptr);
-        s_worker_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
-    }
-    send_ws_json("{\"type\":\"start\"}");
-    for (int i = 0; i < 100 && session_alive(session) &&
-         !s_ws_ready.load(std::memory_order_acquire); ++i) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    if (!s_ws_ready.load(std::memory_order_acquire)) {
-        post_ui(session, State::Error, "等待口语服务就绪超时", BubbleRole::Assistant, nullptr);
+    int connect_failures = 0;
+    while (!s_stop_requested.load(std::memory_order_acquire) &&
+           session_alive(session)) {
+        post_ui(session, State::Connecting, "连接中…", BubbleRole::Assistant, nullptr);
+        std::string error;
+        if (!connect_websocket(session, error)) {
+            if (++connect_failures >= 3) {
+                post_ui(session, State::Error, error.c_str(), BubbleRole::Assistant, nullptr);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        connect_failures = 0;
+        send_ws_json("{\"type\":\"start\"}");
+        for (int i = 0; i < 100 && session_alive(session) &&
+             !s_ws_ready.load(std::memory_order_acquire); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!s_ws_ready.load(std::memory_order_acquire)) {
+            close_websocket();
+            if (++connect_failures >= 3) {
+                post_ui(session, State::Error, "等待口语服务就绪超时", BubbleRole::Assistant, nullptr);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        s_mic_enabled.store(true, std::memory_order_release);
+        stream_microphone(session);
+        s_mic_enabled.store(false, std::memory_order_release);
         close_websocket();
-        s_worker_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        if (s_reconnect_requested.load(std::memory_order_acquire)) {
+            s_reconnect_requested.store(false, std::memory_order_release);
+            s_response_done_pending.store(false, std::memory_order_release);
+            audio.ClearPlaybackQueue();
+            clear_audio_queue();
+            s_generation.fetch_add(1, std::memory_order_acq_rel);
+            post_ui(session, State::Connecting, "连接中断，正在重连…", BubbleRole::Assistant, nullptr);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        break;
     }
-    s_mic_enabled.store(true, std::memory_order_release);
-    stream_microphone(session);
-    s_mic_enabled.store(false, std::memory_order_release);
-    close_websocket();
     s_worker_task = nullptr;
     vTaskDelete(nullptr);
 }
@@ -632,7 +662,9 @@ void start_session() {
 }
 
 void stop_session() {
+    s_user_exit.store(true, std::memory_order_release);
     s_stop_requested.store(true, std::memory_order_release);
+    s_reconnect_requested.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     auto& audio = Application::GetInstance().GetAudioService();
@@ -642,8 +674,30 @@ void stop_session() {
 }
 
 void on_back(lv_event_t* /*event*/) {
-    lv_obj_t* home = HomeScreen::Create();
-    if (home != nullptr) lv_screen_load(home);
+    stop_session();
+    lv_obj_t* old_screen = lv_screen_active();
+    lv_obj_t* target = s_return_screen;
+    s_return_screen = nullptr;
+    if (target == nullptr || target == old_screen) {
+        target = HomeScreen::Create();
+    }
+    lv_screen_load(target);
+    if (target == ChatScreen::CurrentScreen()) {
+        lv_timer_create(
+            [](lv_timer_t* timer) {
+                lv_timer_delete(timer);
+                lv_timer_create(
+                    [](lv_timer_t* retry_timer) {
+                        lv_timer_delete(retry_timer);
+                        ChatScreen::ResumeAfterTemporaryLeave();
+                    },
+                    300, nullptr);
+            },
+            1200, nullptr);
+    }
+    if (old_screen != nullptr && old_screen != target) {
+        lv_obj_delete_async(old_screen);
+    }
 }
 
 void on_screen_unloaded(lv_event_t* /*event*/) {
@@ -673,11 +727,14 @@ lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font
 
 }  // namespace
 
-lv_obj_t* OralScreen::Create() {
+lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     PwrKey_SetShortPressHandler("oral", Interrupt);
+    s_return_screen = return_screen;
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_state.store(State::Connecting, std::memory_order_release);
     s_stop_requested.store(false, std::memory_order_release);
+    s_reconnect_requested.store(false, std::memory_order_release);
+    s_user_exit.store(false, std::memory_order_release);
 
     lv_obj_t* screen = lv_obj_create(nullptr);
     s_screen = screen;

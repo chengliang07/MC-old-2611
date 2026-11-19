@@ -652,6 +652,23 @@ void OpenChatAsync(void* /*arg*/) {
     LaunchChat(chat_lifecycle_cb);
 }
 
+void OpenOralFromCurrentAsync(void* /*arg*/) {
+    lv_obj_t* origin = lv_screen_active();
+    if (origin == nullptr) {
+        return;
+    }
+    lv_obj_t* oral = OralScreen::Create(origin);
+    if (oral == nullptr) {
+        return;
+    }
+    if (origin == ChatScreen::CurrentScreen()) {
+        ChatScreen::PrepareTemporaryLeave();
+    }
+    screen_attach_lifecycle(oral, oral_lifecycle_cb);
+    lv_screen_load(oral);
+    // 不删除来源屏：返回时回到同一个学伴页面。
+}
+
 void LaunchDigitalPeople(screen_lifecycle_cb_t lifecycle_cb) {
     lv_obj_t* old_scr = lv_screen_active();
     lv_obj_t* app = DigitalPeopleScreen::Create();
@@ -2716,6 +2733,12 @@ void HomeScreen::RequestOpenPodcastFromCurrentScreen() {
 void HomeScreen::RequestOpenEnglishFromCurrentScreen() {
     if (lv_async_call(OpenEnglishFromCurrentAsync, nullptr) != LV_RESULT_OK) {
         ESP_LOGW(TAG_HOME, "open english request dropped");
+    }
+}
+
+void HomeScreen::RequestOpenOralFromCurrentScreen() {
+    if (lv_async_call(OpenOralFromCurrentAsync, nullptr) != LV_RESULT_OK) {
+        ESP_LOGW(TAG_HOME, "open oral request dropped");
     }
 }
 
