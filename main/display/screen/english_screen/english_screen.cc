@@ -149,7 +149,7 @@ void LoadTasksCache() {
     if (!tasks.empty()) {
         s_cached_tasks = std::move(tasks);
         s_cache_valid = true;
-        s_tasks_cache_at = std::time(nullptr);
+        s_tasks_cache_at = 0;
     }
 }
 EnglishReview s_review;
@@ -836,7 +836,13 @@ void StartSubmitWorker(const std::string& result) {
     auto* context = new RequestResult{};
     context->kind = RequestKind::Result;
     context->task_id = s_current_task_id;
-    context->word_id = s_review.entries[s_current_index].word_id;
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (!entry.word_id_from_server) {
+        ESP_LOGW(TAG, "skip result submit: entry has no server word_id");
+        delete context;
+        return;
+    }
+    context->word_id = entry.word_id;
     context->result = result;
     context->index = static_cast<int>(s_current_index);
     if (!BeginRequest(context)) {

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <cstring>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -180,6 +181,15 @@ bool TryCachedPlayUrl(const std::string& podcast_id, PodcastPlayInfo& result) {
     return false;
 }
 
+time_t ParseExpiresAt(const std::string& value) {
+    struct tm tm_value = {};
+    if (!value.empty() &&
+        strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &tm_value) != nullptr) {
+        return timegm(&tm_value);
+    }
+    return 0;
+}
+
 PodcastList PodcastClient::FetchPodcasts(std::string& error) {
     error.clear();
     std::string api_base;
@@ -280,7 +290,10 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     result.ok = true;
     {
         std::lock_guard<std::mutex> lock(s_play_cache_mutex);
-        const time_t expires = time(nullptr) + kPlayCacheSeconds;
+        time_t expires = ParseExpiresAt(result.expires_at);
+        if (expires <= 0) {
+            expires = time(nullptr) + kPlayCacheSeconds;
+        }
         bool replaced = false;
         for (auto& entry : s_play_cache) {
             if (entry.id == podcast_id) {

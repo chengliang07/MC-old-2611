@@ -13,6 +13,7 @@ struct EnglishTask {
 
 struct EnglishEntry {
     std::string word_id;
+    bool word_id_from_server = false;
     std::string term;
     std::string phonetic;
     std::string meaning;

@@ -23,7 +23,7 @@ constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
 constexpr const char* kPronunciationBase = "https://dict.youdao.com/dictvoice";
 constexpr const char* kReviewCacheDir = "/sdcard/system";
-constexpr int kHttpTimeoutMs = 10000;
+constexpr int kHttpTimeoutMs = 6000;
 
 std::mutex s_http_mutex;
 
@@ -270,6 +270,7 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
         }
         EnglishEntry entry;
         entry.word_id = JsonString(item, "word_id", "id");
+        entry.word_id_from_server = !entry.word_id.empty();
         entry.term = JsonString(item, "term");
         entry.phonetic = JsonString(item, "phonetic");
         entry.meaning = JsonString(item, "meaning");
@@ -302,9 +303,7 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
                 }
             }
         }
-        if (!entry.word_id.empty()) {
-            review.entries.push_back(std::move(entry));
-        }
+        review.entries.push_back(std::move(entry));
     }
     cJSON_Delete(root);
     return review;
@@ -370,25 +369,27 @@ void EnglishClient::PrefetchTasksAsync() {
     }
     xTaskCreate(
         [](void* /*arg*/) {
-            // 比播客预热再晚一些，避免两次 TLS 同时抢内部 RAM。
-            vTaskDelay(pdMS_TO_TICKS(20000));
-            std::string error;
-            const EnglishTaskList tasks = FetchTasks(error);
-            if (error.empty() && !tasks.empty()) {
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                vTaskDelay(pdMS_TO_TICKS(attempt == 0 ? 8000 : 12000));
+                std::string error;
+                const EnglishTaskList tasks = FetchTasks(error);
+                if (!error.empty() || tasks.empty()) {
+                    continue;
+                }
                 const char* tmp = "/sdcard/system/english_tasks.tmp";
                 FILE* file = std::fopen(tmp, "w");
-                if (file != nullptr) {
-                    for (const auto& task : tasks) {
-                        std::fprintf(file, "%s|%s|%s|%d|%d\n",
-                                     task.id.c_str(),
-                                     task.task_date.c_str(),
-                                     task.status.c_str(),
-                                     task.phrase_count,
-                                     task.can_review ? 1 : 0);
-                    }
-                    std::fclose(file);
-                    std::rename(tmp, "/sdcard/system/english_tasks.txt");
+                if (file == nullptr) {
+                    continue;
                 }
+                for (const auto& task : tasks) {
+                    std::fprintf(file, "%s|%s|%s|%d|%d\n", task.id.c_str(),
+                                 task.task_date.c_str(), task.status.c_str(),
+                                 task.phrase_count,
+                                 task.can_review ? 1 : 0);
+                }
+                std::fclose(file);
+                std::rename(tmp, "/sdcard/system/english_tasks.txt");
+                break;
             }
             vTaskDelete(nullptr);
         },

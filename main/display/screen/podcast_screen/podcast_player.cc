@@ -859,6 +859,18 @@ void PodcastPlayTask(void* arg) {
         return;
     }
 
+    if (!quick) {
+        for (int i = 0; i < 100; ++i) {
+            if (!is_current() || state->stop.load(std::memory_order_relaxed)) {
+                break;
+            }
+            if (uxQueueMessagesWaiting(state->ring_data) >= 4) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
     {
         esp_asp_cfg_t cfg = {
             .in = {.cb = PodcastReadCallback, .user_ctx = state},
