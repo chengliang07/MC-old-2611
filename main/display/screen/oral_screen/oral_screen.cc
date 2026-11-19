@@ -43,6 +43,7 @@ constexpr int kInputSamples = kInputSampleRate * kInputFrameMs / 1000;
 constexpr int kOutputSampleRate = 24000;
 constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
+constexpr uint32_t kRelayIdleTimeoutMs = 180000;
 constexpr uint32_t kStreamFlushMs = 180;
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorHeaderBg = 0x12151C;
@@ -66,6 +67,8 @@ std::atomic<bool> s_stop_requested{true};
 std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
 std::atomic<bool> s_response_done_pending{false};
+std::atomic<bool> s_relay_needs_restart{false};
+std::atomic<uint32_t> s_last_relay_message_ms{0};
 std::atomic<uint32_t> s_generation{0};
 
 lv_obj_t* s_screen = nullptr;
@@ -256,6 +259,7 @@ void resample_24k_to_16k(const std::vector<int16_t>& input, std::vector<int16_t>
 
 void handle_binary_audio(const char* data, size_t len, uint32_t session) {
     (void)session;
+    s_last_relay_message_ms.store(now_ms(), std::memory_order_release);
     if (data == nullptr || len < sizeof(int16_t)) return;
     size_t samples = (len / sizeof(int16_t)) & ~static_cast<size_t>(1);
     auto* pcm = reinterpret_cast<const int16_t*>(data);
@@ -273,6 +277,7 @@ void handle_binary_audio(const char* data, size_t len, uint32_t session) {
 
 void handle_json(const char* data, size_t len, uint32_t session) {
     if (data == nullptr || len == 0) return;
+    s_last_relay_message_ms.store(now_ms(), std::memory_order_release);
     cJSON* root = cJSON_ParseWithLength(data, len);
     if (root == nullptr) return;
     char type[64] = {0};
@@ -334,6 +339,12 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         char message[256];
         std::snprintf(message, sizeof(message), "错误：%s", detail);
         post_ui(session, State::Error, message, nullptr);
+    } else if (std::strcmp(type, "relay.qwen.closed") == 0) {
+        s_relay_needs_restart.store(true, std::memory_order_release);
+        s_ws_ready.store(false, std::memory_order_release);
+        s_mic_enabled.store(false, std::memory_order_release);
+        s_stop_requested.store(true, std::memory_order_release);
+        post_ui(session, State::Connecting, "口语服务重连中…", nullptr);
     }
     cJSON_Delete(root);
 }
@@ -359,12 +370,16 @@ bool connect_websocket(uint32_t session, std::string& error) {
     });
     ws->OnDisconnected([]() {
         s_ws_ready.store(false, std::memory_order_release);
+        s_mic_enabled.store(false, std::memory_order_release);
         s_stop_requested.store(true, std::memory_order_release);
     });
     ws->OnError([session](int code) {
         char message[128];
         std::snprintf(message, sizeof(message), "WebSocket 错误：%d", code);
         post_ui(session, State::Error, message, nullptr);
+        s_ws_ready.store(false, std::memory_order_release);
+        s_mic_enabled.store(false, std::memory_order_release);
+        s_stop_requested.store(true, std::memory_order_release);
     });
     if (!ws->Connect(relay_url.c_str())) {
         error = "连接口语服务失败";
@@ -383,6 +398,13 @@ void stream_microphone(uint32_t session) {
     TickType_t playback_idle_tick = 0;
 
     while (!s_stop_requested.load(std::memory_order_acquire) && session_alive(session)) {
+        const uint32_t last_message_ms =
+            s_last_relay_message_ms.load(std::memory_order_acquire);
+        if (last_message_ms != 0 &&
+            now_ms() - last_message_ms > kRelayIdleTimeoutMs) {
+            s_relay_needs_restart.store(true, std::memory_order_release);
+            break;
+        }
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending()) {
                 playback_idle_tick = 0;
@@ -432,40 +454,55 @@ void worker_task(void* /*arg*/) {
         return;
     }
 
-    post_ui(session, State::Connecting, "连接中…", nullptr);
-    std::string error;
-    if (!connect_websocket(session, error)) {
-        post_ui(session, State::Error, error.c_str(), nullptr);
-        s_worker_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
-    }
-    send_ws_json("{\"type\":\"start\"}");
-    for (int i = 0; i < 100 && session_alive(session) &&
-         !s_ws_ready.load(std::memory_order_acquire); ++i) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    if (!s_ws_ready.load(std::memory_order_acquire)) {
-        post_ui(session, State::Error, "等待口语服务就绪超时", nullptr);
+    while (!s_stop_requested.load(std::memory_order_acquire) &&
+           session_alive(session)) {
+        s_relay_needs_restart.store(false, std::memory_order_release);
+        s_ws_ready.store(false, std::memory_order_release);
+        s_mic_enabled.store(false, std::memory_order_release);
+        s_response_done_pending.store(false, std::memory_order_release);
+        s_last_relay_message_ms.store(now_ms(), std::memory_order_release);
+        post_ui(session, State::Connecting, "连接中…", nullptr);
+        std::string error;
+        if (!connect_websocket(session, error)) {
+            post_ui(session, State::Error, error.c_str(), nullptr);
+            break;
+        }
+        send_ws_json("{\"type\":\"start\"}");
+        for (int i = 0; i < 100 && session_alive(session) &&
+             !s_stop_requested.load(std::memory_order_acquire) &&
+             !s_ws_ready.load(std::memory_order_acquire); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!s_ws_ready.load(std::memory_order_acquire)) {
+            if (!s_stop_requested.load(std::memory_order_acquire)) {
+                post_ui(session, State::Error, "等待口语服务就绪超时", nullptr);
+            }
+            close_websocket();
+            break;
+        }
+        set_mic_enabled(true);
+        stream_microphone(session);
+        set_mic_enabled(false);
         close_websocket();
-        s_worker_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        if (!s_relay_needs_restart.load(std::memory_order_acquire) ||
+            s_stop_requested.load(std::memory_order_acquire) ||
+            !session_alive(session)) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));
     }
-    set_mic_enabled(true);
-    stream_microphone(session);
-    set_mic_enabled(false);
-    close_websocket();
     s_worker_task = nullptr;
     vTaskDelete(nullptr);
 }
 
 void start_session() {
     if (s_worker_task != nullptr) return;
+    s_relay_needs_restart.store(false, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_stop_requested.store(false, std::memory_order_release);
     s_ws_ready.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
+    s_last_relay_message_ms.store(now_ms(), std::memory_order_release);
     set_mic_enabled(false);
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -484,6 +521,7 @@ void start_session() {
 }
 
 void stop_session() {
+    s_relay_needs_restart.store(false, std::memory_order_release);
     s_stop_requested.store(true, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
     s_ws_ready.store(false, std::memory_order_release);
