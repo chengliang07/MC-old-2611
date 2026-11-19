@@ -185,7 +185,7 @@ time_t ParseExpiresAt(const std::string& value) {
     struct tm tm_value = {};
     if (!value.empty() &&
         strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &tm_value) != nullptr) {
-        return timegm(&tm_value);
+        return mktime(&tm_value);
     }
     return 0;
 }
