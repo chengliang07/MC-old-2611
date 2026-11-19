@@ -248,7 +248,6 @@ lv_obj_t *pet_widget_create(const pet_widget_config_t *config)
 
     ctx->body = lv_image_create(container);
     lv_obj_set_pos(ctx->body, PET_BODY_X, PET_BODY_Y);
-    lv_obj_set_size(ctx->body, PET_BODY_W, PET_BODY_H);
     lv_image_set_src(ctx->body, PET_IMG_BODY);
     lv_obj_remove_flag(ctx->body, LV_OBJ_FLAG_CLICKABLE);
 
