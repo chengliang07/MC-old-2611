@@ -77,7 +77,8 @@ bool LoadConfig(std::string& api_base, std::string& device_token,
 
 bool HttpRequest(const char* method, const std::string& url,
                  const std::string& device_token, std::string content,
-                 std::string& body, int& status, std::string& error) {
+                 std::string& body, int& status, std::string& error,
+                 int timeout_ms = kHttpTimeoutMs) {
     std::lock_guard<std::mutex> lock(s_http_mutex);
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
@@ -90,7 +91,7 @@ bool HttpRequest(const char* method, const std::string& url,
         return false;
     }
 
-    http->SetTimeout(kHttpTimeoutMs);
+    http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
     http->SetHeader("Connection", "close");
     http->SetHeader("Authorization", "Bearer " + device_token);
@@ -121,10 +122,10 @@ bool HttpRequest(const char* method, const std::string& url,
 
 bool GetJson(const std::string& path, const std::string& api_base,
              const std::string& device_token, std::string& body,
-             std::string& error) {
+             std::string& error, int timeout_ms = kHttpTimeoutMs) {
     int status = 0;
-    return HttpRequest("GET", api_base + path, device_token, "", body,
-                       status, error);
+    return HttpRequest("GET", api_base + path, device_token, "", body, status,
+                       error, timeout_ms);
 }
 
 std::string ReviewCachePath(const std::string& task_id) {
@@ -180,8 +181,8 @@ EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
         return {};
     }
     std::string body;
-    if (!GetJson("/api/device/v1/english/tasks", api_base, device_token,
-                 body, error)) {
+    if (!GetJson("/api/device/v1/english/tasks", api_base, device_token, body,
+                 error, 3000)) {
         return {};
     }
 
@@ -234,30 +235,12 @@ EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
     return result;
 }
 
-EnglishReview EnglishClient::FetchReview(const std::string& task_id,
-                                         std::string& error) {
-    error.clear();
-    std::string api_base;
-    std::string device_token;
-    if (!LoadConfig(api_base, device_token, error)) {
-        return {};
-    }
-    std::string body;
-    const std::string path = "/api/device/v1/english/tasks/" +
-                             UrlEncode(task_id) + "/review";
-    if (!GetJson(path, api_base, device_token, body, error)) {
-        body = LoadReviewCache(task_id);
-        if (body.empty()) {
-            return {};
-        }
-        error.clear();
-    } else {
-        SaveReviewCache(task_id, body);
-    }
-
+namespace {
+EnglishReview ParseReview(const std::string& body, std::string& error,
+                          const char* parse_error) {
     cJSON* root = cJSON_Parse(body.c_str());
     if (root == nullptr) {
-        error = "复习内容格式错误";
+        error = parse_error;
         return {};
     }
     EnglishReview review;
@@ -291,8 +274,8 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
         }
         entry.correct_index =
             cJSON_IsNumber(correct_index) ? correct_index->valueint : -1;
-        if (entry.correct_index >= 0 && entry.correct_index >=
-                                          static_cast<int>(entry.options.size())) {
+        if (entry.correct_index >= 0 &&
+            entry.correct_index >= static_cast<int>(entry.options.size())) {
             entry.correct_index = -1;
         }
         if (entry.correct_index < 0 && !entry.meaning.empty()) {
@@ -307,6 +290,41 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
     }
     cJSON_Delete(root);
     return review;
+}
+}  // namespace
+
+EnglishReview EnglishClient::FetchReview(const std::string& task_id,
+                                         std::string& error) {
+    error.clear();
+    std::string api_base;
+    std::string device_token;
+    if (!LoadConfig(api_base, device_token, error)) {
+        return {};
+    }
+    std::string body;
+    const std::string path = "/api/device/v1/english/tasks/" +
+                             UrlEncode(task_id) + "/review";
+    if (!GetJson(path, api_base, device_token, body, error)) {
+        body = LoadReviewCache(task_id);
+        if (body.empty()) {
+            return {};
+        }
+        error.clear();
+    } else {
+        SaveReviewCache(task_id, body);
+    }
+
+    return ParseReview(body, error, "复习内容格式错误");
+}
+
+EnglishReview EnglishClient::LoadCachedReview(const std::string& task_id,
+                                              std::string& error) {
+    error.clear();
+    const std::string body = LoadReviewCache(task_id);
+    if (body.empty()) {
+        return {};
+    }
+    return ParseReview(body, error, "复习缓存格式错误");
 }
 
 bool EnglishClient::SubmitResult(const std::string& task_id,

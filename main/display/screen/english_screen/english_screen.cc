@@ -698,17 +698,23 @@ void PostRequestResult(RequestResult* result) {
                                       : I18n::T("选择任务开始复习"));
                         break;
                     case RequestKind::Review:
-                        s_review = std::move(resolved->review);
-                        s_current_task_id = resolved->task_id;
-                        s_current_index = 0;
-                        s_stage = 0;
-                        BuildReview();
-                        if (s_review.entries.empty()) {
-                            SetStatus(I18n::T("暂无复习短句"));
+                        if (!s_current_task_id.empty() &&
+                            s_current_task_id == resolved->task_id &&
+                            s_in_review && s_current_index > 0) {
+                            SetStatus(I18n::T("内容已更新，本次先继续"));
                         } else {
-                            SetStatus(s_review.label.empty()
-                                          ? I18n::T("轻触卡片翻面")
-                                          : s_review.label.c_str());
+                            s_review = std::move(resolved->review);
+                            s_current_task_id = resolved->task_id;
+                            s_current_index = 0;
+                            s_stage = 0;
+                            BuildReview();
+                            if (s_review.entries.empty()) {
+                                SetStatus(I18n::T("暂无复习短句"));
+                            } else {
+                                SetStatus(s_review.label.empty()
+                                              ? I18n::T("轻触卡片翻面")
+                                              : s_review.label.c_str());
+                            }
                         }
                         break;
                     case RequestKind::Result:
@@ -884,6 +890,20 @@ void OnTaskClicked(lv_event_t* event) {
     if (RestoreReviewProgress(task_id)) {
         BuildReview();
         SetStatus(I18n::T("已恢复上次复习进度"));
+        return;
+    }
+    std::string cache_error;
+    const EnglishReview cached_review =
+        EnglishClient::LoadCachedReview(task_id, cache_error);
+    if (!cached_review.entries.empty()) {
+        s_review = cached_review;
+        s_current_task_id = task_id;
+        s_current_index = 0;
+        s_stage = 0;
+        s_in_review = true;
+        BuildReview();
+        SetStatus(I18n::T("已显示缓存，后台更新中"));
+        StartReviewWorker(task_id);
         return;
     }
     s_review = EnglishReview{};
