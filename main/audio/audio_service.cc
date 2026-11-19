@@ -569,6 +569,22 @@ void AudioService::AbortPlaybackGeneration() {
     ResetDecoder();
 }
 
+void AudioService::StopPlaybackNow() {
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        playback_generation_.fetch_add(1, std::memory_order_relaxed);
+        audio_decode_queue_.clear();
+        audio_playback_queue_.clear();
+        timestamp_queue_.clear();
+        audio_queue_cv_.notify_all();
+    }
+    ResetDecoder();
+    if (codec_ != nullptr && codec_->output_enabled()) {
+        codec_->EnableOutput(false);
+        codec_->EnableOutput(true);
+    }
+}
+
 void AudioService::ClearPlaybackQueue() {
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
