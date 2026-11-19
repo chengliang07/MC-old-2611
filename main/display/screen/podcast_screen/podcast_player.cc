@@ -63,6 +63,7 @@ bool s_media_lib_ready = false;
 // 位置用“基准毫秒 + 本次连续播放时长 × 倍速”估算，不依赖解码器。
 std::atomic<int64_t> s_base_ms{0};
 std::atomic<int64_t> s_clock_us{0};
+std::atomic<int64_t> s_played_bytes{0};
 std::atomic<int> s_speed_q1000{1000};
 std::atomic<int> s_duration_sec{0};
 std::atomic<int64_t> s_total_bytes{0};
@@ -80,6 +81,13 @@ int64_t ClampPositionMs(int64_t ms) {
 }
 
 int64_t CurrentPositionMs() {
+    const int duration = s_duration_sec.load(std::memory_order_relaxed);
+    const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
+    const int64_t bytes = s_played_bytes.load(std::memory_order_relaxed);
+    if (duration > 0 && total > 0 && bytes > 0) {
+        return ClampPositionMs(
+            static_cast<int64_t>(duration) * 1000 * bytes / total);
+    }
     int64_t ms = s_base_ms.load(std::memory_order_relaxed);
     const int64_t clock = s_clock_us.load(std::memory_order_relaxed);
     if (clock != 0) {
@@ -388,17 +396,30 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
             client = nullptr;
             return false;
         }
-        // 续传请求必须拿到 206，否则会从头重放，直接放弃续传。
-        if (range_start > 0 && status != 206) {
-            error = "音频续传失败";
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-            client = nullptr;
-            return false;
-        }
         if (remaining != nullptr) {
             *remaining =
                 static_cast<int64_t>(esp_http_client_get_content_length(client));
+            if (range_start > 0 && status == 200) {
+                *remaining += range_start;
+            }
+        }
+        if (range_start > 0 && status == 200) {
+            int64_t skipped = 0;
+            std::vector<char> skip(2048);
+            while (skipped < range_start) {
+                const int take = static_cast<int>(
+                    std::min<int64_t>(skip.size(), range_start - skipped));
+                const int got =
+                    esp_http_client_read(client, skip.data(), take);
+                if (got <= 0) {
+                    error = "音频续传失败";
+                    esp_http_client_close(client);
+                    esp_http_client_cleanup(client);
+                    client = nullptr;
+                    return false;
+                }
+                skipped += got;
+            }
         }
         ESP_LOGI(TAG, "audio stream open, status=%d len=%d", status,
                  static_cast<int>(esp_http_client_get_content_length(client)));
@@ -562,6 +583,7 @@ void PodcastFetchTask(void* arg) {
                     client = next;
                     state->client.store(client, std::memory_order_release);
                     remaining = next_remaining;
+                    s_played_bytes.store(fetched, std::memory_order_relaxed);
                     resumes++;
                     ESP_LOGW(TAG, "audio resumed at %lld (try %d)",
                              static_cast<long long>(fetched), resumes);
@@ -627,6 +649,7 @@ int PodcastReadCallback(uint8_t* data, int data_size, void* ctx) {
                                  kRingBlockSize + state->pending_offset,
                     static_cast<size_t>(take));
         total += take;
+        s_played_bytes.fetch_add(take, std::memory_order_relaxed);
         state->pending_offset += take;
         if (state->pending_offset >= state->pending_size) {
             const uint16_t index =
@@ -864,7 +887,7 @@ void PodcastPlayTask(void* arg) {
             if (!is_current() || state->stop.load(std::memory_order_relaxed)) {
                 break;
             }
-            if (uxQueueMessagesWaiting(state->ring_data) >= 4) {
+            if (uxQueueMessagesWaiting(state->ring_data) >= 2) {
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -999,6 +1022,7 @@ static bool StartInternal(const std::string& url, std::string& error,
         if (range_bytes == 0) {
             s_total_bytes.store(0, std::memory_order_relaxed);
         }
+        s_played_bytes.store(range_bytes, std::memory_order_relaxed);
         s_base_ms.store(base_ms, std::memory_order_relaxed);
         s_clock_us.store(0, std::memory_order_relaxed);
         if (xTaskCreate(PodcastPlayTask, "podcast_play", 8192, arg, 5,

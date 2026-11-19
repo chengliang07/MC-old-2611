@@ -680,6 +680,9 @@ void PostRequestResult(RequestResult* result) {
                     if (resolved->kind == RequestKind::Result) {
                         s_choice_locked = false;
                     }
+                    if (resolved->kind == RequestKind::Review) {
+                        ShowCenteredMessage(resolved->error.c_str(), true);
+                    }
                     SetStatus(resolved->error.c_str());
                     return;
                 }
@@ -821,7 +824,7 @@ void StartReviewWorker(const std::string& task_id) {
                 PostRequestResult(result);
                 FinishWorkerTask();
             },
-            "english_review", 8192, context) != pdPASS) {
+            "english_review", 16384, context) != pdPASS) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("加载复习内容失败"));

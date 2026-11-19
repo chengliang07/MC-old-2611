@@ -584,7 +584,6 @@ void ReturnHome() {
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     s_screen_active.store(false, std::memory_order_release);
     PodcastPlayer::Stop();
-
     lv_obj_t* old_screen = lv_screen_active();
     lv_obj_t* target = s_return_screen;
     s_return_screen = nullptr;
@@ -593,7 +592,12 @@ void ReturnHome() {
     }
     lv_screen_load(target);
     if (target == ChatScreen::CurrentScreen()) {
-        ChatScreen::ResumeAfterTemporaryLeave();
+        lv_timer_create(
+            [](lv_timer_t* timer) {
+                lv_timer_delete(timer);
+                ChatScreen::ResumeAfterTemporaryLeave();
+            },
+            400, nullptr);
     }
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);
