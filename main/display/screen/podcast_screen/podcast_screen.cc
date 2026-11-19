@@ -480,8 +480,7 @@ void StartLoadWorker() {
                 result->items = PodcastClient::FetchPodcasts(error);
                 result->error = std::move(error);
                 std::vector<std::string> warm_ids;
-                for (size_t i = 0;
-                     i < result->items.size() && i < 3; ++i) {
+                for (size_t i = 0; i < result->items.size() && i < 8; ++i) {
                     warm_ids.push_back(result->items[i].id);
                 }
                 if (lv_async_call(ApplyLoadResult, result) != LV_RESULT_OK) {
@@ -595,9 +594,14 @@ void ReturnHome() {
         lv_timer_create(
             [](lv_timer_t* timer) {
                 lv_timer_delete(timer);
-                ChatScreen::ResumeAfterTemporaryLeave();
+                lv_timer_create(
+                    [](lv_timer_t* retry_timer) {
+                        lv_timer_delete(retry_timer);
+                        ChatScreen::ResumeAfterTemporaryLeave();
+                    },
+                    300, nullptr);
             },
-            400, nullptr);
+            1200, nullptr);
     }
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);

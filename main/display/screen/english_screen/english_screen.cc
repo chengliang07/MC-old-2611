@@ -892,6 +892,19 @@ void OnTaskClicked(lv_event_t* event) {
     ShowCenteredMessage(I18n::T("正在加载复习内容..."), false, true);
     SetStatus(I18n::T("正在加载复习内容..."));
     StartReviewWorker(task_id);
+    lv_timer_create(
+        [](lv_timer_t* timer) {
+            if (!s_in_review || s_review.entries.empty()) {
+                lv_timer_delete(timer);
+                ShowCenteredMessage(
+                    I18n::T("加载复习内容超时，请返回重试"), true);
+                SetStatus(I18n::T("加载超时"));
+                s_busy.store(false, std::memory_order_release);
+                s_busy_kind.store(0, std::memory_order_relaxed);
+                s_busy_generation.store(0, std::memory_order_relaxed);
+            }
+        },
+        8000, nullptr);
 }
 
 void OnCardClicked(lv_event_t* /*event*/) {
@@ -1136,7 +1149,6 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG, "load: english_screen");
         Application::GetInstance().SetVoiceUiDesired(false);
         s_screen_active.store(true, std::memory_order_release);
-        s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
         s_tasks.clear();
@@ -1167,7 +1179,6 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     } else {
         ESP_LOGI(TAG, "unload: english_screen");
         s_screen_active.store(false, std::memory_order_release);
-        s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     }
