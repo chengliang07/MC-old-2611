@@ -205,8 +205,8 @@ struct WakeWordGuard {
 };
 
 void post_ui(uint32_t session, State state, const char* status,
-             BubbleRole role, const char* text, bool append_user = false,
-             bool reset_assistant = false) {
+             BubbleRole role, const char* text, bool append_user,
+             bool reset_assistant) {
     struct UiPayload {
         uint32_t session;
         State state;
