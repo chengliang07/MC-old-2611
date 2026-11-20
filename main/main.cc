@@ -1,5 +1,6 @@
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_app_desc.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <driver/gpio.h>
@@ -11,12 +12,31 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "application.h"
 #include "i18n.h"
+#include "settings.h"
 #include "system_info.h"
 
 #define TAG "main"
+
+#ifndef APP_GIT_COMMIT
+#define APP_GIT_COMMIT "unknown"
+#endif
+#ifndef APP_GIT_DIRTY
+#define APP_GIT_DIRTY 0
+#endif
+
+// 单行启动横幅：一眼确认"这块板子跑的是哪份代码、连的是哪个后端"。
+static void LogBootBanner() {
+    Settings podcast("podcast", false);
+    std::string api_base = podcast.GetString("api_base", CONFIG_PODCAST_API_BASE);
+    std::string device_token = podcast.GetString("device_token", CONFIG_PODCAST_DEVICE_TOKEN);
+    ESP_LOGI(TAG, "@@BOOT@@ ver=%s commit=%s dirty=%d api_base=%s token_len=%d",
+             esp_app_get_description()->version, APP_GIT_COMMIT, APP_GIT_DIRTY,
+             api_base.c_str(), static_cast<int>(device_token.size()));
+}
 
 // 调试通道：把关键日志同时通过 UDP 广播到局域网（8266），
 // 避免 USB Serial/JTAG 句柄在运行中失效导致无法抓日志。
@@ -86,6 +106,8 @@ extern "C" void app_main(void)
 
     // UI locale from NVS (must run before first screen create).
     I18n::Init();
+
+    LogBootBanner();
 
     // Launch the application
     auto& app = Application::GetInstance();

@@ -22,6 +22,7 @@
 #include "home_screen/home_screen.h"
 #include "chat_screen/chat_screen.h"
 #include "pwr_key_handler.h"
+#include "settings.h"
 #include <web_socket.h>
 
 LV_FONT_DECLARE(font_puhui_20_4);
@@ -493,6 +494,8 @@ void handle_json(const char* data, size_t len, uint32_t session) {
 }
 
 bool connect_websocket(uint32_t session, std::string& error) {
+    Settings settings("oral", false);
+    const std::string relay_url = settings.GetString("relay_url", kRelayUrl);
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         error = "网络未就绪";
@@ -520,8 +523,10 @@ bool connect_websocket(uint32_t session, std::string& error) {
         std::snprintf(message, sizeof(message), "WebSocket 错误：%d", code);
         post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
     });
-    if (!ws->Connect(kRelayUrl)) {
-        error = "连接口语服务失败";
+    if (!ws->Connect(relay_url.c_str())) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "连接口语服务失败：%d", ws->GetLastError());
+        error = message;
         return false;
     }
     std::lock_guard<std::mutex> lock(s_ws_mutex);

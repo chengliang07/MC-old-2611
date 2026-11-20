@@ -23,13 +23,15 @@
 #endif
 
 #define PET_CANVAS_SIZE      512
-#define PET_BODY_X           0
-#define PET_BODY_Y           0
-#define PET_EYES_X           104
-#define PET_EYES_Y           86
+#define PET_BODY_X           16
+#define PET_BODY_Y           26
+#define PET_BODY_W           480
+#define PET_BODY_H           470
+#define PET_EYES_X           160
+#define PET_EYES_Y           140
 #define PET_EYES_W           248
 #define PET_EYES_H           56
-#define PET_MOUTH_X          180
+#define PET_MOUTH_X          208
 #define PET_MOUTH_Y          196
 #define PET_MOUTH_W          96
 #define PET_MOUTH_H          72

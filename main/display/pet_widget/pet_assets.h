@@ -19,7 +19,7 @@ extern "C" {
 #define PET_ASSET_ROOT "A:"
 #endif
 
-static const char *const PET_IMG_BODY = PET_ASSET_ROOT "ic_pet_idle.spng";
+static const char *const PET_IMG_BODY = PET_ASSET_ROOT "pet_body.png";
 
 static const char *const PET_EYES_OPEN    = PET_ASSET_ROOT "pet_eyes_open.png";
 static const char *const PET_EYES_HALF    = PET_ASSET_ROOT "pet_eyes_half.png";
