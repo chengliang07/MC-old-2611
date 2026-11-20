@@ -175,7 +175,8 @@ uint32_t now_ms() {
 }
 
 void post_ui(uint32_t session, State state, const char* status,
-             BubbleRole role, const char* text, bool append);
+             BubbleRole role, const char* text, bool append_user = false,
+             bool reset_assistant = false);
 
 void flush_stream_text(uint32_t session) {
     std::string text;
