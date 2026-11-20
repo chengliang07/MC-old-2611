@@ -80,6 +80,7 @@ std::atomic<bool> s_interrupt_requested{false};
 std::atomic<bool> s_reconnect_requested{false};
 std::atomic<bool> s_user_exit{false};
 std::atomic<bool> s_response_done_pending{false};
+std::atomic<int64_t> s_response_done_at_us{0};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<uint32_t> s_last_done_response_id{0};
 
@@ -490,6 +491,8 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             flush_stream_text(session);
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
+            s_response_done_at_us.store(esp_timer_get_time(),
+                                        std::memory_order_release);
             post_ui(session, State::Answering, "回答完成，正在恢复聆听…", BubbleRole::Assistant, nullptr);
         }
     } else if (std::strcmp(type, "relay.error") == 0) {
@@ -567,10 +570,21 @@ void stream_microphone(uint32_t session) {
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending() || has_queued_audio()) {
                 playback_idle_tick = 0;
+                s_response_done_at_us.store(esp_timer_get_time(),
+                                            std::memory_order_release);
             } else {
                 const TickType_t now = xTaskGetTickCount();
+                const int64_t done_at_us =
+                    s_response_done_at_us.load(std::memory_order_acquire);
                 if (playback_idle_tick == 0) {
                     playback_idle_tick = now;
+                }
+                if (esp_timer_get_time() - done_at_us >= 8000LL * 1000) {
+                    s_response_done_pending.store(false, std::memory_order_release);
+                    s_mic_enabled.store(true, std::memory_order_release);
+                    send_ws_json("{\"type\":\"resume_mic\"}");
+                    post_ui(session, State::Listening,
+                            "聆听中…", BubbleRole::Assistant, nullptr);
                 } else if (now - playback_idle_tick >= pdMS_TO_TICKS(250)) {
                     s_response_done_pending.store(false, std::memory_order_release);
                     s_mic_enabled.store(true, std::memory_order_release);
@@ -861,6 +875,12 @@ bool OralScreen::IsActive() {
 
 void OralScreen::Interrupt() {
     if (!IsActive()) return;
+    auto& audio = Application::GetInstance().GetAudioService();
+    audio.ClearPlaybackQueue();
+    clear_audio_queue();
+    s_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_response_done_pending.store(false, std::memory_order_release);
     s_interrupt_requested.store(true, std::memory_order_release);
+    s_mic_enabled.store(true, std::memory_order_release);
     post_ui(s_session.load(), State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
 }
