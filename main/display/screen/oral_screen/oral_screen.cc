@@ -204,7 +204,8 @@ struct WakeWordGuard {
 };
 
 void post_ui(uint32_t session, State state, const char* status,
-             BubbleRole role, const char* text, bool append_user = false) {
+             BubbleRole role, const char* text, bool append_user = false,
+             bool reset_assistant = false) {
     struct UiPayload {
         uint32_t session;
         State state;
@@ -214,6 +215,7 @@ void post_ui(uint32_t session, State state, const char* status,
         bool replace_text;
         bool append_user;
         uint32_t generation;
+        bool reset_assistant;
     };
     if (!session_alive(session)) state = State::Error;
     auto* payload = new UiPayload{};
@@ -225,6 +227,7 @@ void post_ui(uint32_t session, State state, const char* status,
     payload->replace_text = false;
     payload->append_user = append_user;
     payload->generation = s_generation.load(std::memory_order_acquire);
+    payload->reset_assistant = reset_assistant;
     if (lv_async_call([](void* data) {
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
@@ -235,6 +238,13 @@ void post_ui(uint32_t session, State state, const char* status,
             }
             if (item->append[0] == '\0' || s_chat == nullptr ||
                 item->generation != s_generation.load(std::memory_order_acquire)) return;
+            if (item->reset_assistant) {
+                s_text = nullptr;
+                s_text_bubble = nullptr;
+                s_assistant_row = nullptr;
+                std::lock_guard<std::mutex> lock(s_text_mutex);
+                s_answer.clear();
+            }
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text += item->append;
@@ -444,15 +454,13 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         s_generation.fetch_add(1, std::memory_order_acq_rel);
         s_response_done_pending.store(false, std::memory_order_release);
         s_mic_enabled.store(false, std::memory_order_release);
-        s_text = nullptr;
-        s_text_bubble = nullptr;
-        s_assistant_row = nullptr;
         {
             std::lock_guard<std::mutex> lock(s_text_mutex);
             s_stream_text.clear();
             s_stream_text_ms = 0;
         }
-        post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant, nullptr);
+        post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant,
+                nullptr, false, true);
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr) {
@@ -680,7 +688,7 @@ void start_session() {
         s_user_text.clear();
         s_resample_position = 0;
     }
-    if (xTaskCreate(worker_task, "oral_ws", 4096, nullptr, 4, &s_worker_task) != pdPASS) {
+    if (xTaskCreate(worker_task, "oral_ws", 8192, nullptr, 4, &s_worker_task) != pdPASS) {
         s_worker_task = nullptr;
         post_ui(s_session.load(), State::Error, "启动口语会话失败", BubbleRole::Assistant, nullptr);
     }
