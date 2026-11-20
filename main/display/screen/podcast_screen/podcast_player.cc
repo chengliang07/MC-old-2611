@@ -253,9 +253,7 @@ void ReleaseStreamState(StreamState* state) {
     delete state;
 }
 
-// 只做“立刻静音 + 通知旧任务退出”，不等待。
-// 旧任务持有自己的流状态，退出前不会再输出；新播放可立即开始。
-void StopCurrentPlayback(bool /*wait_for_exit*/) {
+void DetachCurrentPlayback() {
     esp_asp_handle_t old_player = nullptr;
     StreamState* old_stream = nullptr;
     {
@@ -270,15 +268,11 @@ void StopCurrentPlayback(bool /*wait_for_exit*/) {
             old_stream->refs.fetch_add(1, std::memory_order_acq_rel);
         }
     }
-    if (old_player != nullptr) {
-        std::lock_guard<std::mutex> api_lock(s_api_mutex);
-        // 持有 player 时它一定还活着：旧任务的销毁也必须拿这把锁。
-        if (old_stream != nullptr) {
-            old_stream->stop.store(true, std::memory_order_release);
-        }
-        esp_audio_simple_player_stop(old_player);
+    if (old_stream != nullptr) {
+        old_stream->stop.store(true, std::memory_order_release);
+        ReleaseStreamState(old_stream);
     }
-    ReleaseStreamState(old_stream);
+    (void)old_player;
 }
 
 // open/fetch_headers 这套手动流程不会自动跟随 3xx，需要自己解析 Location。
@@ -997,22 +991,12 @@ static bool StartInternal(const std::string& url, std::string& error,
         return false;
     }
 
-    esp_asp_handle_t old_player = nullptr;
-    StreamState* old_stream = nullptr;
+    DetachCurrentPlayback();
     bool create_failed = false;
     {
         std::lock_guard<std::mutex> lock(s_player_mutex);
         const uint32_t generation =
             s_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-        old_player = s_player;
-        s_player = nullptr;
-        s_output_enabled.store(false, std::memory_order_release);
-        s_output_generation.store(0, std::memory_order_release);
-        old_stream = s_active_stream.exchange(nullptr);
-        if (old_stream != nullptr) {
-            old_stream->refs.fetch_add(1, std::memory_order_acq_rel);
-        }
-
         auto* arg = new PlayArg{};
         arg->generation = generation;
         arg->url = url;
@@ -1033,15 +1017,6 @@ static bool StartInternal(const std::string& url, std::string& error,
             create_failed = true;
         }
     }
-    // 先把旧播放的停止位打开，再停旧 player，避免出现两路同时出声。
-    if (old_player != nullptr) {
-        std::lock_guard<std::mutex> api_lock(s_api_mutex);
-        if (old_stream != nullptr) {
-            old_stream->stop.store(true, std::memory_order_release);
-        }
-        esp_audio_simple_player_stop(old_player);
-    }
-    ReleaseStreamState(old_stream);
     if (create_failed) {
         error = "创建播放任务失败";
     }
@@ -1150,7 +1125,7 @@ bool PodcastPlayer::Resume() {
 }
 
 void PodcastPlayer::Stop() {
-    StopCurrentPlayback(true);
+    DetachCurrentPlayback();
     s_clock_us.store(0, std::memory_order_relaxed);
     s_base_ms.store(0, std::memory_order_relaxed);
 }

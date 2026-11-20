@@ -75,6 +75,7 @@ std::atomic<State> s_state{State::Idle};
 std::atomic<bool> s_stop_requested{true};
 std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
+std::atomic<bool> s_interrupt_requested{false};
 std::atomic<bool> s_reconnect_requested{false};
 std::atomic<bool> s_user_exit{false};
 std::atomic<bool> s_response_done_pending{false};
@@ -337,7 +338,8 @@ void audio_playback_task(void* /*arg*/) {
         if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
         auto& audio = Application::GetInstance().GetAudioService();
         for (int attempt = 0;
-             attempt < 20 && !audio.PushPcmToPlaybackQueue(chunk.pcm.data(), chunk.pcm.size());
+             attempt < 20 && !audio.PushPcmToPlaybackQueue(
+                                  chunk.pcm.data(), chunk.pcm.size());
              ++attempt) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -537,6 +539,17 @@ void stream_microphone(uint32_t session) {
     while (!s_stop_requested.load(std::memory_order_acquire) &&
            !s_reconnect_requested.load(std::memory_order_acquire) &&
            session_alive(session)) {
+        if (s_interrupt_requested.exchange(false, std::memory_order_acq_rel)) {
+            auto& audio = Application::GetInstance().GetAudioService();
+            audio.ClearPlaybackQueue();
+            clear_audio_queue();
+            s_generation.fetch_add(1, std::memory_order_acq_rel);
+            s_response_done_pending.store(false, std::memory_order_release);
+            send_ws_json("{\"type\":\"interrupt\"}");
+            send_ws_json("{\"type\":\"resume_mic\"}");
+            s_mic_enabled.store(true, std::memory_order_release);
+            post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
+        }
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending() || has_queued_audio()) {
                 playback_idle_tick = 0;
@@ -590,6 +603,9 @@ void worker_task(void* /*arg*/) {
     int connect_failures = 0;
     while (!s_stop_requested.load(std::memory_order_acquire) &&
            session_alive(session)) {
+        if (s_stop_requested.load(std::memory_order_acquire)) {
+            break;
+        }
         post_ui(session, State::Connecting, "连接中…", BubbleRole::Assistant, nullptr);
         std::string error;
         if (!connect_websocket(session, error)) {
@@ -632,6 +648,11 @@ void worker_task(void* /*arg*/) {
         break;
     }
     s_worker_task = nullptr;
+    clear_audio_queue();
+    auto& audio = Application::GetInstance().GetAudioService();
+    audio.ClearPlaybackQueue();
+    close_websocket();
+    s_interrupt_requested.store(false, std::memory_order_release);
     vTaskDelete(nullptr);
 }
 
@@ -665,12 +686,11 @@ void stop_session() {
     s_user_exit.store(true, std::memory_order_release);
     s_stop_requested.store(true, std::memory_order_release);
     s_reconnect_requested.store(false, std::memory_order_release);
+    s_interrupt_requested.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
-    auto& audio = Application::GetInstance().GetAudioService();
-    audio.ClearPlaybackQueue();
-    send_ws_json("{\"type\":\"interrupt\"}");
-    close_websocket();
+    // WebSocket Send/Close 可能阻塞；LVGL 线程只置退出标志，由 worker 清理。
+    s_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void on_back(lv_event_t* /*event*/) {
@@ -828,13 +848,6 @@ bool OralScreen::IsActive() {
 
 void OralScreen::Interrupt() {
     if (!IsActive()) return;
-    auto& audio = Application::GetInstance().GetAudioService();
-    audio.ClearPlaybackQueue();
-    clear_audio_queue();
-    s_generation.fetch_add(1, std::memory_order_acq_rel);
-    s_response_done_pending.store(false, std::memory_order_release);
-    send_ws_json("{\"type\":\"interrupt\"}");
-    send_ws_json("{\"type\":\"resume_mic\"}");
-    s_mic_enabled.store(true, std::memory_order_release);
+    s_interrupt_requested.store(true, std::memory_order_release);
     post_ui(s_session.load(), State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
 }
