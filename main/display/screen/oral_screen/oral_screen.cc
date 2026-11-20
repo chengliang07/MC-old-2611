@@ -654,7 +654,6 @@ void worker_task(void* /*arg*/) {
     }
     s_worker_task = nullptr;
     clear_audio_queue();
-    auto& audio = Application::GetInstance().GetAudioService();
     audio.ClearPlaybackQueue();
     close_websocket();
     s_interrupt_requested.store(false, std::memory_order_release);
