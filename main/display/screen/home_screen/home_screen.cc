@@ -970,7 +970,7 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
 constexpr AppEntry kApps[] = {
     {"chat",           "一丢学伴", LaunchChat,          chat_lifecycle_cb,          true},
     {"radio",          "一丢播客", LaunchPodcast,       podcast_lifecycle_cb,       true},
-    {"chat",           "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
+    {"digital_people", "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
     {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
     {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
     {"pet",            "一丢宠物2", LaunchPet2,          pet2_lifecycle_cb,          true},
