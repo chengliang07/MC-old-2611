@@ -53,7 +53,6 @@ constexpr int kInputSamples = kInputSampleRate * kInputFrameMs / 1000;
 constexpr int kOutputSampleRate = 24000;
 constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
-constexpr size_t kMaxBubbleTextBytes = 600;
 constexpr size_t kPlaybackSliceSamples = 320;
 constexpr size_t kMaxAudioChunks = 16;
 constexpr size_t kMaxAudioBytes = 192 * 1024;
@@ -103,7 +102,8 @@ lv_obj_t* s_chat = nullptr;
 lv_obj_t* s_return_screen = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
-std::mutex s_ws_mutex;
+// Send 可能同步触发回调，回调里还会发控制帧，必须允许重入。
+std::recursive_mutex s_ws_mutex;
 std::mutex s_text_mutex;
 std::string s_answer;
 std::string s_user_text;
@@ -238,7 +238,7 @@ void post_ui(uint32_t session, State state, const char* status,
         uint32_t session;
         State state;
         char status[96];
-        char append[512];
+        std::string append;
         BubbleRole role;
         bool replace_text;
         bool append_user;
@@ -251,7 +251,7 @@ void post_ui(uint32_t session, State state, const char* status,
     payload->session = session;
     payload->state = state;
     std::snprintf(payload->status, sizeof(payload->status), "%s", status ? status : "");
-    std::snprintf(payload->append, sizeof(payload->append), "%s", text ? text : "");
+    payload->append = text ? text : "";
     payload->role = role;
     payload->replace_text = false;
     payload->append_user = append_user;
@@ -273,7 +273,7 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer.clear();
             }
-            if (item->append[0] == '\0' || s_chat == nullptr ||
+            if (item->append.empty() || s_chat == nullptr ||
                 item->generation != s_generation.load(std::memory_order_acquire)) return;
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -327,13 +327,14 @@ void post_ui(uint32_t session, State state, const char* status,
             lv_obj_remove_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_bg_color(bubble, lv_color_hex(is_user ? kColorRightBubble : kColorLeftBubble), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-            const int32_t width = bubble_width_for_text(item->append, is_user);
+            const int32_t width =
+                bubble_width_for_text(item->append.c_str(), is_user);
             lv_obj_set_width(bubble, width);
             if (is_user) lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, -kSideMargin, 0);
             else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, kSideMargin, 0);
 
             lv_obj_t* label = lv_label_create(bubble);
-            lv_label_set_text(label, item->append);
+            lv_label_set_text(label, item->append.c_str());
             lv_obj_set_width(label, width - kBubblePadX * 2);
             lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
@@ -377,6 +378,11 @@ bool has_queued_audio() {
 
 void audio_playback_task(void* /*arg*/) {
     while (true) {
+        if (s_stop_requested.load(std::memory_order_acquire)) {
+            s_audio_task_running.store(false, std::memory_order_release);
+            vTaskDelete(nullptr);
+            return;
+        }
         AudioChunk chunk;
         {
             std::lock_guard<std::mutex> lock(s_audio_mutex);
@@ -452,7 +458,7 @@ void queue_audio_output(const std::vector<int16_t>& output) {
 }
 
 void close_websocket() {
-    std::lock_guard<std::mutex> lock(s_ws_mutex);
+    std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
     if (s_ws) {
         s_ws->Close();
         s_ws.reset();
@@ -463,7 +469,7 @@ void close_websocket() {
 void start_session();
 
 void send_ws_text(const char* text) {
-    std::lock_guard<std::mutex> lock(s_ws_mutex);
+    std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
     if (s_ws && s_ws->IsConnected()) s_ws->Send(text);
 }
 
@@ -548,9 +554,8 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                 }
                 if (s_stream_text_ms == 0) s_stream_text_ms = now_ms();
             }
-            const bool close_bubble =
-                ends_sentence(delta->valuestring) ||
-                s_stream_text.size() >= kMaxBubbleTextBytes;
+            // 只在句末收气泡；长句继续追加，避免一条长句被拆成多个气泡。
+            const bool close_bubble = ends_sentence(delta->valuestring);
             if (close_bubble || s_stream_text.size() >= 48 ||
                 now_ms() - s_stream_text_ms >= 220) {
                 flush_stream_text(session, close_bubble);
@@ -624,7 +629,7 @@ bool connect_websocket(uint32_t session, std::string& error) {
         error = message;
         return false;
     }
-    std::lock_guard<std::mutex> lock(s_ws_mutex);
+    std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
     s_ws = std::move(ws);
     return true;
 }
@@ -697,7 +702,7 @@ void stream_microphone(uint32_t session) {
             for (size_t i = 0; i + 1 < frame.size(); i += 2) frame[i / 2] = frame[i];
             frame.resize(frame.size() / 2);
         }
-        std::lock_guard<std::mutex> lock(s_ws_mutex);
+        std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
         if (!s_ws || !s_ws->IsConnected()) break;
         if (!s_ws->Send(frame.data(), frame.size() * sizeof(int16_t), true)) break;
     }
@@ -838,6 +843,9 @@ void stop_session() {
     s_mic_enabled.store(false, std::memory_order_release);
     // WebSocket Send/Close 可能阻塞；LVGL 线程只置退出标志，由 worker 清理。
     s_generation.fetch_add(1, std::memory_order_acq_rel);
+    // 立即丢掉未播完的旧语音，避免退出后继续出声、拖慢其他页面。
+    clear_audio_queue();
+    Application::GetInstance().GetAudioService().ClearPlaybackQueue();
 }
 
 void on_back(lv_event_t* /*event*/) {
@@ -983,6 +991,9 @@ void OralScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: oral_screen");
         Application::GetInstance().SetVoiceUiDesired(false);
+        // 学伴的 TTS 可能还在播放队列里，进口语前必须清掉，否则两路声音叠加。
+        Application::GetInstance().GetAudioService().ClearPlaybackQueue();
+        clear_audio_queue();
         return;
     }
     ESP_LOGI(TAG, "unload: oral_screen");

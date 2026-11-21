@@ -81,6 +81,41 @@ PodcastList s_items;
 PodcastList s_cached_items;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
+std::atomic<bool> s_url_prefetching{false};
+
+// 进入列表时后台预取前两集的签名地址，点击时直接命中客户端的播放地址缓存。
+void StartPlayUrlPrefetch() {
+    std::vector<std::string> ids;
+    for (const auto& item : s_items) {
+        if (ids.size() >= 2) {
+            break;
+        }
+        ids.push_back(item.id);
+    }
+    if (ids.empty()) {
+        return;
+    }
+    if (s_url_prefetching.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    auto* context = new std::vector<std::string>(std::move(ids));
+    if (xTaskCreate(
+            [](void* arg) {
+                auto* pending =
+                    static_cast<std::vector<std::string>*>(arg);
+                for (const auto& id : *pending) {
+                    std::string error;
+                    PodcastClient::ResolvePlayUrl(id, error);
+                }
+                delete pending;
+                s_url_prefetching.store(false, std::memory_order_release);
+                vTaskDelete(nullptr);
+            },
+            "podcast_url_prefetch", 6144, context, 2, nullptr) != pdPASS) {
+        delete context;
+        s_url_prefetching.store(false, std::memory_order_release);
+    }
+}
 
 void SaveListCache() {
     FILE* file = std::fopen(kListCachePath, "w");
@@ -460,6 +495,7 @@ void ApplyLoadResult(void* data) {
         SetStatusDirect(I18n::T("选择节目开始收听"));
     }
     RebuildList();
+    StartPlayUrlPrefetch();
 }
 
 void StartLoadWorker() {
@@ -801,6 +837,7 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         if (!s_items.empty()) {
             RebuildList();
             SetStatusDirect(I18n::T("选择节目开始收听"));
+            StartPlayUrlPrefetch();
         }
         StartLoadWorker();
     } else {
