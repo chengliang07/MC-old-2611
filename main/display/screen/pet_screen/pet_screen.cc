@@ -313,6 +313,24 @@ void DrawCreature(lv_obj_t* group, const char* stage) {
 void ApplyFace(PetMood mood) {
     s_mood = mood;
     if (s_ui.pet_widget != nullptr) {
+        switch (mood) {
+            case PetMood::Sleep:
+                pet_widget_set_state(s_ui.pet_widget, PET_STATE_SLEEP);
+                break;
+            case PetMood::Think:
+                pet_widget_set_state(s_ui.pet_widget, PET_STATE_THINKING);
+                break;
+            case PetMood::Listen:
+                pet_widget_set_state(s_ui.pet_widget, PET_STATE_LISTENING);
+                break;
+            case PetMood::Happy:
+            case PetMood::Celebrate:
+                pet_widget_trigger_happy(s_ui.pet_widget);
+                break;
+            default:
+                pet_widget_set_state(s_ui.pet_widget, PET_STATE_IDLE);
+                break;
+        }
         return;
     }
     if (s_ui.use_image_art) {
@@ -429,10 +447,41 @@ void BuildPetArt(const char* stage) {
     if (s_ui.art == nullptr) {
         return;
     }
-    if (s_ui.pet_widget == nullptr) {
+    const bool is_egg = stage == nullptr || std::strcmp(stage, "egg") == 0;
+    if (is_egg && s_ui.pet_widget != nullptr) {
+        lv_obj_delete(s_ui.pet_widget);
+        s_ui.pet_widget = nullptr;
+    }
+    if (!is_egg && s_ui.pet_widget == nullptr) {
+        if (s_ui.body != nullptr) {
+            lv_anim_delete(s_ui.body, nullptr);
+        }
+        if (s_ui.core != nullptr) {
+            lv_anim_delete(s_ui.core, nullptr);
+        }
+        lv_obj_clean(s_ui.art);
+        s_ui.body = nullptr;
+        s_ui.left_eye = nullptr;
+        s_ui.right_eye = nullptr;
+        s_ui.mouth = nullptr;
+        s_ui.left_brow = nullptr;
+        s_ui.right_brow = nullptr;
+        s_ui.core = nullptr;
+        s_ui.antenna_tip = nullptr;
+        s_ui.mark = nullptr;
+        s_has_brows = false;
         s_ui.pet_widget = pet_widget_create_simple(s_ui.art);
     }
-    if (s_ui.pet_widget != nullptr) {
+    if (!is_egg && s_ui.pet_widget != nullptr) {
+        const int scale = std::strcmp(stage, "adult") == 0
+                              ? 175
+                              : std::strcmp(stage, "teen") == 0 ? 160 : 135;
+        lv_obj_set_style_transform_pivot_x(s_ui.pet_widget, 256,
+                                           LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(s_ui.pet_widget, 256,
+                                           LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(s_ui.pet_widget, scale,
+                                         LV_PART_MAIN);
         return;
     }
     if (s_ui.body != nullptr) {

@@ -973,7 +973,7 @@ constexpr AppEntry kApps[] = {
     {"digital_people", "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
     {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
     {"pet",            "一丢宠物", LaunchPet,           pet_lifecycle_cb,           true},
-    {"pet",            "一丢宠物2", LaunchPet2,          pet2_lifecycle_cb,          true},
+    // {"pet",         "一丢宠物2", LaunchPet2,          pet2_lifecycle_cb,          true},
     {"wifi",           "网络配置", LaunchWifi,          wifi_lifecycle_cb,          false},
     {"settings",       "设置",     LaunchSettings,      settings_lifecycle_cb,      false},
     // {"digital_people", "数字人",   LaunchDigitalPeople, digital_people_lifecycle_cb, true},
