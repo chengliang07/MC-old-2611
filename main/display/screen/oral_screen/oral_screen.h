@@ -9,4 +9,5 @@ class OralScreen {
     static void LifecycleCallback(screen_lifecycle_event_t event);
     static bool IsActive();
     static void Interrupt();
+    static void RequestInterrupt();
 };

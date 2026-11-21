@@ -53,8 +53,8 @@ constexpr int kInputSamples = kInputSampleRate * kInputFrameMs / 1000;
 constexpr int kOutputSampleRate = 24000;
 constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
-constexpr size_t kMaxAudioChunks = 8;
-constexpr size_t kMaxAudioBytes = 96 * 1024;
+constexpr size_t kMaxAudioChunks = 16;
+constexpr size_t kMaxAudioBytes = 192 * 1024;
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorHeaderBg = 0x12151C;
 constexpr uint32_t kColorDivider = 0x2A2F3A;
@@ -77,12 +77,16 @@ std::atomic<bool> s_stop_requested{true};
 std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
 std::atomic<bool> s_interrupt_requested{false};
+std::atomic<bool> s_drop_incoming_audio{false};
+std::atomic<bool> s_barge_detection_requested{false};
 std::atomic<bool> s_reconnect_requested{false};
 std::atomic<bool> s_user_exit{false};
 std::atomic<bool> s_response_done_pending{false};
 std::atomic<int64_t> s_response_done_at_us{0};
 std::atomic<uint32_t> s_generation{0};
 std::atomic<uint32_t> s_last_done_response_id{0};
+std::atomic<bool> s_worker_running{false};
+std::atomic<int> s_start_retries{0};
 
 lv_obj_t* s_screen = nullptr;
 lv_obj_t* s_title = nullptr;
@@ -193,17 +197,24 @@ void flush_stream_text(uint32_t session) {
 
 struct WakeWordGuard {
     AudioService& audio;
-    bool disabled = false;
     explicit WakeWordGuard(AudioService& audio_service) : audio(audio_service) {
         if (audio.IsWakeWordRunning()) {
             audio.EnableWakeWordDetection(false);
-            disabled = true;
         }
     }
-    ~WakeWordGuard() {
-        if (disabled) audio.EnableWakeWordDetection(true);
-    }
 };
+
+void start_barge_in_detection() {
+    auto& audio = Application::GetInstance().GetAudioService();
+    audio.EnableWakeWordDetection(true);
+    audio.SetBargeInVad(true, nullptr, false);
+}
+
+void stop_barge_in_detection() {
+    auto& audio = Application::GetInstance().GetAudioService();
+    audio.SetBargeInVad(false, nullptr, false);
+    audio.EnableWakeWordDetection(false);
+}
 
 void post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user,
@@ -340,13 +351,22 @@ void audio_playback_task(void* /*arg*/) {
         {
             std::lock_guard<std::mutex> lock(s_audio_mutex);
             if (s_audio_chunks.empty()) {
-                s_audio_task_running.store(false, std::memory_order_release);
-                vTaskDelete(nullptr);
-                return;
+                chunk.pcm.clear();
+            } else {
+                chunk = std::move(s_audio_chunks.front());
+                s_audio_chunks.pop_front();
+                s_audio_bytes -= chunk.pcm.size() * sizeof(int16_t);
             }
-            chunk = std::move(s_audio_chunks.front());
-            s_audio_chunks.pop_front();
-            s_audio_bytes -= chunk.pcm.size() * sizeof(int16_t);
+        }
+        if (chunk.pcm.empty()) {
+            vTaskDelay(pdMS_TO_TICKS(120));
+            {
+                std::lock_guard<std::mutex> lock(s_audio_mutex);
+                if (!s_audio_chunks.empty()) continue;
+                s_audio_task_running.store(false, std::memory_order_release);
+            }
+            vTaskDelete(nullptr);
+            return;
         }
         if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
         auto& audio = Application::GetInstance().GetAudioService();
@@ -416,6 +436,7 @@ void resample_24k_to_16k(const std::vector<int16_t>& input, std::vector<int16_t>
 
 void handle_binary_audio(const char* data, size_t len, uint32_t session) {
     if (!session_alive(session)) return;
+    if (s_drop_incoming_audio.load(std::memory_order_acquire)) return;
     if (data == nullptr || len < sizeof(int16_t)) return;
     size_t samples = (len / sizeof(int16_t)) & ~static_cast<size_t>(1);
     auto* pcm = reinterpret_cast<const int16_t*>(data);
@@ -437,6 +458,7 @@ void handle_json(const char* data, size_t len, uint32_t session) {
 
     if (std::strcmp(type, "relay.ready") == 0) {
         s_ws_ready.store(true, std::memory_order_release);
+        s_drop_incoming_audio.store(false, std::memory_order_release);
         s_response_done_pending.store(false, std::memory_order_release);
         post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.speech_stopped") == 0) {
@@ -453,7 +475,9 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             post_ui(session, State::Answering, "思考中…", BubbleRole::User, text->valuestring);
         }
     } else if (std::strcmp(type, "relay.response.start") == 0) {
+        s_barge_detection_requested.store(true, std::memory_order_release);
         s_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_drop_incoming_audio.store(false, std::memory_order_release);
         s_response_done_pending.store(false, std::memory_order_release);
         s_mic_enabled.store(false, std::memory_order_release);
         {
@@ -495,6 +519,11 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                                         std::memory_order_release);
             post_ui(session, State::Answering, "回答完成，正在恢复聆听…", BubbleRole::Assistant, nullptr);
         }
+    } else if (std::strcmp(type, "relay.interrupted") == 0) {
+        s_drop_incoming_audio.store(true, std::memory_order_release);
+        s_response_done_pending.store(false, std::memory_order_release);
+        s_mic_enabled.store(true, std::memory_order_release);
+        post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.error") == 0) {
         const cJSON* error = cJSON_GetObjectItem(root, "error");
         const char* detail = cJSON_IsString(error) ? error->valuestring : "服务错误";
@@ -556,8 +585,14 @@ void stream_microphone(uint32_t session) {
     while (!s_stop_requested.load(std::memory_order_acquire) &&
            !s_reconnect_requested.load(std::memory_order_acquire) &&
            session_alive(session)) {
+        if (s_barge_detection_requested.exchange(false,
+                                                std::memory_order_acq_rel)) {
+            start_barge_in_detection();
+        }
         if (s_interrupt_requested.exchange(false, std::memory_order_acq_rel)) {
             auto& audio = Application::GetInstance().GetAudioService();
+            stop_barge_in_detection();
+            s_drop_incoming_audio.store(true, std::memory_order_release);
             audio.ClearPlaybackQueue();
             clear_audio_queue();
             s_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -570,8 +605,6 @@ void stream_microphone(uint32_t session) {
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending() || has_queued_audio()) {
                 playback_idle_tick = 0;
-                s_response_done_at_us.store(esp_timer_get_time(),
-                                            std::memory_order_release);
             } else {
                 const TickType_t now = xTaskGetTickCount();
                 const int64_t done_at_us =
@@ -580,12 +613,14 @@ void stream_microphone(uint32_t session) {
                     playback_idle_tick = now;
                 }
                 if (esp_timer_get_time() - done_at_us >= 8000LL * 1000) {
+                    stop_barge_in_detection();
                     s_response_done_pending.store(false, std::memory_order_release);
                     s_mic_enabled.store(true, std::memory_order_release);
                     send_ws_json("{\"type\":\"resume_mic\"}");
                     post_ui(session, State::Listening,
                             "聆听中…", BubbleRole::Assistant, nullptr);
                 } else if (now - playback_idle_tick >= pdMS_TO_TICKS(250)) {
+                    stop_barge_in_detection();
                     s_response_done_pending.store(false, std::memory_order_release);
                     s_mic_enabled.store(true, std::memory_order_release);
                     send_ws_json("{\"type\":\"resume_mic\"}");
@@ -624,6 +659,7 @@ void worker_task(void* /*arg*/) {
     if (!audio.IsStarted()) {
         post_ui(session, State::Error, "音频未就绪", BubbleRole::Assistant, nullptr);
         s_worker_task = nullptr;
+        s_worker_running.store(false, std::memory_order_release);
         vTaskDelete(nullptr);
         return;
     }
@@ -665,6 +701,7 @@ void worker_task(void* /*arg*/) {
         close_websocket();
         if (s_reconnect_requested.load(std::memory_order_acquire)) {
             s_reconnect_requested.store(false, std::memory_order_release);
+            stop_barge_in_detection();
             s_response_done_pending.store(false, std::memory_order_release);
             audio.ClearPlaybackQueue();
             clear_audio_queue();
@@ -676,6 +713,8 @@ void worker_task(void* /*arg*/) {
         break;
     }
     s_worker_task = nullptr;
+    s_worker_running.store(false, std::memory_order_release);
+    stop_barge_in_detection();
     clear_audio_queue();
     audio.ClearPlaybackQueue();
     close_websocket();
@@ -684,12 +723,36 @@ void worker_task(void* /*arg*/) {
 }
 
 void start_session() {
-    if (s_worker_task != nullptr) return;
+    if (s_worker_running.load(std::memory_order_acquire)) {
+        if (s_start_retries.fetch_add(1, std::memory_order_acq_rel) < 50) {
+            lv_timer_create(
+                [](lv_timer_t* timer) {
+                    const uint32_t session = static_cast<uint32_t>(
+                        reinterpret_cast<uintptr_t>(
+                            lv_timer_get_user_data(timer)));
+                    lv_timer_delete(timer);
+                    if (session_alive(session)) start_session();
+                },
+                100, reinterpret_cast<void*>(
+                         static_cast<uintptr_t>(s_session.load())));
+        } else {
+            s_start_retries.store(0, std::memory_order_release);
+            post_ui(s_session.load(), State::Error, "口语会话切换超时",
+                    BubbleRole::Assistant, nullptr);
+        }
+        return;
+    }
+    s_start_retries.store(0, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_stop_requested.store(false, std::memory_order_release);
+    s_interrupt_requested.store(false, std::memory_order_release);
     s_ws_ready.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
+    s_response_done_at_us.store(0, std::memory_order_release);
+    s_barge_detection_requested.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
+    s_last_done_response_id.store(0, std::memory_order_release);
+    s_drop_incoming_audio.store(false, std::memory_order_release);
     s_text = nullptr;
     s_text_bubble = nullptr;
     s_assistant_row = nullptr;
@@ -703,7 +766,9 @@ void start_session() {
         s_user_text.clear();
         s_resample_position = 0;
     }
+    s_worker_running.store(true, std::memory_order_release);
     if (xTaskCreate(worker_task, "oral_ws", 8192, nullptr, 4, &s_worker_task) != pdPASS) {
+        s_worker_running.store(false, std::memory_order_release);
         s_worker_task = nullptr;
         post_ui(s_session.load(), State::Error, "启动口语会话失败", BubbleRole::Assistant, nullptr);
     }
@@ -715,6 +780,7 @@ void stop_session() {
     s_reconnect_requested.store(false, std::memory_order_release);
     s_interrupt_requested.store(false, std::memory_order_release);
     s_response_done_pending.store(false, std::memory_order_release);
+    s_barge_detection_requested.store(false, std::memory_order_release);
     s_mic_enabled.store(false, std::memory_order_release);
     // WebSocket Send/Close 可能阻塞；LVGL 线程只置退出标志，由 worker 清理。
     s_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -876,6 +942,7 @@ bool OralScreen::IsActive() {
 void OralScreen::Interrupt() {
     if (!IsActive()) return;
     auto& audio = Application::GetInstance().GetAudioService();
+    s_drop_incoming_audio.store(true, std::memory_order_release);
     audio.ClearPlaybackQueue();
     clear_audio_queue();
     s_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -883,4 +950,8 @@ void OralScreen::Interrupt() {
     s_interrupt_requested.store(true, std::memory_order_release);
     s_mic_enabled.store(true, std::memory_order_release);
     post_ui(s_session.load(), State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
+}
+
+void OralScreen::RequestInterrupt() {
+    s_interrupt_requested.store(true, std::memory_order_release);
 }

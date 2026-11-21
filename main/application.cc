@@ -43,6 +43,7 @@ Application* g_barge_in_app = nullptr;
 #include "ota_screen.h"
 #include "home_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "oral_screen/oral_screen.h"
 #endif
 
 #define TAG "Application"
@@ -838,9 +839,13 @@ void Application::MainEventLoop() {
         }
 
         if (bits & MAIN_EVENT_BARGE_IN) {
-            if (device_state_ == kDeviceStateSpeaking &&
-                aec_mode_ != kAecOff && kBargeInByVad &&
-                g_barge_in_pending.exchange(false, std::memory_order_relaxed)) {
+            const bool barge_in_pending =
+                g_barge_in_pending.exchange(false, std::memory_order_relaxed);
+            if (barge_in_pending) {
+                OralScreen::RequestInterrupt();
+            }
+            if (barge_in_pending && device_state_ == kDeviceStateSpeaking &&
+                aec_mode_ != kAecOff && kBargeInByVad) {
                 ESP_LOGI(TAG, "local VAD barge-in, abort speaking");
                 audio_service_.SetVoiceUploadMuted(false);
                 audio_service_.SetBargeInVad(false, nullptr, true);
