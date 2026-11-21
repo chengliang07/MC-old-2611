@@ -296,7 +296,8 @@ std::string ResolveLocation(const std::string& base, const std::string& location
 }
 
 bool IsQuickPronunciationUrl(const std::string& url) {
-    return url.find("dict.youdao.com") != std::string::npos;
+    return url.find("dict.youdao.com") != std::string::npos ||
+           url.find("fanyi.baidu.com") != std::string::npos;
 }
 
 bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
@@ -330,6 +331,14 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
                 const std::string authorization = "Bearer " + device_token;
                 esp_http_client_set_header(client, "Authorization",
                                            authorization.c_str());
+            }
+            if (quick) {
+                esp_http_client_set_header(
+                    client, "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36");
+                esp_http_client_set_header(client, "Accept",
+                                           "audio/mpeg,*/*");
             }
             if (range_start > 0) {
                 char range[40] = {};

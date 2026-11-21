@@ -51,7 +51,7 @@ constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
 constexpr uint32_t kColorChoice = 0xE2E8F0;
 
-// 服务端目前不返回 audio_url；用有道词典发音兜底，点击即可出声。
+// 服务端目前不返回 audio_url；用百度发音兜底，点击即可出声。
 std::string BuildFallbackAudioUrl(const std::string& text) {
     if (text.empty()) {
         return {};
@@ -70,7 +70,8 @@ std::string BuildFallbackAudioUrl(const std::string& text) {
             encoded.push_back(kHex[ch & 0x0F]);
         }
     }
-    return "https://dict.youdao.com/dictvoice?audio=" + encoded + "&type=2";
+    return "https://fanyi.baidu.com/gettts?lan=en&spd=3&source=web&text=" +
+           encoded;
 }
 
 enum class RequestKind : uint8_t {
