@@ -181,7 +181,7 @@ EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
     }
     std::string body;
     if (!GetJson("/api/device/v1/english/tasks", api_base, device_token, body,
-                 error, 3000)) {
+                 error, 8000)) {
         return {};
     }
 
@@ -305,7 +305,7 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
     std::string body;
     const std::string path = "/api/device/v1/english/tasks/" +
                              UrlEncode(task_id) + "/review";
-    if (!GetJson(path, api_base, device_token, body, error)) {
+    if (!GetJson(path, api_base, device_token, body, error, 12000)) {
         body = LoadReviewCache(task_id);
         if (body.empty()) {
             return {};

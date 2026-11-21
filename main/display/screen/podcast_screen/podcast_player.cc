@@ -64,6 +64,7 @@ bool s_media_lib_ready = false;
 std::atomic<int64_t> s_base_ms{0};
 std::atomic<int64_t> s_clock_us{0};
 std::atomic<int64_t> s_played_bytes{0};
+std::atomic<bool> s_restart_from_zero{false};
 std::atomic<int> s_speed_q1000{1000};
 std::atomic<int> s_duration_sec{0};
 std::atomic<int64_t> s_total_bytes{0};
@@ -304,7 +305,7 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
     client = nullptr;
     std::string current = url;
     const bool quick = IsQuickPronunciationUrl(url);
-    const int max_attempts = quick ? 2 : 5;
+    const int max_attempts = quick ? 2 : 3;
     for (int hop = 0; hop < 4; ++hop) {
         esp_http_client_config_t cfg = {};
         cfg.url = current.c_str();
@@ -352,7 +353,7 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
             client = nullptr;
             if (attempt + 1 < max_attempts) {
                 vTaskDelay(pdMS_TO_TICKS(quick ? 100 + attempt * 100
-                                               : 400 + attempt * 400));
+                                               : 200 + attempt * 200));
             }
         }
         if (!opened) {
@@ -406,11 +407,17 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
                 const int got =
                     esp_http_client_read(client, skip.data(), take);
                 if (got <= 0) {
-                    error = "音频续传失败";
+                    // 服务端忽略 Range（status 200）时靠丢弃字节定位，
+                    // 中途断流就退回从头播放，避免拖动后直接报续传失败。
                     esp_http_client_close(client);
                     esp_http_client_cleanup(client);
                     client = nullptr;
-                    return false;
+                    ESP_LOGW(TAG, "range skip failed at %lld, restart from 0",
+                             static_cast<long long>(skipped));
+                    s_base_ms.store(0, std::memory_order_relaxed);
+                    s_played_bytes.store(0, std::memory_order_relaxed);
+                    s_restart_from_zero.store(true, std::memory_order_relaxed);
+                    return OpenAudioStream(url, client, error, 0, remaining);
                 }
                 skipped += got;
             }
@@ -856,7 +863,7 @@ void PodcastPlayTask(void* arg) {
         return;
     }
     bool opened = false;
-    for (int i = 0; i < (quick ? 120 : 400); ++i) {
+    for (int i = 0; i < (quick ? 120 : 200); ++i) {
         if (!is_current()) {
             break;
         }
@@ -881,7 +888,7 @@ void PodcastPlayTask(void* arg) {
             if (!is_current() || state->stop.load(std::memory_order_relaxed)) {
                 break;
             }
-            if (uxQueueMessagesWaiting(state->ring_data) >= 2) {
+            if (uxQueueMessagesWaiting(state->ring_data) >= 1) {
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -935,7 +942,10 @@ void PodcastPlayTask(void* arg) {
         codec->EnableOutput(true);
         s_output_generation.store(generation, std::memory_order_relaxed);
         s_output_enabled.store(true, std::memory_order_release);
-        ResetPositionClock(base_ms);
+        ResetPositionClock(
+            s_restart_from_zero.exchange(false, std::memory_order_relaxed)
+                ? 0
+                : base_ms);
 
         ESP_LOGI(TAG, "start MP3 playback");
         const esp_gmf_err_t result =

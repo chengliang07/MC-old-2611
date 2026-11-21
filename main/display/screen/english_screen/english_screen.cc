@@ -168,6 +168,7 @@ std::atomic<uint32_t> s_busy_generation{0};
 std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
+std::atomic<bool> s_submit_busy{false};
 
 // 复习中断后保留进度：只保留在当前固件进程内，不做跨重启持久化。
 std::string s_history_task_id;
@@ -842,6 +843,9 @@ void StartSubmitWorker(const std::string& result) {
         s_current_index >= s_review.entries.size()) {
         return;
     }
+    if (s_submit_busy.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     auto* context = new RequestResult{};
     context->kind = RequestKind::Result;
     context->task_id = s_current_task_id;
@@ -849,14 +853,14 @@ void StartSubmitWorker(const std::string& result) {
     if (!entry.word_id_from_server) {
         ESP_LOGW(TAG, "skip result submit: entry has no server word_id");
         delete context;
+        s_submit_busy.store(false, std::memory_order_release);
         return;
     }
     context->word_id = entry.word_id;
     context->result = result;
     context->index = static_cast<int>(s_current_index);
-    if (!BeginRequest(context)) {
-        return;
-    }
+    // 结果保存走独立任务，不占用全局 busy 锁：
+    // 否则一题的 POST 未返回时，列表刷新和进入下一任务都会被挡 5 秒。
     SetStatus(I18n::T("正在保存结果..."));
     if (CreateWorkerTask(
             [](void* arg) {
@@ -867,15 +871,18 @@ void StartSubmitWorker(const std::string& result) {
                 if (!ok && request->error.empty()) {
                     request->error = "保存结果失败";
                 }
-                if (!ok) {
+                if (ok) {
+                    PostSetStatus(I18n::T("结果已保存"));
+                } else {
                     PostSetStatus(request->error.c_str());
                 }
-                PostRequestResult(request);
+                delete request;
+                s_submit_busy.store(false, std::memory_order_release);
                 FinishWorkerTask();
             },
             "english_result", 8192, context) != pdPASS) {
-        s_busy.store(false, std::memory_order_release);
         delete context;
+        s_submit_busy.store(false, std::memory_order_release);
         SetStatus(I18n::T("保存结果失败"));
     }
 }
@@ -924,7 +931,8 @@ void OnTaskClicked(lv_event_t* event) {
                 s_busy_generation.store(0, std::memory_order_relaxed);
             }
         },
-        8000, nullptr);
+        // 大任务（几十条短句）网络返回可能超过 8 秒，这里放到 HTTP 超时之后。
+        15000, nullptr);
 }
 
 void OnCardClicked(lv_event_t* /*event*/) {
