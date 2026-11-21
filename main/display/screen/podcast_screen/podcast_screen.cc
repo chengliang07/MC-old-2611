@@ -178,6 +178,7 @@ std::atomic<bool> s_loading{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 bool s_playing = false;
+int s_progress_max = 1;
 bool s_paused = false;
 
 void SetStatusDirect(const char* text);
@@ -260,6 +261,11 @@ void OnProgressTimer(lv_timer_t* /*timer*/) {
     }
     const int duration = PodcastPlayer::GetDurationSeconds();
     const int position = PodcastPlayer::GetPositionSeconds();
+    if (duration > 0 && s_progress_max != duration) {
+        // duration_seconds 为 0 的节目会在开播后由比特率估算出量程。
+        s_progress_max = duration;
+        lv_slider_set_range(s_ui.progress, 0, duration);
+    }
     lv_slider_set_value(s_ui.progress, position, LV_ANIM_OFF);
     UpdateTimeLabel(position, duration);
 }
@@ -339,10 +345,9 @@ void OnPodcastClicked(lv_event_t* event) {
     const PodcastItem item = s_items[index];
     s_current_title = item.title;
     PodcastPlayer::SetDuration(item.duration_seconds);
+    s_progress_max = item.duration_seconds > 0 ? item.duration_seconds : 1;
     if (s_ui.progress != nullptr) {
-        lv_slider_set_range(s_ui.progress, 0,
-                            item.duration_seconds > 0 ? item.duration_seconds
-                                                      : 1);
+        lv_slider_set_range(s_ui.progress, 0, s_progress_max);
         lv_slider_set_value(s_ui.progress, 0, LV_ANIM_OFF);
     }
     UpdateTimeLabel(0, item.duration_seconds);
@@ -753,6 +758,7 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
     s_ui.progress = lv_slider_create(screen);
     lv_obj_set_size(s_ui.progress, 552, 12);
     lv_obj_set_pos(s_ui.progress, 74, 548);
+    s_progress_max = 1;
     lv_slider_set_range(s_ui.progress, 0, 1);
     lv_slider_set_value(s_ui.progress, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(s_ui.progress, lv_color_hex(0x1E293B),

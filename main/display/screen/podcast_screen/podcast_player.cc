@@ -67,11 +67,20 @@ std::atomic<int64_t> s_played_bytes{0};
 std::atomic<bool> s_restart_from_zero{false};
 std::atomic<int> s_speed_q1000{1000};
 std::atomic<int> s_duration_sec{0};
+std::atomic<int> s_estimated_duration_sec{0};
 std::atomic<int64_t> s_total_bytes{0};
 std::string s_current_url;
 
+int EffectiveDurationSeconds() {
+    const int meta = s_duration_sec.load(std::memory_order_relaxed);
+    if (meta > 0) {
+        return meta;
+    }
+    return s_estimated_duration_sec.load(std::memory_order_relaxed);
+}
+
 int64_t ClampPositionMs(int64_t ms) {
-    const int duration = s_duration_sec.load(std::memory_order_relaxed);
+    const int duration = EffectiveDurationSeconds();
     if (duration > 0 && ms > static_cast<int64_t>(duration) * 1000) {
         return static_cast<int64_t>(duration) * 1000;
     }
@@ -82,13 +91,6 @@ int64_t ClampPositionMs(int64_t ms) {
 }
 
 int64_t CurrentPositionMs() {
-    const int duration = s_duration_sec.load(std::memory_order_relaxed);
-    const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
-    const int64_t bytes = s_played_bytes.load(std::memory_order_relaxed);
-    if (duration > 0 && total > 0 && bytes > 0) {
-        return ClampPositionMs(
-            static_cast<int64_t>(duration) * 1000 * bytes / total);
-    }
     int64_t ms = s_base_ms.load(std::memory_order_relaxed);
     const int64_t clock = s_clock_us.load(std::memory_order_relaxed);
     if (clock != 0) {
@@ -342,7 +344,8 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
         cfg.timeout_ms = quick ? 3000 : 15000;
         // 音频只需小块缓冲；TLS 握手本身占用大量内部 RAM，这里留出余量，
         // 避免和语音会话/TLS 会话叠加时 open 失败（errno 0）。
-        cfg.buffer_size = quick ? 4096 : 2048;
+        // 4KB 能显著减少 TLS 分片往返，2KB 在长节目上容易读得比播得慢。
+        cfg.buffer_size = 4096;
         cfg.buffer_size_tx = quick ? 512 : 1024;
         // 有道发音是公开接口，不要带设备 Token，避免额外头部和无谓鉴权。
         const std::string device_token =
@@ -400,6 +403,8 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
             return false;
         }
         esp_http_client_fetch_headers(client);
+        // 握手阶段允许 15s；流建立后缩短单次读超时，断流能更快续传。
+        esp_http_client_set_timeout_ms(client, quick ? 3000 : 8000);
         const int status = esp_http_client_get_status_code(client);
         if (status == 301 || status == 302 || status == 303 ||
             status == 307 || status == 308) {
@@ -432,7 +437,9 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
             *remaining =
                 static_cast<int64_t>(esp_http_client_get_content_length(client));
             if (range_start > 0 && status == 200) {
-                *remaining += range_start;
+                // 服务端忽略 Range 返回整文件时，跳过 range_start 后剩余
+                // 字节应是 总长度 - range_start，不能反向相加。
+                *remaining -= range_start;
             }
         }
         if (range_start > 0 && status == 200) {
@@ -500,6 +507,61 @@ bool PrepareStreamBuffers(StreamState* state) {
     return true;
 }
 
+// 接口偶尔给出 duration_seconds=0，此时用 MP3 帧头比特率 + 文件总字节数
+// 估算时长；CBR 文件误差很小，VBR 仅作为进度条量程使用。
+int Mp3BitrateKbps(const uint8_t* data, int size) {
+    if (data == nullptr || size < 4) {
+        return 0;
+    }
+    int offset = 0;
+    if (size >= 10 && data[0] == 'I' && data[1] == 'D' && data[2] == '3') {
+        const int tag_size = ((data[6] & 0x7F) << 21) |
+                             ((data[7] & 0x7F) << 14) |
+                             ((data[8] & 0x7F) << 7) | (data[9] & 0x7F);
+        offset = 10 + tag_size;
+    }
+    const int limit = std::min(size - 4, offset + 65536);
+    for (int i = offset; i <= limit; ++i) {
+        if (data[i] != 0xFF || (data[i + 1] & 0xE0) != 0xE0) {
+            continue;
+        }
+        const int version = (data[i + 1] >> 3) & 0x03;
+        const int layer = (data[i + 1] >> 1) & 0x03;
+        const int bitrate_index = (data[i + 2] >> 4) & 0x0F;
+        const int sample_index = (data[i + 2] >> 2) & 0x03;
+        if (layer != 1 || bitrate_index <= 0 || bitrate_index >= 15 ||
+            sample_index >= 3) {
+            continue;
+        }
+        static const int kMpeg1[] = {0,  32, 40, 48,  56,  64,  80, 96,
+                                     112, 128, 160, 192, 224, 256, 320};
+        static const int kMpeg2[] = {0,  8,  16, 24, 32,  40, 48,
+                                     56, 64, 80, 96, 112, 128, 144, 160};
+        return version == 3 ? kMpeg1[bitrate_index]
+                            : kMpeg2[bitrate_index];
+    }
+    return 0;
+}
+
+void UpdateEstimatedDuration(const uint8_t* data, int size) {
+    if (s_duration_sec.load(std::memory_order_relaxed) > 0) {
+        return;
+    }
+    const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
+    if (total <= 0) {
+        return;
+    }
+    const int kbps = Mp3BitrateKbps(data, size);
+    if (kbps <= 0) {
+        return;
+    }
+    const int seconds =
+        static_cast<int>((total * 8) / (static_cast<int64_t>(kbps) * 1000));
+    if (seconds > 0) {
+        s_estimated_duration_sec.store(seconds, std::memory_order_relaxed);
+    }
+}
+
 void PodcastFetchTask(void* arg) {
     auto* state = static_cast<StreamState*>(arg);
     esp_http_client_handle_t client = nullptr;
@@ -523,6 +585,7 @@ void PodcastFetchTask(void* arg) {
     xSemaphoreGive(state->opened);
 
     int64_t fetched = state->range_start;
+    bool first_block = true;
     int resumes = 0;
     while (!state->stop.load(std::memory_order_relaxed)) {
         uint16_t index = 0;
@@ -576,6 +639,10 @@ void PodcastFetchTask(void* arg) {
             break;
         }
         if (got > 0 && !state->stop.load(std::memory_order_relaxed)) {
+            if (first_block) {
+                first_block = false;
+                UpdateEstimatedDuration(dst, got);
+            }
             RingBlock block = {index, static_cast<uint16_t>(got)};
             if (xQueueSend(state->ring_data, &block, pdMS_TO_TICKS(2000)) !=
                 pdTRUE) {
@@ -614,7 +681,14 @@ int PodcastReadCallback(uint8_t* data, int data_size, void* ctx) {
                     state->ended.load(std::memory_order_relaxed)) {
                     break;
                 }
+                // 网络断流时播放时钟同步暂停，避免进度条跑到声音前面。
+                PausePositionClock();
                 continue;
+            }
+            if (s_output_enabled.load(std::memory_order_acquire) &&
+                s_clock_us.load(std::memory_order_acquire) == 0) {
+                s_clock_us.store(esp_timer_get_time(),
+                                 std::memory_order_release);
             }
             state->pending_index = block.index;
             state->pending_size = block.size;
@@ -863,11 +937,13 @@ void PodcastPlayTask(void* arg) {
     }
 
     if (!quick) {
+        // 先攒约 4 个 16KB 块（64kbps 节目约 8 秒）再开声。
+        // 正常网络只多等约 0.5 秒，但能顶住 Vercel 中转的短时停顿。
         for (int i = 0; i < 100; ++i) {
             if (!is_current() || state->stop.load(std::memory_order_relaxed)) {
                 break;
             }
-            if (uxQueueMessagesWaiting(state->ring_data) >= 1) {
+            if (uxQueueMessagesWaiting(state->ring_data) >= 4) {
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -976,7 +1052,8 @@ void PodcastStartTask(void* arg) {
     auto* play_arg = static_cast<PlayArg*>(arg);
     const uint32_t generation = play_arg->generation;
     bool ready = false;
-    for (int i = 0; i < 250; ++i) {
+    // 旧播放器正常 1s 内即可收尾；最多等 3s，避免切节目固定多等 5s。
+    for (int i = 0; i < 150; ++i) {
         if (generation != s_generation.load(std::memory_order_acquire)) {
             delete play_arg;
             vTaskDelete(nullptr);
@@ -1059,7 +1136,7 @@ bool PodcastPlayer::Start(const std::string& url, std::string& error) {
 
 bool PodcastPlayer::Seek(int seconds, std::string& error) {
     error.clear();
-    const int duration = s_duration_sec.load(std::memory_order_relaxed);
+    const int duration = EffectiveDurationSeconds();
     const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
     std::string url;
     {
@@ -1083,6 +1160,8 @@ bool PodcastPlayer::Seek(int seconds, std::string& error) {
 }
 
 void PodcastPlayer::SetDuration(int seconds) {
+    // 新节目元数据可能是 0，先清掉上一集的估算值。
+    s_estimated_duration_sec.store(0, std::memory_order_relaxed);
     s_duration_sec.store(seconds > 0 ? seconds : 0,
                          std::memory_order_relaxed);
 }
@@ -1092,7 +1171,7 @@ int PodcastPlayer::GetPositionSeconds() {
 }
 
 int PodcastPlayer::GetDurationSeconds() {
-    return s_duration_sec.load(std::memory_order_relaxed);
+    return EffectiveDurationSeconds();
 }
 
 void PodcastPlayer::SetSpeed(float speed) {
