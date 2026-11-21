@@ -53,6 +53,8 @@ constexpr int kInputSamples = kInputSampleRate * kInputFrameMs / 1000;
 constexpr int kOutputSampleRate = 24000;
 constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
+constexpr size_t kMaxBubbleTextBytes = 600;
+constexpr size_t kPlaybackSliceSamples = 320;
 constexpr size_t kMaxAudioChunks = 16;
 constexpr size_t kMaxAudioBytes = 192 * 1024;
 constexpr uint32_t kColorBg = 0x0E1116;
@@ -179,11 +181,24 @@ uint32_t now_ms() {
     return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+bool ends_sentence(const char* text) {
+    if (text == nullptr || text[0] == '\0') return false;
+    const char* end = text + std::strlen(text);
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t' ||
+                          end[-1] == '\r')) {
+        --end;
+    }
+    if (end == text) return false;
+    const char last = end[-1];
+    return last == '\n' || last == '。' || last == '！' || last == '？' ||
+           last == '!' || last == '?' || last == '；' || last == ';';
+}
+
 void post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user = false,
-             bool reset_assistant = false);
+             bool reset_assistant = false, bool close_assistant = false);
 
-void flush_stream_text(uint32_t session) {
+void flush_stream_text(uint32_t session, bool close_assistant = false) {
     std::string text;
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -192,7 +207,7 @@ void flush_stream_text(uint32_t session) {
         s_stream_text_ms = 0;
     }
     post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant,
-            text.c_str(), false);
+            text.c_str(), false, false, close_assistant);
 }
 
 struct WakeWordGuard {
@@ -218,7 +233,7 @@ void stop_barge_in_detection() {
 
 void post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user,
-             bool reset_assistant) {
+             bool reset_assistant, bool close_assistant) {
     struct UiPayload {
         uint32_t session;
         State state;
@@ -229,6 +244,7 @@ void post_ui(uint32_t session, State state, const char* status,
         bool append_user;
         uint32_t generation;
         bool reset_assistant;
+        bool close_assistant;
     };
     if (!session_alive(session)) state = State::Error;
     auto* payload = new UiPayload{};
@@ -241,6 +257,7 @@ void post_ui(uint32_t session, State state, const char* status,
     payload->append_user = append_user;
     payload->generation = s_generation.load(std::memory_order_acquire);
     payload->reset_assistant = reset_assistant;
+    payload->close_assistant = close_assistant;
     if (lv_async_call([](void* data) {
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
@@ -249,8 +266,6 @@ void post_ui(uint32_t session, State state, const char* status,
                 lv_label_set_text(s_status, item->status);
                 lv_obj_set_style_text_color(s_status, lv_color_hex(status_color(item->state)), LV_PART_MAIN);
             }
-            if (item->append[0] == '\0' || s_chat == nullptr ||
-                item->generation != s_generation.load(std::memory_order_acquire)) return;
             if (item->reset_assistant) {
                 s_text = nullptr;
                 s_text_bubble = nullptr;
@@ -258,6 +273,8 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer.clear();
             }
+            if (item->append[0] == '\0' || s_chat == nullptr ||
+                item->generation != s_generation.load(std::memory_order_acquire)) return;
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text += item->append;
@@ -281,6 +298,12 @@ void post_ui(uint32_t session, State state, const char* status,
                 lv_label_set_text(s_text, s_answer.c_str());
                 if (s_answer.size() >= 24) {
                     resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
+                }
+                if (item->close_assistant) {
+                    s_text = nullptr;
+                    s_text_bubble = nullptr;
+                    s_assistant_row = nullptr;
+                    s_answer.clear();
                 }
                 return;
             }
@@ -322,6 +345,12 @@ void post_ui(uint32_t session, State state, const char* status,
                 s_assistant_row = row;
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_answer = item->append;
+                if (item->close_assistant) {
+                    s_text = nullptr;
+                    s_text_bubble = nullptr;
+                    s_assistant_row = nullptr;
+                    s_answer.clear();
+                }
             } else {
                 s_user_text_label = label;
                 s_user_text_bubble = bubble;
@@ -329,6 +358,7 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text = item->append;
             }
+            lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
         }, payload) != LV_RESULT_OK) {
         delete payload;
     }
@@ -370,11 +400,31 @@ void audio_playback_task(void* /*arg*/) {
         }
         if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
         auto& audio = Application::GetInstance().GetAudioService();
-        for (int attempt = 0;
-             attempt < 20 && !audio.PushPcmToPlaybackQueue(
-                                  chunk.pcm.data(), chunk.pcm.size());
-             ++attempt) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+        for (size_t offset = 0; offset < chunk.pcm.size();) {
+            if (chunk.generation !=
+                s_generation.load(std::memory_order_acquire)) {
+                break;
+            }
+            const size_t remaining = chunk.pcm.size() - offset;
+            const size_t samples =
+                remaining < kPlaybackSliceSamples
+                    ? remaining
+                    : kPlaybackSliceSamples;
+            while (!audio.PushPcmToPlaybackQueue(
+                chunk.pcm.data() + offset, samples)) {
+                if (s_stop_requested.load(std::memory_order_acquire) ||
+                    chunk.generation !=
+                        s_generation.load(std::memory_order_acquire)) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
+            if (s_stop_requested.load(std::memory_order_acquire) ||
+                chunk.generation !=
+                    s_generation.load(std::memory_order_acquire)) {
+                break;
+            }
+            offset += samples;
         }
     }
 }
@@ -498,8 +548,12 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                 }
                 if (s_stream_text_ms == 0) s_stream_text_ms = now_ms();
             }
-            if (s_stream_text.size() >= 48 || now_ms() - s_stream_text_ms >= 220) {
-                flush_stream_text(session);
+            const bool close_bubble =
+                ends_sentence(delta->valuestring) ||
+                s_stream_text.size() >= kMaxBubbleTextBytes;
+            if (close_bubble || s_stream_text.size() >= 48 ||
+                now_ms() - s_stream_text_ms >= 220) {
+                flush_stream_text(session, close_bubble);
             }
         }
     } else if (std::strcmp(type, "relay.response.done") == 0) {
