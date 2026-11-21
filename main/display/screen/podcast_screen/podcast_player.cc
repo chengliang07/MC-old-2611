@@ -126,6 +126,34 @@ void Emit(PodcastPlayerEvent event, const char* detail) {
     }
 }
 
+// 暂停/恢复不能占用 LVGL 线程：播放器内部可能正在销毁或重配流水线。
+void PostPlayerControl(bool pause) {
+    auto* arg =
+        reinterpret_cast<void*>(static_cast<uintptr_t>(pause ? 1 : 0));
+    if (xTaskCreate(
+            [](void* data) {
+                const bool want_pause =
+                    reinterpret_cast<uintptr_t>(data) != 0;
+                std::lock_guard<std::mutex> api_lock(s_api_mutex);
+                esp_asp_handle_t player = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(s_player_mutex);
+                    player = s_player;
+                }
+                if (player != nullptr) {
+                    if (want_pause) {
+                        esp_audio_simple_player_pause(player);
+                    } else {
+                        esp_audio_simple_player_resume(player);
+                    }
+                }
+                vTaskDelete(nullptr);
+            },
+            "podcast_ctl", 3072, arg, 4, nullptr) != pdPASS) {
+        ESP_LOGW(TAG, "create control task failed");
+    }
+}
+
 void EnsureMediaLibAdapter() {
     if (!s_media_lib_ready) {
         media_lib_add_default_adapter();
@@ -439,43 +467,6 @@ bool OpenAudioStream(const std::string& url, esp_http_client_handle_t& client,
     return false;
 }
 
-int64_t ProbeTotalBytes(const std::string& url) {
-    esp_http_client_config_t cfg = {};
-    cfg.url = url.c_str();
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.timeout_ms = 8000;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 512;
-
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == nullptr) {
-        return 0;
-    }
-    const bool quick = IsQuickPronunciationUrl(url);
-    if (!quick) {
-        const std::string token = PodcastClient::DeviceToken();
-        if (!token.empty()) {
-            const std::string authorization = "Bearer " + token;
-            esp_http_client_set_header(client, "Authorization",
-                                       authorization.c_str());
-        }
-    }
-    esp_http_client_set_method(client, HTTP_METHOD_HEAD);
-    int64_t total = 0;
-    if (esp_http_client_open(client, 0) == ESP_OK) {
-        esp_http_client_fetch_headers(client);
-        const int status = esp_http_client_get_status_code(client);
-        const int64_t length =
-            static_cast<int64_t>(esp_http_client_get_content_length(client));
-        if ((status == 200 || status == 206) && length > 0) {
-            total = length;
-        }
-    }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return total;
-}
-
 bool PrepareStreamBuffers(StreamState* state) {
     const int block_count = state->ring_block_count;
     const size_t ring_bytes =
@@ -531,28 +522,6 @@ void PodcastFetchTask(void* arg) {
     state->open_ok.store(true);
     xSemaphoreGive(state->opened);
 
-    if (!state->quick && remaining <= 0) {
-        auto* probe_url = new std::string(state->url);
-        if (xTaskCreate(
-                [](void* arg) {
-                    auto* url = static_cast<std::string*>(arg);
-                    const int64_t total = ProbeTotalBytes(*url);
-                    bool current = false;
-                    {
-                        std::lock_guard<std::mutex> lock(s_player_mutex);
-                        current = s_current_url == *url;
-                    }
-                    delete url;
-                    if (current && total > 0) {
-                        s_total_bytes.store(total, std::memory_order_relaxed);
-                    }
-                    vTaskDelete(nullptr);
-                },
-                "podcast_size", 6144, probe_url, 2, nullptr) != pdPASS) {
-            delete probe_url;
-        }
-    }
-
     int64_t fetched = state->range_start;
     int resumes = 0;
     while (!state->stop.load(std::memory_order_relaxed)) {
@@ -579,7 +548,8 @@ void PodcastFetchTask(void* arg) {
                 continue;
             }
             // 长节目经代理播放时，连接可能被中途断开；按已读字节续传。
-            if (remaining > 0 && resumes < 8) {
+            // content-length 未知（-1）时也要续传，否则一次读超时就被当成播完。
+            if (remaining != 0 && resumes < 8) {
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);
                 client = nullptr;
@@ -865,7 +835,7 @@ void PodcastPlayTask(void* arg) {
     }
 
     state->refs.fetch_add(1, std::memory_order_acq_rel);
-    if (xTaskCreate(PodcastFetchTask, "podcast_fetch", 6144, state, 4,
+    if (xTaskCreate(PodcastFetchTask, "podcast_fetch", 6144, state, 5,
                     &state->task) != pdPASS) {
         state->refs.fetch_sub(1, std::memory_order_acq_rel);
         abandon("创建预取任务失败");
@@ -1000,6 +970,48 @@ void PodcastPlayTask(void* arg) {
     FinishPlayTask();
 }
 
+// 同一时刻只允许一个播放任务：旧播放器尚未销毁就起新的，会叠加解码器、
+// TLS 连接和 1.5MB 环形缓冲，最终把 LVGL 线程拖死。
+void PodcastStartTask(void* arg) {
+    auto* play_arg = static_cast<PlayArg*>(arg);
+    const uint32_t generation = play_arg->generation;
+    bool ready = false;
+    for (int i = 0; i < 250; ++i) {
+        if (generation != s_generation.load(std::memory_order_acquire)) {
+            delete play_arg;
+            vTaskDelete(nullptr);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(s_player_mutex);
+            if (s_play_task == nullptr) {
+                ready = true;
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    bool started = false;
+    {
+        std::lock_guard<std::mutex> lock(s_player_mutex);
+        if (ready &&
+            generation == s_generation.load(std::memory_order_acquire)) {
+            started = xTaskCreate(PodcastPlayTask, "podcast_play", 8192,
+                                  play_arg, 5, &s_play_task) == pdPASS;
+            if (!started) {
+                s_play_task = nullptr;
+            }
+        }
+    }
+    if (!started) {
+        delete play_arg;
+        if (generation == s_generation.load(std::memory_order_acquire)) {
+            Emit(PodcastPlayerEvent::Error, "播放器正忙，请稍后重试");
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
 }  // namespace
 
 static bool StartInternal(const std::string& url, std::string& error,
@@ -1028,10 +1040,9 @@ static bool StartInternal(const std::string& url, std::string& error,
         s_played_bytes.store(range_bytes, std::memory_order_relaxed);
         s_base_ms.store(base_ms, std::memory_order_relaxed);
         s_clock_us.store(0, std::memory_order_relaxed);
-        if (xTaskCreate(PodcastPlayTask, "podcast_play", 8192, arg, 5,
-                        &s_play_task) != pdPASS) {
+        if (xTaskCreate(PodcastStartTask, "podcast_start", 4096, arg, 4,
+                        nullptr) != pdPASS) {
             delete arg;
-            s_play_task = nullptr;
             error = "创建播放任务失败";
             create_failed = true;
         }
@@ -1106,40 +1117,34 @@ float PodcastPlayer::GetSpeed() {
 }
 
 bool PodcastPlayer::Pause() {
-    std::lock_guard<std::mutex> api_lock(s_api_mutex);
     esp_asp_handle_t player = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_player_mutex);
         player = s_player;
     }
     if (player == nullptr) {
-        return false;
-    }
-    if (esp_audio_simple_player_pause(player) != ESP_GMF_ERR_OK) {
         return false;
     }
     PausePositionClock();
     s_output_enabled.store(false, std::memory_order_release);
+    PostPlayerControl(true);
     return true;
 }
 
 bool PodcastPlayer::Resume() {
-    std::lock_guard<std::mutex> api_lock(s_api_mutex);
     esp_asp_handle_t player = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_player_mutex);
         player = s_player;
     }
     if (player == nullptr) {
-        return false;
-    }
-    if (esp_audio_simple_player_resume(player) != ESP_GMF_ERR_OK) {
         return false;
     }
     if (s_clock_us.load(std::memory_order_acquire) == 0) {
         s_clock_us.store(esp_timer_get_time(), std::memory_order_release);
     }
     s_output_enabled.store(true, std::memory_order_release);
+    PostPlayerControl(false);
     return true;
 }
 
