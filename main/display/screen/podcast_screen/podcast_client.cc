@@ -247,8 +247,9 @@ PodcastList PodcastClient::FetchPodcasts(std::string& error) {
     const time_t now = time(nullptr);
     {
         std::lock_guard<std::mutex> lock(s_list_cache_mutex);
+        // 列表不需要每次进入都刷新；半小时内直接复用，避免重复 2-4 秒请求。
         if (!s_list_cache.empty() && s_list_cache_at > 0 &&
-            now - s_list_cache_at < 60) {
+            now - s_list_cache_at < 30 * 60) {
             return s_list_cache;
         }
     }
@@ -293,6 +294,36 @@ PodcastList PodcastClient::FetchPodcasts(std::string& error) {
         podcast.duration_seconds =
             JsonInt(item, "duration_seconds", "duration");
         podcast.completed = JsonBool(item, "completed", "is_completed");
+        // 列表接口若已带回临时播放地址，直接种进缓存，点击时无需再等 /play。
+        const char* list_play_url = JsonString(item, "play_url", "url");
+        if (list_play_url[0] != '\0' && !podcast.id.empty()) {
+            PodcastPlayInfo info;
+            info.ok = true;
+            info.url = list_play_url;
+            info.format = JsonString(item, "format");
+            info.expires_at =
+                JsonString(item, "expires_at", "expiresAt");
+            time_t expires = ParseExpiresAt(info.expires_at);
+            if (expires <= 0) {
+                expires = time(nullptr) + kPlayCacheSeconds;
+            }
+            std::lock_guard<std::mutex> lock(s_play_cache_mutex);
+            bool replaced = false;
+            for (auto& entry : s_play_cache) {
+                if (entry.id == podcast.id) {
+                    entry.info = info;
+                    entry.expires = expires;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                if (s_play_cache.size() >= 8) {
+                    s_play_cache.erase(s_play_cache.begin());
+                }
+                s_play_cache.push_back({podcast.id, info, expires});
+            }
+        }
         if (!podcast.id.empty() && !podcast.title.empty()) {
             result.push_back(std::move(podcast));
         }
@@ -345,6 +376,8 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     }
     result.format = JsonString(data, "format");
     result.expires_at = JsonString(data, "expires_at", "expiresAt");
+    result.duration_seconds =
+        JsonInt(data, "duration_seconds", "duration");
     cJSON_Delete(root);
 
     if (result.url.empty()) {

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +65,7 @@ struct ResolveResult {
     uint32_t request_generation = 0;
     std::string podcast_id;
     std::string title;
+    int duration_seconds = 0;
     std::string error;
 };
 
@@ -79,6 +81,7 @@ lv_obj_t* s_return_screen = nullptr;
 PodcastList s_items;
 // 上次成功拉到的节目列表：再次进入先本地渲染，后台只做刷新。
 PodcastList s_cached_items;
+time_t s_items_at = 0;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
 std::atomic<bool> s_url_prefetching{false};
@@ -384,6 +387,8 @@ void OnPodcastClicked(lv_event_t* event) {
                     result->error = "播放请求已取消";
                 } else if (!PodcastPlayer::Start(play.url, error)) {
                     result->error = error;
+                } else {
+                    result->duration_seconds = play.duration_seconds;
                 }
                 if (lv_async_call(
                     [](void* data) {
@@ -398,6 +403,17 @@ void OnPodcastClicked(lv_event_t* event) {
                                                    std::memory_order_release);
                             SetStatusDirect(resolved->error.c_str());
                             UpdateControls(false, false);
+                        } else if (resolved->duration_seconds > 0) {
+                            PodcastPlayer::SetDuration(
+                                resolved->duration_seconds);
+                            s_progress_max = resolved->duration_seconds;
+                            if (s_ui.progress != nullptr) {
+                                lv_slider_set_range(s_ui.progress, 0,
+                                                    s_progress_max);
+                            }
+                            UpdateTimeLabel(
+                                PodcastPlayer::GetPositionSeconds(),
+                                s_progress_max);
                         }
                     },
                     result) != LV_RESULT_OK) {
@@ -497,6 +513,7 @@ void ApplyLoadResult(void* data) {
     }
     s_items = std::move(result->items);
     s_cached_items = s_items;
+    s_items_at = std::time(nullptr);
     SaveListCache();
     if (s_items.empty()) {
         SetStatusDirect(I18n::T("暂无节目"));
@@ -857,7 +874,11 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             RebuildList();
             StartPlayUrlPrefetch();
         }
-        StartLoadWorker();
+        // 列表在 30 分钟内视为新鲜，进入页面不再强制刷新。
+        if (s_items.empty() || s_items_at == 0 ||
+            std::time(nullptr) - s_items_at > 30 * 60) {
+            StartLoadWorker();
+        }
     } else {
         ESP_LOGI(TAG, "unload: podcast_screen");
         s_screen_active.store(false, std::memory_order_release);

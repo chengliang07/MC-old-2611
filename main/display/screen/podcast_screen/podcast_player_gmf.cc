@@ -507,7 +507,7 @@ bool RegisterPodcastHttpIo(esp_asp_handle_t player, PlayerContext* player_ctx) {
     http_cfg.event_handle = PodcastHttpEvent;
     http_cfg.user_data = player_ctx;
     // 播客是持续码流，扩大环形缓冲以吸收 WiFi/4G 抖动，减少解码欠载卡顿。
-    http_cfg.io_cfg.buffer_cfg.buffer_size = 96 * 1024;
+    http_cfg.io_cfg.buffer_cfg.buffer_size = 128 * 1024;
     http_cfg.io_cfg.buffer_cfg.io_size = 8 * 1024;
     http_cfg.io_cfg.enable_speed_monitor = false;
 
@@ -571,7 +571,7 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     // 英语发音 URL 跳过，避免增加点按发音的等待。
     if (!s_quick_url.load(std::memory_order_relaxed) &&
         !s_start_gate_done.exchange(true, std::memory_order_acq_rel)) {
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(400));
         if (player_ctx->generation !=
                 s_generation.load(std::memory_order_acquire) ||
             !s_output_enabled.load(std::memory_order_acquire)) {

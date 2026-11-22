@@ -17,6 +17,7 @@ struct PodcastPlayInfo {
     std::string url;
     std::string format;
     std::string expires_at;
+    int duration_seconds = 0;
     std::string error;
 };
 
