@@ -29,8 +29,8 @@ void OnOkClicked(lv_event_t* /*e*/) {
 }  // namespace
 
 bool WifiRequired_ShouldBlock() {
-    // 与板级初始化一致：默认 4G。整包刷机清空 NVS 时，应用不应误判为 WiFi。
-    constexpr int32_t kDefaultNetType = 1;
+    // 与板级初始化一致：整包刷机默认 WiFi。
+    constexpr int32_t kDefaultNetType = 0;
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kDefaultNetType);
     if (type != NetworkType::WIFI) {

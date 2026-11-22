@@ -236,9 +236,9 @@ const char* rssi_quality_text(int8_t rssi) {
 bool screen_alive() { return s_screen_active && s_ui.screen != nullptr; }
 
 int GetSavedNetworkType() {
-    // 与 DualNetworkBoard 启动时读 NVS 的逻辑一致（默认 4G=1，见金属爪 4 板级）
+    // 与 DualNetworkBoard 启动时读 NVS 的逻辑一致（整包刷机默认 WiFi=0）
     const NetworkType type =
-        DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeCellular);
+        DualNetworkBoard::LoadNetworkTypeFromSettings(kNetTypeWifi);
     return type == NetworkType::ML307 ? kNetTypeCellular : kNetTypeWifi;
 }
 
@@ -734,11 +734,12 @@ void connect_task(void* arg) {
         auto& ssid_mgr = SsidManager::GetInstance();
         ssid_mgr.Clear();
         ssid_mgr.AddSsid(ctx->ssid, ctx->password);
-        snprintf(buf, sizeof(buf), I18n::T("连接 %s 成功，准备重启…"), ctx->ssid.c_str());
+        snprintf(buf, sizeof(buf), I18n::T("连接 %s 成功"), ctx->ssid.c_str());
         post_status(buf, kColorSuccess);
         refresh_saved_list();
-        // 弹出「连接成功 + 倒计时重启」覆盖层，倒计时归零后自动 esp_restart()
-        post_open_success_and_reboot(ctx->ssid);
+        // SSID 已写入 NVS；不再强制重启。关闭连接遮罩后继续停留在网络页，
+        // 离开本页时 wifi_teardown_for_screen() 会用新配置重启 WifiStation。
+        post_close_status_popup();
     } else if (bits & kBitDisconnected) {
         const uint8_t reason = s_last_disconnect_reason;
         const char* mapped = disconnect_reason_text(reason);

@@ -87,7 +87,7 @@ std::atomic<bool> s_url_prefetching{false};
 void StartPlayUrlPrefetch() {
     std::vector<std::string> ids;
     for (const auto& item : s_items) {
-        if (ids.size() >= 2) {
+        if (ids.size() >= 6) {
             break;
         }
         ids.push_back(item.id);
@@ -111,7 +111,7 @@ void StartPlayUrlPrefetch() {
                 s_url_prefetching.store(false, std::memory_order_release);
                 vTaskDelete(nullptr);
             },
-            "podcast_url_prefetch", 6144, context, 2, nullptr) != pdPASS) {
+            "podcast_url_prefetch", 6144, context, 4, nullptr) != pdPASS) {
         delete context;
         s_url_prefetching.store(false, std::memory_order_release);
     }
@@ -177,6 +177,7 @@ std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_loading{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
+std::atomic<bool> s_preparing_play{false};
 bool s_playing = false;
 int s_progress_max = 1;
 bool s_paused = false;
@@ -357,6 +358,7 @@ void OnPodcastClicked(lv_event_t* event) {
     PodcastPlayer::Stop();
     s_playing = false;
     s_paused = false;
+    s_preparing_play.store(true, std::memory_order_release);
     UpdateControls(false, false);
     SetStatusDirect(I18n::T("正在准备播放..."));
 
@@ -392,6 +394,8 @@ void OnPodcastClicked(lv_event_t* event) {
                         }
                         if (!resolved->error.empty() &&
                             resolved->error != "播放请求已取消") {
+                            s_preparing_play.store(false,
+                                                   std::memory_order_release);
                             SetStatusDirect(resolved->error.c_str());
                             UpdateControls(false, false);
                         }
@@ -496,7 +500,7 @@ void ApplyLoadResult(void* data) {
     SaveListCache();
     if (s_items.empty()) {
         SetStatusDirect(I18n::T("暂无节目"));
-    } else {
+    } else if (!s_preparing_play.load(std::memory_order_acquire)) {
         SetStatusDirect(I18n::T("选择节目开始收听"));
     }
     RebuildList();
@@ -541,6 +545,7 @@ void ApplyPlayerEvent(void* data) {
     }
     switch (event->event) {
         case PodcastPlayerEvent::Playing:
+            s_preparing_play.store(false, std::memory_order_release);
             s_playing = true;
             s_paused = false;
             UpdateControls(true, true);
@@ -549,17 +554,20 @@ void ApplyPlayerEvent(void* data) {
                                 : s_current_title.c_str());
             break;
         case PodcastPlayerEvent::Paused:
+            s_preparing_play.store(false, std::memory_order_release);
             s_paused = true;
             UpdateControls(true, false);
             SetStatusDirect(I18n::T("已暂停"));
             break;
         case PodcastPlayerEvent::Finished:
+            s_preparing_play.store(false, std::memory_order_release);
             s_playing = false;
             s_paused = false;
             UpdateControls(false, false);
             SetStatusDirect(I18n::T("播放结束"));
             break;
         case PodcastPlayerEvent::Error:
+            s_preparing_play.store(false, std::memory_order_release);
             s_playing = false;
             s_paused = false;
             UpdateControls(false, false);
@@ -604,6 +612,7 @@ void OnPauseClicked(lv_event_t* /*event*/) {
 
 void OnStopClicked(lv_event_t* /*event*/) {
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_preparing_play.store(false, std::memory_order_release);
     PodcastPlayer::Stop();
     s_playing = false;
     s_paused = false;
@@ -614,6 +623,7 @@ void OnStopClicked(lv_event_t* /*event*/) {
 void ReturnHome() {
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_preparing_play.store(false, std::memory_order_release);
     s_screen_active.store(false, std::memory_order_release);
     PodcastPlayer::Stop();
     lv_obj_t* old_screen = lv_screen_active();
@@ -644,6 +654,7 @@ void ReturnHome() {
 // 播放中先停回节目列表，列表页再点才离开播客页。
 void HandleBack() {
     if (s_playing || s_paused) {
+        s_preparing_play.store(false, std::memory_order_release);
         PodcastPlayer::Stop();
         s_playing = false;
         s_paused = false;
@@ -673,6 +684,7 @@ void OnScreenUnloaded(lv_event_t* event) {
     s_screen_active.store(false, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_preparing_play.store(false, std::memory_order_release);
     PodcastPlayer::SetEventCallback(nullptr, nullptr);
     PodcastPlayer::Stop();
     s_current_title.clear();
@@ -838,11 +850,11 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_loading.store(false, std::memory_order_release);
         s_playing = false;
         s_paused = false;
+        s_preparing_play.store(false, std::memory_order_release);
         PodcastPlayer::SetEventCallback(OnPlayerEvent, nullptr);
         UpdateControls(false, false);
         if (!s_items.empty()) {
             RebuildList();
-            SetStatusDirect(I18n::T("选择节目开始收听"));
             StartPlayUrlPrefetch();
         }
         StartLoadWorker();

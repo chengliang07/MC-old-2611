@@ -505,7 +505,10 @@ bool RegisterPodcastHttpIo(esp_asp_handle_t player, PlayerContext* player_ctx) {
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.event_handle = PodcastHttpEvent;
     http_cfg.user_data = player_ctx;
-    http_cfg.io_cfg.enable_speed_monitor = true;
+    // 播客是持续码流，扩大环形缓冲以吸收 WiFi/4G 抖动，减少解码欠载卡顿。
+    http_cfg.io_cfg.buffer_cfg.buffer_size = 96 * 1024;
+    http_cfg.io_cfg.buffer_cfg.io_size = 8 * 1024;
+    http_cfg.io_cfg.enable_speed_monitor = false;
 
     esp_gmf_io_handle_t http_io = nullptr;
     if (esp_gmf_io_http_init(&http_cfg, &http_io) != ESP_GMF_ERR_OK ||

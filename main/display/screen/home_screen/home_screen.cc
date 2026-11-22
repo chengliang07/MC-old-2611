@@ -1418,7 +1418,7 @@ void UpdateHomeStatusBar(HomeStatusState* st);
 
 int GetSavedNetworkType() {
     // 与 DualNetworkBoard / network_screen 共用 NVS 读取逻辑
-    constexpr int kDefaultNetType = 1;  // 默认 4G；整包刷机后不再要求输入 WiFi
+    constexpr int kDefaultNetType = 0;  // 整包刷机默认 WiFi
     const NetworkType type =
         DualNetworkBoard::LoadNetworkTypeFromSettings(kDefaultNetType);
     return type == NetworkType::ML307 ? 1 : 0;
