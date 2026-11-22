@@ -84,47 +84,15 @@ PodcastList s_cached_items;
 time_t s_items_at = 0;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
-std::atomic<bool> s_url_prefetching{false};
-
-// 进入列表时后台预取前两集的签名地址，点击时直接命中客户端的播放地址缓存。
-void StartPlayUrlPrefetch() {
-    std::vector<std::string> ids;
-    for (const auto& item : s_items) {
-        if (ids.size() >= 6) {
-            break;
-        }
-        ids.push_back(item.id);
-    }
-    if (ids.empty()) {
-        return;
-    }
-    if (s_url_prefetching.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-    auto* context = new std::vector<std::string>(std::move(ids));
-    if (xTaskCreate(
-            [](void* arg) {
-                auto* pending =
-                    static_cast<std::vector<std::string>*>(arg);
-                for (const auto& id : *pending) {
-                    std::string error;
-                    PodcastClient::ResolvePlayUrl(id, error);
-                }
-                delete pending;
-                s_url_prefetching.store(false, std::memory_order_release);
-                vTaskDelete(nullptr);
-            },
-            "podcast_url_prefetch", 6144, context, 4, nullptr) != pdPASS) {
-        delete context;
-        s_url_prefetching.store(false, std::memory_order_release);
-    }
-}
 
 void SaveListCache() {
     FILE* file = std::fopen(kListCachePath, "w");
     if (file == nullptr) {
         return;
     }
+    s_items_at = std::time(nullptr);
+    std::fprintf(file, "#%lld\n",
+                 static_cast<long long>(s_items_at));
     for (const auto& item : s_items) {
         std::fprintf(file, "%s|%s|%d|%d\n", item.id.c_str(),
                      item.title.c_str(), item.duration_seconds,
@@ -144,11 +112,20 @@ void LoadListCache() {
     }
     PodcastList items;
     char line[512];
+    bool has_timestamp = false;
     while (std::fgets(line, sizeof(line), file) != nullptr) {
         std::string text(line);
         while (!text.empty() &&
                (text.back() == '\n' || text.back() == '\r')) {
             text.pop_back();
+        }
+        if (!has_timestamp && !text.empty() && text.front() == '#') {
+            const long long timestamp = std::atoll(text.c_str() + 1);
+            if (timestamp > 0) {
+                s_items_at = static_cast<time_t>(timestamp);
+                has_timestamp = true;
+            }
+            continue;
         }
         const size_t first = text.find('|');
         if (first == std::string::npos) {
@@ -174,6 +151,10 @@ void LoadListCache() {
     }
     std::fclose(file);
     s_cached_items = std::move(items);
+    if (!has_timestamp && !s_cached_items.empty()) {
+        // 兼容旧缓存：先按刚写入处理，避免升级后首次进入又强制刷新。
+        s_items_at = std::time(nullptr);
+    }
 }
 std::string s_current_title;
 std::atomic<bool> s_screen_active{false};
@@ -521,7 +502,6 @@ void ApplyLoadResult(void* data) {
         SetStatusDirect(I18n::T("选择节目开始收听"));
     }
     RebuildList();
-    StartPlayUrlPrefetch();
 }
 
 void StartLoadWorker() {
@@ -872,7 +852,6 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         UpdateControls(false, false);
         if (!s_items.empty()) {
             RebuildList();
-            StartPlayUrlPrefetch();
         }
         // 列表在 30 分钟内视为新鲜，进入页面不再强制刷新。
         if (s_items.empty() || s_items_at == 0 ||

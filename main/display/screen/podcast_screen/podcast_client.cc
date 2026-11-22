@@ -156,7 +156,24 @@ bool HttpGet(const std::string& url, const std::string& device_token,
     }
 
     status = http->GetStatusCode();
-    body = http->ReadAll();
+    // ReadAll() 对超过 8KB 的 chunked 响应会死锁，这里流式读取。
+    body.clear();
+    char chunk[2048];
+    while (true) {
+        const int read = http->Read(chunk, sizeof(chunk));
+        if (read < 0) {
+            http->Close();
+            error = "读取播客服务响应失败";
+            return false;
+        }
+        if (read == 0) {
+            break;
+        }
+        body.append(chunk, static_cast<size_t>(read));
+        if (body.size() > 512 * 1024) {
+            break;
+        }
+    }
     http->Close();
     if (status < 200 || status >= 300) {
         if (status == 401 || status == 403) {
