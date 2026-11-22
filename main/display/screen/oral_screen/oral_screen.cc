@@ -678,6 +678,8 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                                         std::memory_order_release);
             if (response_says_goodbye()) {
                 s_end_after_playback.store(true, std::memory_order_release);
+                // 主动结束会话：避免 close 时 OnDisconnected 触发自动重连。
+                s_user_exit.store(true, std::memory_order_release);
             }
         }
     } else if (std::strcmp(type, "relay.interrupted") == 0) {
