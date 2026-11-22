@@ -16,6 +16,7 @@
 #include "esp_audio_simple_player.h"
 #include "esp_audio_simple_player_advance.h"
 #include "esp_crt_bundle.h"
+#include "esp_http_client.h"
 #include "esp_gmf_io_http.h"
 #include "esp_gmf_obj.h"
 #include "esp_gmf_pipeline.h"
