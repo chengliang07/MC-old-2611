@@ -737,9 +737,9 @@ void connect_task(void* arg) {
         snprintf(buf, sizeof(buf), I18n::T("连接 %s 成功"), ctx->ssid.c_str());
         post_status(buf, kColorSuccess);
         refresh_saved_list();
-        // SSID 已写入 NVS；不再强制重启。关闭连接遮罩后继续停留在网络页，
-        // 离开本页时 wifi_teardown_for_screen() 会用新配置重启 WifiStation。
-        post_close_status_popup();
+        // 网络页使用独立 STA 栈，应用侧 WifiStation 仍处于停止状态。
+        // 保存 SSID 后必须重启，让 WifiStation 用新配置重新初始化并接管网络。
+        post_open_success_and_reboot(ctx->ssid);
     } else if (bits & kBitDisconnected) {
         const uint8_t reason = s_last_disconnect_reason;
         const char* mapped = disconnect_reason_text(reason);
