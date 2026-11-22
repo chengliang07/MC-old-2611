@@ -190,7 +190,8 @@ private:
         // PA 默认关着，开机 5s 后再开，避免上电瞬间推动放。
         iOExpander.setLevel(IOExpander::Pin::PA, false);
         iOExpander.setLevel(IOExpander::Pin::PA_SWITCH, true);
-        iOExpander.setLevel(IOExpander::Pin::RST_4G, true);
+        iOExpander.setLevel(IOExpander::Pin::RST_4G,
+                            GetNetworkType() == NetworkType::ML307);
         // CAM_PWDN: 低电平通电；这里默认拉高 = 摄像头断电。
         // 只有进入相机 App 时（CameraScreen::LifecycleCallback LOAD）才拉低供电。
         iOExpander.setLevel(IOExpander::Pin::CAM_PWDN, true);

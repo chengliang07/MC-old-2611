@@ -154,9 +154,9 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion(Ota& ota) {
-    const int MAX_RETRY = 10;
+    const int MAX_RETRY = 3;
     int retry_count = 0;
-    int retry_delay = 10; // 初始重试延迟为10秒
+    int retry_delay = 5; // 初始重试延迟为5秒
 
     auto& board = Board::GetInstance();
     while (true) {
@@ -185,7 +185,7 @@ void Application::CheckNewVersion(Ota& ota) {
                     break;
                 }
             }
-            retry_delay *= 2; // 每次重试后延迟时间翻倍
+            retry_delay = retry_delay >= 20 ? 20 : retry_delay * 2;
             continue;
         }
         retry_count = 0;
