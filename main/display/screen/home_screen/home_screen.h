@@ -19,6 +19,7 @@ public:
     // 线程安全：内部投递到 LVGL 线程执行。
     static void RequestOpenPodcastFromCurrentScreen();
     static void RequestOpenEnglishFromCurrentScreen();
+    static void RequestOpenOralFromCurrentScreen();
     static void RequestOpenPetFromCurrentScreen();
     // 开机就绪后自动进入一丢学伴（等价于点击首页图标）。
     static void RequestOpenChat();

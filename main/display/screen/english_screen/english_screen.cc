@@ -33,7 +33,7 @@ namespace {
 
 constexpr const char* TAG = "EnglishScreen";
 constexpr uint32_t kChoiceFeedbackMs = 650;
-constexpr int64_t kTasksCacheFreshSeconds = 5 * 60;
+constexpr int64_t kTasksCacheFreshSeconds = 30 * 60;
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kContentX = 24;
 constexpr int32_t kContentY = 100;
@@ -50,6 +50,29 @@ constexpr uint32_t kColorDanger = 0xF87171;
 constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
 constexpr uint32_t kColorChoice = 0xE2E8F0;
+
+// 服务端目前不返回 audio_url；百度发音对词组覆盖更稳。
+std::string BuildFallbackAudioUrl(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(text.size() * 3);
+    for (unsigned char ch : text) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+            ch == '.' || ch == '~') {
+            encoded.push_back(static_cast<char>(ch));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(kHex[ch >> 4]);
+            encoded.push_back(kHex[ch & 0x0F]);
+        }
+    }
+    return "https://fanyi.baidu.com/gettts?lan=en&spd=3&source=web&text=" +
+           encoded;
+}
 
 enum class RequestKind : uint8_t {
     Tasks,
@@ -96,13 +119,15 @@ void SaveTasksCache() {
     if (file == nullptr) {
         return;
     }
+    s_tasks_cache_at = std::time(nullptr);
+    std::fprintf(file, "#%lld\n",
+                 static_cast<long long>(s_tasks_cache_at));
     for (const auto& task : s_tasks) {
         std::fprintf(file, "%s|%s|%s|%d|%d\n", task.id.c_str(),
                      task.task_date.c_str(), task.status.c_str(),
                      task.phrase_count, task.can_review ? 1 : 0);
     }
     std::fclose(file);
-    s_tasks_cache_at = std::time(nullptr);
 }
 
 // 列表写入 SD 后，冷启动首次进入也能先显示上次的任务。
@@ -113,6 +138,7 @@ void LoadTasksCache() {
     }
     EnglishTaskList tasks;
     char line[512];
+    bool has_timestamp = false;
     while (std::fgets(line, sizeof(line), file) != nullptr) {
         std::string text(line);
         while (!text.empty() &&
@@ -120,6 +146,14 @@ void LoadTasksCache() {
             text.pop_back();
         }
         if (text.empty()) {
+            continue;
+        }
+        if (!has_timestamp && text.front() == '#') {
+            const long long timestamp = std::atoll(text.c_str() + 1);
+            if (timestamp > 0) {
+                s_tasks_cache_at = static_cast<std::time_t>(timestamp);
+                has_timestamp = true;
+            }
             continue;
         }
         std::string fields[5];
@@ -149,7 +183,10 @@ void LoadTasksCache() {
     if (!tasks.empty()) {
         s_cached_tasks = std::move(tasks);
         s_cache_valid = true;
-        s_tasks_cache_at = std::time(nullptr);
+        if (!has_timestamp) {
+            // 兼容旧缓存：先视为刚写入，避免升级后首次进入又强制刷新。
+            s_tasks_cache_at = std::time(nullptr);
+        }
     }
 }
 EnglishReview s_review;
@@ -168,6 +205,7 @@ std::atomic<uint32_t> s_busy_generation{0};
 std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
+std::atomic<bool> s_submit_busy{false};
 
 // 复习中断后保留进度：只保留在当前固件进程内，不做跨重启持久化。
 std::string s_history_task_id;
@@ -680,6 +718,9 @@ void PostRequestResult(RequestResult* result) {
                     if (resolved->kind == RequestKind::Result) {
                         s_choice_locked = false;
                     }
+                    if (resolved->kind == RequestKind::Review) {
+                        ShowCenteredMessage(resolved->error.c_str(), true);
+                    }
                     SetStatus(resolved->error.c_str());
                     return;
                 }
@@ -695,17 +736,23 @@ void PostRequestResult(RequestResult* result) {
                                       : I18n::T("选择任务开始复习"));
                         break;
                     case RequestKind::Review:
-                        s_review = std::move(resolved->review);
-                        s_current_task_id = resolved->task_id;
-                        s_current_index = 0;
-                        s_stage = 0;
-                        BuildReview();
-                        if (s_review.entries.empty()) {
-                            SetStatus(I18n::T("暂无复习短句"));
+                        if (!s_current_task_id.empty() &&
+                            s_current_task_id == resolved->task_id &&
+                            s_in_review && s_current_index > 0) {
+                            SetStatus(I18n::T("内容已更新，本次先继续"));
                         } else {
-                            SetStatus(s_review.label.empty()
-                                          ? I18n::T("轻触卡片翻面")
-                                          : s_review.label.c_str());
+                            s_review = std::move(resolved->review);
+                            s_current_task_id = resolved->task_id;
+                            s_current_index = 0;
+                            s_stage = 0;
+                            BuildReview();
+                            if (s_review.entries.empty()) {
+                                SetStatus(I18n::T("暂无复习短句"));
+                            } else {
+                                SetStatus(s_review.label.empty()
+                                              ? I18n::T("轻触卡片翻面")
+                                              : s_review.label.c_str());
+                            }
                         }
                         break;
                     case RequestKind::Result:
@@ -821,7 +868,7 @@ void StartReviewWorker(const std::string& task_id) {
                 PostRequestResult(result);
                 FinishWorkerTask();
             },
-            "english_review", 8192, context) != pdPASS) {
+            "english_review", 16384, context) != pdPASS) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("加载复习内容失败"));
@@ -833,15 +880,24 @@ void StartSubmitWorker(const std::string& result) {
         s_current_index >= s_review.entries.size()) {
         return;
     }
+    if (s_submit_busy.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     auto* context = new RequestResult{};
     context->kind = RequestKind::Result;
     context->task_id = s_current_task_id;
-    context->word_id = s_review.entries[s_current_index].word_id;
-    context->result = result;
-    context->index = static_cast<int>(s_current_index);
-    if (!BeginRequest(context)) {
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (!entry.word_id_from_server) {
+        ESP_LOGW(TAG, "skip result submit: entry has no server word_id");
+        delete context;
+        s_submit_busy.store(false, std::memory_order_release);
         return;
     }
+    context->word_id = entry.word_id;
+    context->result = result;
+    context->index = static_cast<int>(s_current_index);
+    // 结果保存走独立任务，不占用全局 busy 锁：
+    // 否则一题的 POST 未返回时，列表刷新和进入下一任务都会被挡 5 秒。
     SetStatus(I18n::T("正在保存结果..."));
     if (CreateWorkerTask(
             [](void* arg) {
@@ -852,15 +908,18 @@ void StartSubmitWorker(const std::string& result) {
                 if (!ok && request->error.empty()) {
                     request->error = "保存结果失败";
                 }
-                if (!ok) {
+                if (ok) {
+                    PostSetStatus(I18n::T("结果已保存"));
+                } else {
                     PostSetStatus(request->error.c_str());
                 }
-                PostRequestResult(request);
+                delete request;
+                s_submit_busy.store(false, std::memory_order_release);
                 FinishWorkerTask();
             },
             "english_result", 8192, context) != pdPASS) {
-        s_busy.store(false, std::memory_order_release);
         delete context;
+        s_submit_busy.store(false, std::memory_order_release);
         SetStatus(I18n::T("保存结果失败"));
     }
 }
@@ -872,17 +931,63 @@ void OnTaskClicked(lv_event_t* event) {
         return;
     }
     const std::string task_id = s_tasks[index].id;
+    if (s_tasks[index].phrase_count <= 0) {
+        ShowCenteredMessage(I18n::T("暂无复习短句"), true);
+        SetStatus(I18n::T("暂无复习短句"));
+        return;
+    }
     if (RestoreReviewProgress(task_id)) {
         BuildReview();
         SetStatus(I18n::T("已恢复上次复习进度"));
         return;
     }
+    std::string cache_error;
+    const EnglishReview cached_review =
+        EnglishClient::LoadCachedReview(task_id, cache_error);
+    if (!cached_review.entries.empty()) {
+        s_review = cached_review;
+        s_current_task_id = task_id;
+        s_current_index = 0;
+        s_stage = 0;
+        s_in_review = true;
+        BuildReview();
+        if (EnglishClient::IsReviewCacheFresh(
+                task_id, static_cast<int>(kTasksCacheFreshSeconds))) {
+            SetStatus(I18n::T("已恢复上次复习进度"));
+        } else {
+            SetStatus(I18n::T("已显示缓存，后台更新中"));
+            StartReviewWorker(task_id);
+        }
+        return;
+    }
     s_review = EnglishReview{};
+    s_current_task_id = task_id;
     s_current_index = 0;
     s_stage = 0;
     ShowCenteredMessage(I18n::T("正在加载复习内容..."), false, true);
     SetStatus(I18n::T("正在加载复习内容..."));
     StartReviewWorker(task_id);
+    auto* loading_task_id = new std::string(task_id);
+    lv_timer_create(
+        [](lv_timer_t* timer) {
+            std::unique_ptr<std::string> task_id(
+                static_cast<std::string*>(lv_timer_get_user_data(timer)));
+            if (!s_busy.load(std::memory_order_relaxed) ||
+                s_busy_kind.load(std::memory_order_relaxed) !=
+                    static_cast<int>(RequestKind::Review) ||
+                s_current_task_id != *task_id) {
+                lv_timer_delete(timer);
+                return;
+            }
+            ShowCenteredMessage(I18n::T("加载复习内容超时，请返回重试"), true);
+            SetStatus(I18n::T("加载超时"));
+            s_busy.store(false, std::memory_order_release);
+            s_busy_kind.store(0, std::memory_order_relaxed);
+            s_busy_generation.store(0, std::memory_order_relaxed);
+            lv_timer_delete(timer);
+        },
+        // 大任务（几十条短句）网络返回可能超过 8 秒，这里放到 HTTP 超时之后。
+        15000, loading_task_id);
 }
 
 void OnCardClicked(lv_event_t* /*event*/) {
@@ -896,11 +1001,13 @@ void OnPronounceClicked(lv_event_t* /*event*/) {
     }
     std::string error;
     const EnglishEntry& entry = s_review.entries[s_current_index];
-    const std::string pronounce_text =
-        entry.phrase.empty() ? entry.term : entry.phrase;
-    const std::string url = EnglishClient::PronunciationUrl(pronounce_text, error);
+    const std::string& source =
+        !entry.phrase.empty() ? entry.phrase : entry.term;
+    const std::string url = !entry.audio_url.empty()
+                                ? entry.audio_url
+                                : BuildFallbackAudioUrl(source);
     if (url.empty()) {
-        SetStatus(error.c_str());
+        SetStatus(I18n::T("暂无发音音频"));
         return;
     }
     PodcastPlayer::SetEventCallback(nullptr, nullptr);
@@ -991,7 +1098,17 @@ void ReturnHome() {
     }
     lv_screen_load(target);
     if (target == ChatScreen::CurrentScreen()) {
-        ChatScreen::ResumeAfterTemporaryLeave();
+        lv_timer_create(
+            [](lv_timer_t* timer) {
+                lv_timer_delete(timer);
+                lv_timer_create(
+                    [](lv_timer_t* retry_timer) {
+                        lv_timer_delete(retry_timer);
+                        ChatScreen::ResumeAfterTemporaryLeave();
+                    },
+                    300, nullptr);
+            },
+            1200, nullptr);
     }
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);
@@ -1127,7 +1244,6 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         ESP_LOGI(TAG, "load: english_screen");
         Application::GetInstance().SetVoiceUiDesired(false);
         s_screen_active.store(true, std::memory_order_release);
-        s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
         s_tasks.clear();
@@ -1158,7 +1274,6 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     } else {
         ESP_LOGI(TAG, "unload: english_screen");
         s_screen_active.store(false, std::memory_order_release);
-        s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     }

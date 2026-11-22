@@ -190,7 +190,8 @@ private:
         // PA 默认关着，开机 5s 后再开，避免上电瞬间推动放。
         iOExpander.setLevel(IOExpander::Pin::PA, false);
         iOExpander.setLevel(IOExpander::Pin::PA_SWITCH, true);
-        iOExpander.setLevel(IOExpander::Pin::RST_4G, true);
+        iOExpander.setLevel(IOExpander::Pin::RST_4G,
+                            GetNetworkType() == NetworkType::ML307);
         // CAM_PWDN: 低电平通电；这里默认拉高 = 摄像头断电。
         // 只有进入相机 App 时（CameraScreen::LifecycleCallback LOAD）才拉低供电。
         iOExpander.setLevel(IOExpander::Pin::CAM_PWDN, true);
@@ -597,9 +598,8 @@ private:
     void InitializeNoLCD() { display_ = new NoDisplay(); }
 
 public:
-    // 默认内置 4G：设备自带流量，避免每次整包刷机后都要手动配 WiFi。
-    // 4G 初始化失败时保留 AT 通道，不关 modem、不触发重启循环。
-    METALIO_CLAW_4() : DualNetworkBoard(NT26_TX_PIN, NT26_RX_PIN, NT26_MRDY_PIN, NT26_SRDY_PIN, 1) {
+    // 整包刷机后默认 WiFi，避免 4G 初始化异常时进入重启循环。
+    METALIO_CLAW_4() : DualNetworkBoard(NT26_TX_PIN, NT26_RX_PIN, NT26_MRDY_PIN, NT26_SRDY_PIN, 0) {
         InitializeI2C();
 
         InitializeIOExpander();

@@ -4,8 +4,10 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 
 #include "board.h"
 #include "cJSON.h"
@@ -21,9 +23,8 @@ constexpr const char* TAG = "EnglishClient";
 constexpr const char* kSettingsNs = "podcast";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr const char* kRequiredApiBase = "https://www.yi-edu.com";
-constexpr const char* kPronunciationBase = "https://dict.youdao.com/dictvoice";
 constexpr const char* kReviewCacheDir = "/sdcard/system";
-constexpr int kHttpTimeoutMs = 10000;
+constexpr int kHttpTimeoutMs = 6000;
 
 std::mutex s_http_mutex;
 
@@ -77,7 +78,8 @@ bool LoadConfig(std::string& api_base, std::string& device_token,
 
 bool HttpRequest(const char* method, const std::string& url,
                  const std::string& device_token, std::string content,
-                 std::string& body, int& status, std::string& error) {
+                 std::string& body, int& status, std::string& error,
+                 int timeout_ms = kHttpTimeoutMs) {
     std::lock_guard<std::mutex> lock(s_http_mutex);
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
@@ -90,7 +92,7 @@ bool HttpRequest(const char* method, const std::string& url,
         return false;
     }
 
-    http->SetTimeout(kHttpTimeoutMs);
+    http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
     http->SetHeader("Connection", "close");
     http->SetHeader("Authorization", "Bearer " + device_token);
@@ -103,7 +105,25 @@ bool HttpRequest(const char* method, const std::string& url,
         return false;
     }
     status = http->GetStatusCode();
-    body = http->ReadAll();
+    // ReadAll() 对超过 8KB 的 chunked 响应会死锁（项目内已知问题），
+    // 这里改为流式读取，避免 46 条短句的任务永久卡住。
+    body.clear();
+    char chunk[2048];
+    while (true) {
+        const int read = http->Read(chunk, sizeof(chunk));
+        if (read < 0) {
+            http->Close();
+            error = "读取英语服务响应失败";
+            return false;
+        }
+        if (read == 0) {
+            break;
+        }
+        body.append(chunk, static_cast<size_t>(read));
+        if (body.size() > 512 * 1024) {
+            break;
+        }
+    }
     http->Close();
     if (status < 200 || status >= 300) {
         cJSON* root = cJSON_Parse(body.c_str());
@@ -121,10 +141,10 @@ bool HttpRequest(const char* method, const std::string& url,
 
 bool GetJson(const std::string& path, const std::string& api_base,
              const std::string& device_token, std::string& body,
-             std::string& error) {
+             std::string& error, int timeout_ms = kHttpTimeoutMs) {
     int status = 0;
-    return HttpRequest("GET", api_base + path, device_token, "", body,
-                       status, error);
+    return HttpRequest("GET", api_base + path, device_token, "", body, status,
+                       error, timeout_ms);
 }
 
 std::string ReviewCachePath(const std::string& task_id) {
@@ -180,8 +200,8 @@ EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
         return {};
     }
     std::string body;
-    if (!GetJson("/api/device/v1/english/tasks", api_base, device_token,
-                 body, error)) {
+    if (!GetJson("/api/device/v1/english/tasks", api_base, device_token, body,
+                 error, 8000)) {
         return {};
     }
 
@@ -234,30 +254,12 @@ EnglishTaskList EnglishClient::FetchTasks(std::string& error) {
     return result;
 }
 
-EnglishReview EnglishClient::FetchReview(const std::string& task_id,
-                                         std::string& error) {
-    error.clear();
-    std::string api_base;
-    std::string device_token;
-    if (!LoadConfig(api_base, device_token, error)) {
-        return {};
-    }
-    std::string body;
-    const std::string path = "/api/device/v1/english/tasks/" +
-                             UrlEncode(task_id) + "/review";
-    if (!GetJson(path, api_base, device_token, body, error)) {
-        body = LoadReviewCache(task_id);
-        if (body.empty()) {
-            return {};
-        }
-        error.clear();
-    } else {
-        SaveReviewCache(task_id, body);
-    }
-
+namespace {
+EnglishReview ParseReview(const std::string& body, std::string& error,
+                          const char* parse_error) {
     cJSON* root = cJSON_Parse(body.c_str());
     if (root == nullptr) {
-        error = "复习内容格式错误";
+        error = parse_error;
         return {};
     }
     EnglishReview review;
@@ -270,11 +272,14 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
         }
         EnglishEntry entry;
         entry.word_id = JsonString(item, "word_id", "id");
+        entry.word_id_from_server = !entry.word_id.empty();
         entry.term = JsonString(item, "term");
         entry.phonetic = JsonString(item, "phonetic");
         entry.meaning = JsonString(item, "meaning");
         entry.phrase = JsonString(item, "phrase");
         entry.example = JsonString(item, "example");
+        entry.audio_url = JsonString(item, "audio_url", "pronunciation_url");
+        entry.has_audio = !entry.audio_url.empty();
         const cJSON* options = cJSON_GetObjectItem(item, "options");
         const cJSON* option = nullptr;
         cJSON_ArrayForEach(option, options) {
@@ -290,8 +295,8 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
         }
         entry.correct_index =
             cJSON_IsNumber(correct_index) ? correct_index->valueint : -1;
-        if (entry.correct_index >= 0 && entry.correct_index >=
-                                          static_cast<int>(entry.options.size())) {
+        if (entry.correct_index >= 0 &&
+            entry.correct_index >= static_cast<int>(entry.options.size())) {
             entry.correct_index = -1;
         }
         if (entry.correct_index < 0 && !entry.meaning.empty()) {
@@ -302,12 +307,59 @@ EnglishReview EnglishClient::FetchReview(const std::string& task_id,
                 }
             }
         }
-        if (!entry.word_id.empty()) {
-            review.entries.push_back(std::move(entry));
-        }
+        review.entries.push_back(std::move(entry));
     }
     cJSON_Delete(root);
     return review;
+}
+}  // namespace
+
+EnglishReview EnglishClient::FetchReview(const std::string& task_id,
+                                         std::string& error) {
+    error.clear();
+    std::string api_base;
+    std::string device_token;
+    if (!LoadConfig(api_base, device_token, error)) {
+        return {};
+    }
+    std::string body;
+    const std::string path = "/api/device/v1/english/tasks/" +
+                             UrlEncode(task_id) + "/review";
+    if (!GetJson(path, api_base, device_token, body, error, 12000)) {
+        body = LoadReviewCache(task_id);
+        if (body.empty()) {
+            return {};
+        }
+        error.clear();
+    } else {
+        SaveReviewCache(task_id, body);
+    }
+
+    return ParseReview(body, error, "复习内容格式错误");
+}
+
+EnglishReview EnglishClient::LoadCachedReview(const std::string& task_id,
+                                              std::string& error) {
+    error.clear();
+    const std::string body = LoadReviewCache(task_id);
+    if (body.empty()) {
+        return {};
+    }
+    return ParseReview(body, error, "复习缓存格式错误");
+}
+
+bool EnglishClient::IsReviewCacheFresh(const std::string& task_id,
+                                       int max_age_seconds) {
+    if (task_id.empty() || max_age_seconds <= 0) {
+        return false;
+    }
+    struct stat info = {};
+    if (stat(ReviewCachePath(task_id).c_str(), &info) != 0) {
+        return false;
+    }
+    const std::time_t now = std::time(nullptr);
+    return info.st_mtime > 0 && now >= info.st_mtime &&
+           now - info.st_mtime <= max_age_seconds;
 }
 
 bool EnglishClient::SubmitResult(const std::string& task_id,
@@ -350,19 +402,6 @@ bool EnglishClient::SubmitResult(const std::string& task_id,
     return true;
 }
 
-std::string EnglishClient::PronunciationUrl(const std::string& text,
-                                            std::string& error) {
-    error.clear();
-    if (text.empty()) {
-        error = "没有可发音的内容";
-        return "";
-    }
-    // type=2 在部分短语上会返回空音频；type=1 更稳定。
-    return std::string(kPronunciationBase) + "?audio=" + UrlEncode(text) +
-           "&type=1";
-}
-
-
 void EnglishClient::PrefetchTasksAsync() {
     static std::atomic<bool> started{false};
     if (started.exchange(true, std::memory_order_acq_rel)) {
@@ -370,25 +409,27 @@ void EnglishClient::PrefetchTasksAsync() {
     }
     xTaskCreate(
         [](void* /*arg*/) {
-            // 比播客预热再晚一些，避免两次 TLS 同时抢内部 RAM。
-            vTaskDelay(pdMS_TO_TICKS(20000));
-            std::string error;
-            const EnglishTaskList tasks = FetchTasks(error);
-            if (error.empty() && !tasks.empty()) {
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                vTaskDelay(pdMS_TO_TICKS(attempt == 0 ? 8000 : 12000));
+                std::string error;
+                const EnglishTaskList tasks = FetchTasks(error);
+                if (!error.empty() || tasks.empty()) {
+                    continue;
+                }
                 const char* tmp = "/sdcard/system/english_tasks.tmp";
                 FILE* file = std::fopen(tmp, "w");
-                if (file != nullptr) {
-                    for (const auto& task : tasks) {
-                        std::fprintf(file, "%s|%s|%s|%d|%d\n",
-                                     task.id.c_str(),
-                                     task.task_date.c_str(),
-                                     task.status.c_str(),
-                                     task.phrase_count,
-                                     task.can_review ? 1 : 0);
-                    }
-                    std::fclose(file);
-                    std::rename(tmp, "/sdcard/system/english_tasks.txt");
+                if (file == nullptr) {
+                    continue;
                 }
+                for (const auto& task : tasks) {
+                    std::fprintf(file, "%s|%s|%s|%d|%d\n", task.id.c_str(),
+                                 task.task_date.c_str(), task.status.c_str(),
+                                 task.phrase_count,
+                                 task.can_review ? 1 : 0);
+                }
+                std::fclose(file);
+                std::rename(tmp, "/sdcard/system/english_tasks.txt");
+                break;
             }
             vTaskDelete(nullptr);
         },

@@ -818,7 +818,8 @@ void AudioService::PlaySound(const std::string_view& ogg) {
             packet->frame_duration = 60;
             packet->payload.resize(pkt_len);
             std::memcpy(packet->payload.data(), pkt_ptr, pkt_len);
-            PushPacketToDecodeQueue(std::move(packet), true);
+        // UI 线程会直接调用 PlaySound；队列满时丢弃提示音，不能阻塞 LVGL。
+        PushPacketToDecodeQueue(std::move(packet), false);
         }
 
         offset = body_off + body_size;
