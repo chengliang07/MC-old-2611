@@ -4,8 +4,10 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 
 #include "board.h"
 #include "cJSON.h"
@@ -103,7 +105,25 @@ bool HttpRequest(const char* method, const std::string& url,
         return false;
     }
     status = http->GetStatusCode();
-    body = http->ReadAll();
+    // ReadAll() 对超过 8KB 的 chunked 响应会死锁（项目内已知问题），
+    // 这里改为流式读取，避免 46 条短句的任务永久卡住。
+    body.clear();
+    char chunk[2048];
+    while (true) {
+        const int read = http->Read(chunk, sizeof(chunk));
+        if (read < 0) {
+            http->Close();
+            error = "读取英语服务响应失败";
+            return false;
+        }
+        if (read == 0) {
+            break;
+        }
+        body.append(chunk, static_cast<size_t>(read));
+        if (body.size() > 512 * 1024) {
+            break;
+        }
+    }
     http->Close();
     if (status < 200 || status >= 300) {
         cJSON* root = cJSON_Parse(body.c_str());
@@ -326,6 +346,20 @@ EnglishReview EnglishClient::LoadCachedReview(const std::string& task_id,
         return {};
     }
     return ParseReview(body, error, "复习缓存格式错误");
+}
+
+bool EnglishClient::IsReviewCacheFresh(const std::string& task_id,
+                                       int max_age_seconds) {
+    if (task_id.empty() || max_age_seconds <= 0) {
+        return false;
+    }
+    struct stat info = {};
+    if (stat(ReviewCachePath(task_id).c_str(), &info) != 0) {
+        return false;
+    }
+    const std::time_t now = std::time(nullptr);
+    return info.st_mtime > 0 && now >= info.st_mtime &&
+           now - info.st_mtime <= max_age_seconds;
 }
 
 bool EnglishClient::SubmitResult(const std::string& task_id,

@@ -469,7 +469,7 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
         s_headers_parsed.store(false, std::memory_order_release);
         // 限制阻塞读时长，停止/切节目时不会被默认 30s 读超时拖住。
         esp_http_client_set_timeout_ms(
-            client, s_quick_url.load(std::memory_order_relaxed) ? 3000 : 8000);
+            client, s_quick_url.load(std::memory_order_relaxed) ? 5000 : 8000);
         if (s_quick_url.load(std::memory_order_relaxed)) {
             esp_http_client_set_header(
                 client, "User-Agent",
