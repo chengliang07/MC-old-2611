@@ -60,6 +60,7 @@ std::atomic<uint32_t> s_generation{0};
 std::atomic<int> s_pcm_channels{2};
 std::atomic<bool> s_output_enabled{false};
 std::atomic<bool> s_reported_playing{false};
+std::atomic<bool> s_start_gate_done{false};
 std::atomic<uint32_t> s_output_generation{0};
 PodcastPlayerEventCallback s_event_cb = nullptr;
 void* s_event_ctx = nullptr;
@@ -566,6 +567,17 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
         data == nullptr || data_size <= 0) {
         return 0;
     }
+    // 播客首帧先让 HTTP 缓冲填一小段，避免代理首包偏慢造成开头连续欠载。
+    // 英语发音 URL 跳过，避免增加点按发音的等待。
+    if (!s_quick_url.load(std::memory_order_relaxed) &&
+        !s_start_gate_done.exchange(true, std::memory_order_acq_rel)) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        if (player_ctx->generation !=
+                s_generation.load(std::memory_order_acquire) ||
+            !s_output_enabled.load(std::memory_order_acquire)) {
+            return 0;
+        }
+    }
     auto* codec = player_ctx->codec;
     if (codec == nullptr) {
         return 0;
@@ -648,6 +660,8 @@ int PodcastEventCallback(esp_asp_event_pkt_t* event, void* ctx) {
         esp_asp_state_t state = ESP_ASP_STATE_NONE;
         std::memcpy(&state, event->payload, event->payload_size);
         if (state == ESP_ASP_STATE_RUNNING) {
+            // 管线刚运行时先抓住 HTTP IO，切集时 abort 才能立即打断读操作。
+            CapturePipelineIo(player_ctx->player, player_ctx->generation);
             if (!s_reported_playing.exchange(true,
                                              std::memory_order_acq_rel)) {
                 Emit(PodcastPlayerEvent::Playing, nullptr);
@@ -718,6 +732,7 @@ void PodcastPlayTask(void* arg) {
     EnsureMediaLibAdapter();
     s_pcm_channels.store(2, std::memory_order_relaxed);
     s_reported_playing.store(false, std::memory_order_relaxed);
+    s_start_gate_done.store(false, std::memory_order_relaxed);
 
     auto* player_ctx = new PlayerContext{codec, nullptr, generation};
     esp_asp_cfg_t cfg = {

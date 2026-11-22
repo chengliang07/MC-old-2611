@@ -27,7 +27,6 @@ constexpr const char* kKeyApiBase = "api_base";
 constexpr const char* kKeyDeviceToken = "device_token";
 constexpr int kHttpTimeoutMs = 10000;
 
-std::mutex s_http_mutex;
 // 列表响应缓存：接口本身约 2-3 秒，避免同一次入口/下拉刷新重复请求。
 std::mutex s_list_cache_mutex;
 PodcastList s_list_cache;
@@ -135,7 +134,6 @@ bool LoadConfig(std::string& api_base, std::string& device_token,
 
 bool HttpGet(const std::string& url, const std::string& device_token,
              std::string& body, int& status, std::string& error) {
-    std::lock_guard<std::mutex> lock(s_http_mutex);
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         error = "网络未连接";
@@ -179,19 +177,69 @@ bool TryCachedPlayUrl(const std::string& podcast_id, PodcastPlayInfo& result) {
     for (const auto& entry : s_play_cache) {
         if (entry.id == podcast_id && entry.expires > now) {
             result = entry.info;
+            ESP_LOGI(TAG, "play url cache hit: %s", podcast_id.c_str());
             return true;
         }
     }
     return false;
 }
 
+bool IsLeapYear(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+time_t UtcTime(struct tm* value) {
+    static constexpr int kMonthDays[] = {0,  31, 59, 90,  120, 151,
+                                         181, 212, 243, 273, 304, 334};
+    if (value->tm_mon < 0 || value->tm_mon > 11) {
+        return 0;
+    }
+    const int year = value->tm_year + 1900;
+    int days = 0;
+    if (year >= 1970) {
+        for (int y = 1970; y < year; ++y) {
+            days += 365 + (IsLeapYear(y) ? 1 : 0);
+        }
+    } else {
+        for (int y = year; y < 1970; ++y) {
+            days -= 365 + (IsLeapYear(y) ? 1 : 0);
+        }
+    }
+    days += kMonthDays[value->tm_mon] +
+            ((value->tm_mon > 1 && IsLeapYear(year)) ? 1 : 0) +
+            value->tm_mday - 1;
+    return static_cast<time_t>(days) * 86400 +
+           value->tm_hour * 3600 + value->tm_min * 60 + value->tm_sec;
+}
+
 time_t ParseExpiresAt(const std::string& value) {
     struct tm tm_value = {};
-    if (!value.empty() &&
-        strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &tm_value) != nullptr) {
-        return mktime(&tm_value);
+    char* end =
+        value.empty()
+            ? nullptr
+            : strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &tm_value);
+    if (end == nullptr) {
+        return 0;
     }
-    return 0;
+    // 后端返回 ISO-8601 UTC，例如 2026-11-22T06:56:37.712Z。
+    // 必须按 UTC 解析；按本地时间解析会让缓存一生成就过期。
+    while (*end == '.' ||
+           std::isdigit(static_cast<unsigned char>(*end))) {
+        ++end;
+    }
+    if (*end == 'Z' || *end == 'z') {
+        return UtcTime(&tm_value);
+    }
+    if (*end == '+' || *end == '-') {
+        int hours = 0;
+        int minutes = 0;
+        if (std::sscanf(end + 1, "%2d:%2d", &hours, &minutes) == 2) {
+            const time_t base = UtcTime(&tm_value);
+            const int offset = hours * 3600 + minutes * 60;
+            return *end == '+' ? base - offset : base + offset;
+        }
+    }
+    return mktime(&tm_value);
 }
 
 PodcastList PodcastClient::FetchPodcasts(std::string& error) {
