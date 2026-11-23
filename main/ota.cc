@@ -84,7 +84,15 @@ std::string Ota::GetCheckVersionUrl() {
 std::unique_ptr<Http> Ota::SetupHttp() {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(TAG, "Network interface is not ready, skip OTA HTTP setup");
+        return nullptr;
+    }
     auto http = network->CreateHttp(0);
+    if (!http) {
+        ESP_LOGW(TAG, "Failed to create HTTP client");
+        return nullptr;
+    }
     auto user_agent = SystemInfo::GetUserAgent();
     http->SetHeader("Activation-Version", has_serial_number_ ? "2" : "1");
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
@@ -118,6 +126,9 @@ esp_err_t Ota::CheckVersion() {
     }
 
     auto http = SetupHttp();
+    if (!http) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
@@ -311,7 +322,15 @@ bool Ota::Upgrade(const std::string& firmware_url) {
     size_t pending_len = 0;
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network interface is not ready, cannot download firmware");
+        return false;
+    }
     auto http = network->CreateHttp(0);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        return false;
+    }
     if (!http->Open("GET", firmware_url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
         return false;
@@ -506,6 +525,10 @@ esp_err_t Ota::Activate() {
     }
 
     auto http = SetupHttp();
+    if (!http) {
+        ESP_LOGE(TAG, "Network interface is not ready, cannot activate");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     std::string data = GetActivationPayload();
     http->SetContent(std::move(data));

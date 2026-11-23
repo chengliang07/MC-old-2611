@@ -94,6 +94,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
     error_occurred_ = false;
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready, cannot create websocket");
+        return false;
+    }
     websocket_ = network->CreateWebSocket(1);
     if (websocket_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create websocket");

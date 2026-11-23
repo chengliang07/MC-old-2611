@@ -69,7 +69,18 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready, cannot create mqtt client");
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_FOUND);
+        }
+        return false;
+    }
     mqtt_ = network->CreateMqtt(0);
+    if (mqtt_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create mqtt client");
+        return false;
+    }
     mqtt_->SetKeepAlive(keepalive_interval);
 
     mqtt_->OnDisconnected([this]() {
@@ -229,7 +240,15 @@ bool MqttProtocol::OpenAudioChannel() {
 
     std::lock_guard<std::mutex> lock(channel_mutex_);
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready, cannot create udp channel");
+        return false;
+    }
     udp_ = network->CreateUdp(2);
+    if (udp_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create udp channel");
+        return false;
+    }
     udp_->OnMessage([this](const std::string& data) {
         /*
          * UDP Encrypted OPUS Packet Format:

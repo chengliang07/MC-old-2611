@@ -98,13 +98,27 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v5.5@sha256:0c439ea923cd42700f9bbbe82542749d980712edb0ead0ea6db7eef35619b812
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ccache
+            build
+            managed_components
+          key: idf-${{ matrix.name }}-${{ hashFiles('.github/workflows/build.yml', 'dependencies.lock', 'main/idf_component.yml', 'sdkconfig', 'main/CMakeLists.txt', 'main/Kconfig.projbuild') }}
+          restore-keys: |
+            idf-${{ matrix.name }}-
+
       - name: Build current variant
         shell: bash
         run: |
+          mkdir -p "$CCACHE_DIR"
           source $IDF_PATH/export.sh
           python scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
 

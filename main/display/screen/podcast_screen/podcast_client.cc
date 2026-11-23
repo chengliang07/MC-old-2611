@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <cstring>
