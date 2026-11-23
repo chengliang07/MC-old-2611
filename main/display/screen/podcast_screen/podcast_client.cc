@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include "board.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "http.h"
 #include "settings.h"
 #include "freertos/FreeRTOS.h"
@@ -191,14 +193,36 @@ bool HttpGet(const std::string& url, const std::string& device_token,
 bool TryCachedPlayUrl(const std::string& podcast_id, PodcastPlayInfo& result) {
     std::lock_guard<std::mutex> lock(s_play_cache_mutex);
     const time_t now = time(nullptr);
+    // 预留 60 秒安全余量，避免在签名地址即将过期时开始播放。
+    constexpr time_t kExpiryMarginSeconds = 60;
     for (const auto& entry : s_play_cache) {
-        if (entry.id == podcast_id && entry.expires > now) {
+        if (entry.id == podcast_id &&
+            entry.expires > now + kExpiryMarginSeconds) {
             result = entry.info;
             ESP_LOGI(TAG, "play url cache hit: %s", podcast_id.c_str());
             return true;
         }
     }
+    for (auto it = s_play_cache.begin(); it != s_play_cache.end(); ++it) {
+        if (it->id == podcast_id) {
+            // 该节目地址即将过期，直接移除，避免下次继续命中。
+            s_play_cache.erase(it);
+            break;
+        }
+    }
     return false;
+}
+
+void PodcastClient::InvalidatePlayUrl(const std::string& podcast_id) {
+    std::lock_guard<std::mutex> lock(s_play_cache_mutex);
+    for (auto it = s_play_cache.begin(); it != s_play_cache.end(); ++it) {
+        if (it->id == podcast_id) {
+            s_play_cache.erase(it);
+            ESP_LOGI(TAG, "play url cache invalidated: %s",
+                     podcast_id.c_str());
+            return;
+        }
+    }
 }
 
 bool IsLeapYear(int year) {
@@ -358,7 +382,12 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
                                               std::string& error) {
     error.clear();
     PodcastPlayInfo result;
+    const int64_t started_us = esp_timer_get_time();
     if (TryCachedPlayUrl(podcast_id, result)) {
+        ESP_LOGI(TAG, "[timing] resolve cache hit id=%s dt=%lldms",
+                 podcast_id.c_str(),
+                 static_cast<long long>(
+                     (esp_timer_get_time() - started_us) / 1000));
         return result;
     }
     std::string api_base;
@@ -403,6 +432,10 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
         return result;
     }
     result.ok = true;
+    ESP_LOGI(TAG, "[timing] resolve api id=%s dt=%lldms status=%d",
+             podcast_id.c_str(),
+             static_cast<long long>((esp_timer_get_time() - started_us) / 1000),
+             status);
     {
         std::lock_guard<std::mutex> lock(s_play_cache_mutex);
         time_t expires = ParseExpiresAt(result.expires_at);

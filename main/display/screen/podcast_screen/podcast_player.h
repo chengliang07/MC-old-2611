@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 enum class PodcastPlayerEvent {
@@ -7,6 +8,8 @@ enum class PodcastPlayerEvent {
     Paused,
     Finished,
     Error,
+    // 缓存的签名播放地址已失效（HTTP 403），页面应失效缓存后重试一次。
+    UrlExpired,
 };
 
 using PodcastPlayerEventCallback =
@@ -14,7 +17,9 @@ using PodcastPlayerEventCallback =
 
 class PodcastPlayer {
 public:
-    static bool Start(const std::string& url, std::string& error);
+    // click_us 为用户点击节目的时间戳（esp_timer_get_time），仅用于耗时诊断。
+    static bool Start(const std::string& url, std::string& error,
+                      int64_t click_us = 0);
     static bool Pause();
     static bool Resume();
     static void Stop();

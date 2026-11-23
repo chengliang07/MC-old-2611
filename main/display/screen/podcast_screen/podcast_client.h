@@ -16,6 +16,8 @@ public:
     static PodcastList FetchPodcasts(std::string& error);
     static PodcastPlayInfo ResolvePlayUrl(const std::string& podcast_id,
                                           std::string& error);
+    // 音频地址返回 403 时，只失效该节目对应的签名地址缓存。
+    static void InvalidatePlayUrl(const std::string& podcast_id);
     static std::string DeviceToken();
     // 开机后台预取一次节目列表，落到 SD 缓存，首次进入播客页可直接显示。
     static void PrefetchListAsync();

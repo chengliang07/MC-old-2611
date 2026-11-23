@@ -12,6 +12,7 @@
 #include "application.h"
 #include "chat_screen/chat_screen.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
@@ -66,6 +67,7 @@ struct ResolveResult {
     std::string podcast_id;
     std::string title;
     int duration_seconds = 0;
+    int64_t click_us = 0;
     std::string error;
 };
 
@@ -82,6 +84,11 @@ PodcastList s_items;
 // 上次成功拉到的节目列表：再次进入先本地渲染，后台只做刷新。
 PodcastList s_cached_items;
 time_t s_items_at = 0;
+// 当前播放的节目，用于签名地址过期后失效缓存并重试一次。
+std::string s_current_podcast_id;
+size_t s_current_index = 0;
+bool s_url_retried = false;
+int64_t s_click_us = 0;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
 
@@ -321,13 +328,16 @@ lv_obj_t* CreateActionButton(lv_obj_t* parent, int32_t x, const char* text,
     return button;
 }
 
-void OnPodcastClicked(lv_event_t* event) {
-    const auto index = static_cast<size_t>(reinterpret_cast<uintptr_t>(
-        lv_event_get_user_data(event)));
+void BeginPlayAt(size_t index) {
     if (index >= s_items.size()) {
         return;
     }
     const PodcastItem item = s_items[index];
+    s_current_index = index;
+    s_current_podcast_id = item.id;
+    s_click_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "[timing] click id=%s index=%u", item.id.c_str(),
+             static_cast<unsigned>(index));
     s_current_title = item.title;
     PodcastPlayer::SetDuration(item.duration_seconds);
     s_progress_max = item.duration_seconds > 0 ? item.duration_seconds : 1;
@@ -351,6 +361,7 @@ void OnPodcastClicked(lv_event_t* event) {
     context->request_generation = request_generation;
     context->podcast_id = item.id;
     context->title = item.title;
+    context->click_us = s_click_us;
     if (xTaskCreate(
             [](void* arg) {
                 auto* result = static_cast<ResolveResult*>(arg);
@@ -366,7 +377,8 @@ void OnPodcastClicked(lv_event_t* event) {
                         s_request_generation.load(
                             std::memory_order_relaxed)) {
                     result->error = "播放请求已取消";
-                } else if (!PodcastPlayer::Start(play.url, error)) {
+                } else if (!PodcastPlayer::Start(play.url, error,
+                                                 result->click_us)) {
                     result->error = error;
                 } else {
                     result->duration_seconds = play.duration_seconds;
@@ -406,6 +418,13 @@ void OnPodcastClicked(lv_event_t* event) {
         delete context;
         SetStatusDirect(I18n::T("创建播放请求失败"));
     }
+}
+
+void OnPodcastClicked(lv_event_t* event) {
+    const auto index = static_cast<size_t>(reinterpret_cast<uintptr_t>(
+        lv_event_get_user_data(event)));
+    s_url_retried = false;
+    BeginPlayAt(index);
 }
 
 void RebuildList() {
@@ -571,6 +590,22 @@ void ApplyPlayerEvent(void* data) {
             SetStatusDirect(event->detail.empty()
                                 ? I18n::T("播放失败")
                                 : event->detail.c_str());
+            break;
+        case PodcastPlayerEvent::UrlExpired:
+            if (!s_url_retried && !s_current_podcast_id.empty() &&
+                s_current_index < s_items.size()) {
+                s_url_retried = true;
+                PodcastClient::InvalidatePlayUrl(s_current_podcast_id);
+                ESP_LOGW(TAG, "signed url expired, retry once");
+                SetStatusDirect(I18n::T("正在刷新播放地址..."));
+                BeginPlayAt(s_current_index);
+            } else {
+                s_preparing_play.store(false, std::memory_order_release);
+                s_playing = false;
+                s_paused = false;
+                UpdateControls(false, false);
+                SetStatusDirect(I18n::T("播放地址已过期"));
+            }
             break;
     }
 }

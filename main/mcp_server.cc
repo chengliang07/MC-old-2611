@@ -230,7 +230,11 @@ void McpServer::AddUserOnlyTools() {
                 // 构造multipart/form-data请求体
                 std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
                 
-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                auto network = Board::GetInstance().GetNetwork();
+                if (network == nullptr) {
+                    throw std::runtime_error("Network is not ready");
+                }
+                auto http = network->CreateHttp(3);
                 http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
                 if (!http->Open("POST", url)) {
                     throw std::runtime_error("Failed to open URL: " + url);
@@ -271,7 +275,11 @@ void McpServer::AddUserOnlyTools() {
             }),
             [display](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                auto network = Board::GetInstance().GetNetwork();
+                if (network == nullptr) {
+                    throw std::runtime_error("Network is not ready");
+                }
+                auto http = network->CreateHttp(3);
 
                 if (!http->Open("GET", url)) {
                     throw std::runtime_error("Failed to open URL: " + url);

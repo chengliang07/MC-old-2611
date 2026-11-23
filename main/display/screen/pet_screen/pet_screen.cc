@@ -66,6 +66,7 @@ struct PetUi {
     lv_obj_t* action_label = nullptr;
     lv_obj_t* status = nullptr;
     lv_timer_t* idle_timer = nullptr;
+    lv_timer_t* blink_timer = nullptr;
     lv_obj_t* pet_widget = nullptr;
     bool use_image_art = true;
 };
@@ -103,6 +104,10 @@ const char* PetImagePath(PetMood mood, bool egg) {
     }
 }
 
+const char* BlinkImagePath(uint8_t step) {
+    return step == 0 ? "A:ic_pet_blink_half.spng" : "A:ic_pet_blink.spng";
+}
+
 struct RequestResult {
     uint32_t session = 0;
     uint32_t generation = 0;
@@ -123,6 +128,7 @@ int32_t s_body_base_x = 0;
 int32_t s_body_base_y = 0;
 uint32_t s_last_tap_ms = 0;
 uint8_t s_idle_phase = 0;
+uint8_t s_blink_step = 0;
 PetMood s_mood = PetMood::Idle;
 PetMood s_base_mood = PetMood::Idle;
 int32_t s_eye_cx[2] = {0, 0};
@@ -447,43 +453,6 @@ void BuildPetArt(const char* stage) {
     if (s_ui.art == nullptr) {
         return;
     }
-    const bool is_egg = stage == nullptr || std::strcmp(stage, "egg") == 0;
-    if (is_egg && s_ui.pet_widget != nullptr) {
-        lv_obj_delete(s_ui.pet_widget);
-        s_ui.pet_widget = nullptr;
-    }
-    if (!is_egg && s_ui.pet_widget == nullptr) {
-        if (s_ui.body != nullptr) {
-            lv_anim_delete(s_ui.body, nullptr);
-        }
-        if (s_ui.core != nullptr) {
-            lv_anim_delete(s_ui.core, nullptr);
-        }
-        lv_obj_clean(s_ui.art);
-        s_ui.body = nullptr;
-        s_ui.left_eye = nullptr;
-        s_ui.right_eye = nullptr;
-        s_ui.mouth = nullptr;
-        s_ui.left_brow = nullptr;
-        s_ui.right_brow = nullptr;
-        s_ui.core = nullptr;
-        s_ui.antenna_tip = nullptr;
-        s_ui.mark = nullptr;
-        s_has_brows = false;
-        s_ui.pet_widget = pet_widget_create_simple(s_ui.art);
-    }
-    if (!is_egg && s_ui.pet_widget != nullptr) {
-        const int scale = std::strcmp(stage, "adult") == 0
-                              ? 175
-                              : std::strcmp(stage, "teen") == 0 ? 160 : 135;
-        lv_obj_set_style_transform_pivot_x(s_ui.pet_widget, 256,
-                                           LV_PART_MAIN);
-        lv_obj_set_style_transform_pivot_y(s_ui.pet_widget, 256,
-                                           LV_PART_MAIN);
-        lv_obj_set_style_transform_scale(s_ui.pet_widget, scale,
-                                         LV_PART_MAIN);
-        return;
-    }
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
     }
@@ -697,6 +666,11 @@ void StopIdleTimer() {
         lv_timer_delete(s_ui.idle_timer);
         s_ui.idle_timer = nullptr;
     }
+    if (s_ui.blink_timer != nullptr) {
+        lv_timer_delete(s_ui.blink_timer);
+        s_ui.blink_timer = nullptr;
+    }
+    s_blink_step = 0;
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
     }
@@ -709,121 +683,35 @@ bool IsEggStage() {
     return s_stage.empty() || s_stage == "egg";
 }
 
-void AnimSetX(void* var, int32_t value) {
-    lv_obj_set_x(static_cast<lv_obj_t*>(var), s_body_base_x + value);
-}
-
 void AnimSetY(void* var, int32_t value) {
     lv_obj_set_y(static_cast<lv_obj_t*>(var), s_body_base_y + value);
 }
 
-void AnimSetSpin(void* var, int32_t value) {
-    lv_obj_set_style_transform_rotation(static_cast<lv_obj_t*>(var), value,
-                                        LV_PART_MAIN);
-}
-
-void AnimSetScale(void* var, int32_t value) {
-    lv_obj_set_style_transform_scale(static_cast<lv_obj_t*>(var), value,
-                                     LV_PART_MAIN);
-}
-
 void StartIdleMotion() {
-    if (s_ui.pet_widget != nullptr) {
-        return;
-    }
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
     }
 
     lv_anim_delete(body, nullptr);
-    if (s_ui.core != nullptr) {
-        lv_anim_delete(s_ui.core, nullptr);
-        lv_obj_set_style_transform_scale(s_ui.core, 256, LV_PART_MAIN);
-    }
     lv_obj_set_x(body, s_body_base_x);
     lv_obj_set_y(body, s_body_base_y);
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
 
-    lv_anim_t anim;
-    if (s_ui.core != nullptr) {
-        lv_anim_init(&anim);
-        lv_anim_set_var(&anim, s_ui.core);
-        lv_anim_set_exec_cb(&anim, AnimSetScale);
-        lv_anim_set_values(&anim, 256, s_mood == PetMood::Sleep ? 285 : 300);
-        lv_anim_set_duration(&anim, s_mood == PetMood::Sleep ? 1600 : 900);
-        lv_anim_set_playback_duration(&anim,
-                                      s_mood == PetMood::Sleep ? 1600 : 900);
-        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-        lv_anim_start(&anim);
-    }
-
-    if (IsEggStage()) {
-        lv_anim_init(&anim);
-        lv_anim_set_var(&anim, body);
-        lv_anim_set_exec_cb(&anim, AnimSetSpin);
-        lv_anim_set_values(&anim, -70, 70);
-        lv_anim_set_duration(&anim, 900);
-        lv_anim_set_playback_duration(&anim, 900);
-        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-        lv_anim_start(&anim);
-        return;
-    }
-
-    if (s_mood == PetMood::Sleep) {
-        lv_anim_init(&anim);
-        lv_anim_set_var(&anim, body);
-        lv_anim_set_exec_cb(&anim, AnimSetY);
-        lv_anim_set_values(&anim, 0, -4);
-        lv_anim_set_duration(&anim, 1600);
-        lv_anim_set_playback_duration(&anim, 1600);
-        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-        lv_anim_start(&anim);
-        return;
-    }
-
     if (s_mood == PetMood::Think) {
-        lv_anim_init(&anim);
-        lv_anim_set_var(&anim, body);
-        lv_anim_set_exec_cb(&anim, AnimSetSpin);
-        lv_anim_set_values(&anim, -18, 18);
-        lv_anim_set_duration(&anim, 1500);
-        lv_anim_set_playback_duration(&anim, 1500);
-        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-        lv_anim_start(&anim);
+        // 思考状态保持静态，减少持续重绘。
         return;
     }
 
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetX);
-    lv_anim_set_values(&anim, -36, 36);
-    lv_anim_set_duration(&anim, 1100);
-    lv_anim_set_playback_duration(&anim, 1100);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-    lv_anim_start(&anim);
-
+    // 普通待机只保留一种轻微上下呼吸，位移不超过 2 像素。
+    const bool slow = IsEggStage() || s_mood == PetMood::Sleep;
+    lv_anim_t anim;
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, body);
     lv_anim_set_exec_cb(&anim, AnimSetY);
-    lv_anim_set_values(&anim, 0, -8);
-    lv_anim_set_duration(&anim, 280);
-    lv_anim_set_playback_duration(&anim, 280);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-    lv_anim_start(&anim);
-
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetSpin);
-    lv_anim_set_values(&anim, -28, 28);
-    lv_anim_set_duration(&anim, 1100);
-    lv_anim_set_playback_duration(&anim, 1100);
+    lv_anim_set_values(&anim, 0, -2);
+    lv_anim_set_duration(&anim, slow ? 2200 : 1500);
+    lv_anim_set_playback_duration(&anim, slow ? 2200 : 1500);
     lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_start(&anim);
@@ -837,10 +725,6 @@ void RestartIdleAsync(void* arg) {
 }
 
 void PlayPetRoll() {
-    if (s_ui.pet_widget != nullptr) {
-        pet_widget_trigger_happy(s_ui.pet_widget);
-        return;
-    }
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
@@ -851,16 +735,18 @@ void PlayPetRoll() {
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, body);
     lv_anim_set_user_data(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetSpin);
-    lv_anim_set_values(&anim, 0, 3600);
-    lv_anim_set_duration(&anim, IsEggStage() ? 700 : 820);
+    lv_anim_set_exec_cb(&anim, AnimSetY);
+    lv_anim_set_values(&anim, 0, -10);
+    lv_anim_set_duration(&anim, 160);
+    lv_anim_set_playback_duration(&anim, 160);
+    lv_anim_set_playback_delay(&anim, 40);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_set_completed_cb(&anim, [](lv_anim_t* finished) {
         auto* pet = static_cast<lv_obj_t*>(lv_anim_get_user_data(finished));
         if (pet == nullptr) {
             return;
         }
-        lv_obj_set_style_transform_rotation(pet, 0, LV_PART_MAIN);
+        lv_obj_set_y(pet, s_body_base_y);
         if (pet == s_ui.body &&
             s_screen_active.load(std::memory_order_relaxed)) {
             ApplyFace(s_base_mood);
@@ -872,7 +758,7 @@ void PlayPetRoll() {
 
 void StartIdleTimer() {
     StartIdleMotion();
-    if (s_ui.idle_timer == nullptr) {
+    if (s_ui.idle_timer == nullptr && !s_ui.use_image_art) {
         auto on_idle_tick = [](lv_timer_t*) {
             if (!s_screen_active.load(std::memory_order_relaxed) ||
                 s_ui.left_eye == nullptr ||
@@ -896,6 +782,33 @@ void StartIdleTimer() {
             lv_timer_set_repeat_count(s_ui.idle_timer,
                                       LV_ANIM_REPEAT_INFINITE);
         }
+    }
+    if (s_ui.blink_timer == nullptr) {
+        auto on_blink_tick = [](lv_timer_t* timer) {
+            if (!s_screen_active.load(std::memory_order_relaxed) ||
+                s_ui.body == nullptr || IsEggStage() ||
+                s_mood == PetMood::Sleep || s_mood == PetMood::Happy ||
+                s_mood == PetMood::Celebrate) {
+                s_blink_step = 0;
+                lv_timer_set_period(timer, 4500);
+                return;
+            }
+            if (s_blink_step == 0) {
+                lv_image_set_src(s_ui.body, BlinkImagePath(0));
+                s_blink_step = 1;
+                lv_timer_set_period(timer, 90);
+            } else if (s_blink_step == 1) {
+                lv_image_set_src(s_ui.body, BlinkImagePath(1));
+                s_blink_step = 2;
+                lv_timer_set_period(timer, 90);
+            } else {
+                s_blink_step = 0;
+                lv_image_set_src(s_ui.body,
+                                 PetImagePath(s_mood, IsEggStage()));
+                lv_timer_set_period(timer, 4500);
+            }
+        };
+        s_ui.blink_timer = lv_timer_create(on_blink_tick, 4500, nullptr);
     }
 }
 
@@ -1202,7 +1115,10 @@ void StartWorker(RequestKind kind) {
     }
 
     if (kind == RequestKind::Load) {
-        SetStatus(I18n::T("加载中..."));
+        // 有缓存时静默刷新，避免重新进入页面先闪一下“加载中”。
+        if (!s_has_state) {
+            SetStatus(I18n::T("加载中..."));
+        }
     } else if (kind == RequestKind::Feed) {
         SetStatus(I18n::T("正在喂食..."));
     } else {
@@ -1355,13 +1271,15 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
     s_ui = PetUi{};
     s_ui.screen = screen;
     s_return_screen = return_screen;
-    s_has_state = false;
-    s_state = PetState{};
-    s_stage.clear();
+    // 保留进程内最近一次成功获取的状态，重新进入时先显示缓存，
+    // 再由 LifecycleCallback 异步刷新服务端数据。
+    if (!s_has_state) {
+        s_stage.clear();
+    }
 
     BuildHeader(screen);
     BuildContent(screen);
-    BuildPetArt("egg");
+    BuildPetArt(s_stage.empty() ? "egg" : s_stage.c_str());
     UpdateActionButton();
 
     s_bound_screen = screen;

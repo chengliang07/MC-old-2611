@@ -396,8 +396,16 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
 
     // 下载新的资源文件
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready, skip asset download");
+        return false;
+    }
     auto http = network->CreateHttp(0);
-    
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        return false;
+    }
+
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
         return false;
