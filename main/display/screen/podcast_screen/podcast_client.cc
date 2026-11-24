@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -9,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,6 +35,14 @@ constexpr int kHttpTimeoutMs = 10000;
 
 // 列表响应缓存：接口本身约 2-3 秒，避免同一次入口/下拉刷新重复请求。
 std::mutex s_list_cache_mutex;
+// 同一集可能被多个线程同时解析（页面预取 + 用户点击 + 后台任务），
+// 让后来者等第一个的结果，避免重复发请求（实测同一集发了 3 次、白花十几秒）。
+std::mutex s_inflight_mutex;
+std::condition_variable s_inflight_cv;
+std::set<std::string> s_inflight;
+// 所有设备 API 请求串行化：并发 TLS 会话会把内部 RAM（实测只剩 130KB 量级）
+// 和连接槽吃光，播放流就会 "Failed to open new connection in specified timeout"。
+std::mutex s_api_gate_mutex;
 PodcastList s_list_cache;
 time_t s_list_cache_at = 0;
 
@@ -166,7 +177,14 @@ bool UrlBelongsToApiHost(const std::string& url) {
 }
 
 bool HttpGet(const std::string& url, const std::string& device_token,
-             std::string& body, int& status, std::string& error) {
+             std::string& body, int& status, std::string& error,
+             int timeout_ms = kHttpTimeoutMs, bool hold_gate = true) {
+    // 逐个来：并发的 TLS 握手会互相挤占内部 RAM，直接导致建流失败。
+    // 调用方已持锁时（hold_gate=false）不再重复加锁。
+    std::unique_lock<std::mutex> gate(s_api_gate_mutex, std::defer_lock);
+    if (hold_gate) {
+        gate.lock();
+    }
     auto network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         error = "网络未连接";
@@ -179,11 +197,12 @@ bool HttpGet(const std::string& url, const std::string& device_token,
     }
 
     const std::string authorization = "Bearer " + device_token;
-    http->SetTimeout(kHttpTimeoutMs);
+    http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
     // Cloudflare 会直接 403 掉不带 User-Agent 的请求（固件里表现为“设备未授权”）。
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    http->SetHeader("Connection", "close");
+    // 不再强制 close：每次点击都重握手 TLS 要多花数百毫秒。
+    http->SetHeader("Connection", "keep-alive");
     http->SetHeader("Authorization", authorization);
     if (!http->Open("GET", url)) {
         error = "连接播客服务失败";
@@ -434,9 +453,63 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     int status = 0;
     const std::string url = api_base + "/api/device/v1/podcasts/" +
                             UrlEncode(podcast_id) + "/play";
-    if (!HttpGet(url, device_token, body, status, error)) {
-        result.error = error;
+
+    // 并发去重：如果别的线程正在解析同一集，就等它的结果。
+    struct InflightClaim {
+        std::string id;
+        bool held = false;
+        ~InflightClaim() {
+            if (!held) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lk(s_inflight_mutex);
+                s_inflight.erase(id);
+            }
+            s_inflight_cv.notify_all();
+        }
+    } claim;
+    {
+        std::unique_lock<std::mutex> lk(s_inflight_mutex);
+        if (s_inflight.count(podcast_id) != 0) {
+            s_inflight_cv.wait_for(lk, std::chrono::seconds(20), [&]() {
+                return s_inflight.count(podcast_id) == 0;
+            });
+            if (TryCachedPlayUrl(podcast_id, result)) {
+                ESP_LOGI(TAG, "[timing] resolve shared id=%s dt=%dms",
+                         podcast_id.c_str(),
+                         static_cast<int>(
+                             (esp_timer_get_time() - started_us) / 1000));
+                return result;
+            }
+        }
+        s_inflight.insert(podcast_id);
+        claim.id = podcast_id;
+        claim.held = true;
+    }
+    // 先拿全局请求锁再二次查缓存：预取线程可能刚把这条地址填好，
+    // 直接命中就省掉一次 2~3 秒的请求（点击时这点最明显）。
+    std::lock_guard<std::mutex> gate(s_api_gate_mutex);
+    if (TryCachedPlayUrl(podcast_id, result)) {
+        ESP_LOGI(TAG, "[timing] resolve cache hit(queued) id=%s dt=%dms",
+                 podcast_id.c_str(),
+                 static_cast<int>((esp_timer_get_time() - started_us) / 1000));
         return result;
+    }
+    // 服务端偶发卡顿（实测出现过 10s 超时）：用更短的超时 + 立刻重试，
+    // 比在默认 10s 上干等再重试快得多。
+    constexpr int kResolveTimeoutMs = 5000;
+    if (!HttpGet(url, device_token, body, status, error, kResolveTimeoutMs,
+                 /*hold_gate=*/false)) {
+        ESP_LOGW(TAG, "resolve failed (%s), retrying once", error.c_str());
+        error.clear();
+        body.clear();
+        status = 0;
+        if (!HttpGet(url, device_token, body, status, error,
+                     kResolveTimeoutMs, /*hold_gate=*/false)) {
+            result.error = error;
+            return result;
+        }
     }
 
     cJSON* root = cJSON_Parse(body.c_str());

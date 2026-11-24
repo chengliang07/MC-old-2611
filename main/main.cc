@@ -33,7 +33,8 @@
 // ---------------------------------------------------------------------------
 // 一次性设备凭据导入：把 SD 卡根目录的绑定文件写进 NVS，避免 token 进固件。
 //
-// 出厂/换绑：把 podcast_token.txt 放到 SD 卡根目录，开机导入一次后文件被删除。
+// 出厂/换绑：把 podcast_token.txt 放到 SD 卡根目录，开机导入一次；
+// 文件不会被删除，NVS 已有 token 时自动跳过，等于一张"随身备份凭据"。
 // 内容一行一个 key=value（'#' 开头为注释；整份只有一行裸 token 也接受）：
 //     token=<设备令牌>                   // 必填
 //     api_base=https://www.yi-edu.com    // 可选，不给则沿用原值
@@ -145,6 +146,27 @@ static void ImportProvisioningFromSdCard() {
         api_base.clear();
     }
 
+    // NVS 里已经有 token 就跳过：卡里的文件可以长期留着当"备份凭据"。
+    // 整片烧录（0x0 合并镜像 / erase_flash）会抹掉 NVS，开机后这张卡会自动补回，
+    // 不用每次刷机都重新拷一遍文件。
+    {
+        nvs_handle_t probe = 0;
+        if (nvs_open(kProvisionNs, NVS_READONLY, &probe) == ESP_OK) {
+            char existing[16] = {};
+            size_t len = sizeof(existing);
+            const esp_err_t probe_err =
+                nvs_get_str(probe, "device_token", existing, &len);
+            nvs_close(probe);
+            if (probe_err == ESP_OK && len > 1) {
+                ESP_LOGI(TAG,
+                         "provisioning: nvs already provisioned "
+                         "(token_len=%u), card file kept",
+                         static_cast<unsigned>(len - 1));
+                return;
+            }
+        }
+    }
+
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(kProvisionNs, NVS_READWRITE, &handle);
     if (err == ESP_OK) {
@@ -167,9 +189,7 @@ static void ImportProvisioningFromSdCard() {
     ESP_LOGI(TAG, "provisioning: imported token_len=%u api_base=%s",
              static_cast<unsigned>(token.size()),
              api_base.empty() ? "(unchanged)" : api_base.c_str());
-    if (std::remove(kProvisionPath) == 0) {
-        ESP_LOGI(TAG, "provisioning: %s removed", kProvisionPath);
-    }
+    // 文件保留：NVS 被整片烧录抹掉后，下一次开机会自动补回来。
 }
 
 // 单行启动横幅：一眼确认"这块板子跑的是哪份代码、连的是哪个后端"。

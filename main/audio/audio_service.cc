@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include "board.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -867,7 +868,11 @@ void AudioService::SetExternalPlayback(bool active) {
         // 接管喇叭：停掉省电检查，避免 15s 后把播客静音。
         esp_timer_stop(audio_power_timer_);
         last_output_time_ = std::chrono::steady_clock::now();
-        ESP_LOGI(TAG, "external playback begin (power timer held)");
+        // 关掉 WiFi 省电：省电模式下设备只在 DTIM 窗口醒来收包，实测播客
+        // 吞吐被砍半、抖动放大，表现为"出声慢 + 一直卡"。口语页本来就这么做，
+        // 播客这条路径以前漏了。
+        Board::GetInstance().SetPowerSaveMode(false);
+        ESP_LOGI(TAG, "external playback begin (power timer held, wifi ps off)");
         return;
     }
     if (was_active) {
@@ -875,7 +880,8 @@ void AudioService::SetExternalPlayback(bool active) {
         last_output_time_ = std::chrono::steady_clock::now();
         esp_timer_start_periodic(audio_power_timer_,
                                  AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
-        ESP_LOGI(TAG, "external playback end (power timer resumed)");
+        Board::GetInstance().SetPowerSaveMode(true);
+        ESP_LOGI(TAG, "external playback end (power timer resumed, wifi ps on)");
     }
 }
 

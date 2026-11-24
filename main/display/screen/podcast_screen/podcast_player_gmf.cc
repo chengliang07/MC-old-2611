@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <esp_timer.h>
+#include <esp_wifi.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -233,6 +235,30 @@ int64_t ConsumedAudioBytes(uint32_t generation) {
     int64_t prev = s_consumed_live.load(std::memory_order_relaxed);
     if (consumed > prev) {
         s_consumed_live.store(consumed, std::memory_order_relaxed);
+    }
+
+    // 诊断：进度条每 500ms 调到这里，每 2 秒打一次真实吞吐 + 信号强度。
+    // 用来区分"网络喂不满"（吞吐 < 音频码率就必然卡）与"解码/缓冲不足"。
+    static int64_t last_us = 0;
+    static int64_t last_bytes = 0;
+    const int64_t now_us = esp_timer_get_time();
+    if (last_us == 0) {
+        last_us = now_us;
+        last_bytes = consumed;
+    } else if (now_us - last_us >= 2000000) {
+        const double secs = static_cast<double>(now_us - last_us) / 1000000.0;
+        const double kbps =
+            (static_cast<double>(consumed - last_bytes) / 1024.0) / secs;
+        int rssi = 0;
+        wifi_ap_record_t ap_info = {};
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            rssi = ap_info.rssi;
+        }
+        ESP_LOGI(TAG, "[speed] %.1fKB/s rssi=%d filled=%u total=%u",
+                 kbps, rssi, static_cast<unsigned>(filled),
+                 static_cast<unsigned>(stats.total_bytes));
+        last_us = now_us;
+        last_bytes = consumed;
     }
     return consumed;
 }
@@ -633,11 +659,12 @@ bool RegisterPodcastHttpIo(esp_asp_handle_t player, PlayerContext* player_ctx) {
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.event_handle = PodcastHttpEvent;
     http_cfg.user_data = player_ctx;
-    // 播客是持续码流，扩大环形缓冲以吸收 WiFi/4G 抖动，减少解码欠载卡顿。
-    // 短发音不需要大缓冲，避免每次点单词都多占 PSRAM。
+    // 播客是持续码流，缓冲要能吸收 WiFi 抖动；但缓冲过大会推迟首帧：
+    // 512KB 下实测"响应头→首帧"要 3.7s，128KB（约 16 秒音频）足够抗抖动。
     const bool quick = s_quick_url.load(std::memory_order_relaxed);
     http_cfg.io_cfg.buffer_cfg.buffer_size =
-        quick ? 64 * 1024 : 512 * 1024;
+        quick ? 64 * 1024 : 128 * 1024;
+    // 16KB 是实测不卡顿的读粒度；4KB 会把 TLS 往返放大成欠载（卡顿）。
     http_cfg.io_cfg.buffer_cfg.io_size = quick ? 4 * 1024 : 16 * 1024;
     // 进度/续传要靠 speed monitor 的字节统计：关掉它 get_speed_stats 恒返回 0，
     // 进度条会永远停在 0、重连也会从 0 重播。

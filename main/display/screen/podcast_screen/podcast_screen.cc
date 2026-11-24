@@ -688,6 +688,9 @@ void BeginPlayAt(size_t index) {
     if (index >= s_items.size()) {
         return;
     }
+    // 点击即关 WiFi 省电：省电模式下首包要等 DTIM，实测"出声慢 + 卡顿"主要由它造成。
+    // 播放结束时由 AudioService::SetExternalPlayback(false) 恢复。
+    Board::GetInstance().SetPowerSaveMode(false);
     const PodcastItem item = s_items[index];
     s_current_index = index;
     s_current_podcast_id = item.id;
@@ -819,7 +822,10 @@ struct PrefetchTaskArg {
     std::vector<std::string> ids;
 };
 
-// 任务函数必须是普通函数指针，不能捕获外部变量，参数一律走 arg。
+// 只预取"播放地址"（写进 play 缓存，点击时零等待）。
+// 不再在这里 Prepare 播放器：实测预播会把管线占了 45s 且始终没就绪
+// （first_pcm_buffered 从未出现），点击时反而要花 1s 拆掉它，
+// 而且它和点击后的请求并发抢 TLS/带宽，正是那次 10s 超时的诱因之一。
 void PrefetchFirstPlayUrlWorker(void* data) {
     std::unique_ptr<PrefetchTaskArg> arg(static_cast<PrefetchTaskArg*>(data));
     const uint32_t session = arg->session;
@@ -832,28 +838,13 @@ void PrefetchFirstPlayUrlWorker(void* data) {
         }
         const std::string cached = FindCachedAudio(arg->ids[i]);
         if (!cached.empty()) {
-            if (i == 0 && !s_playing &&
-                !s_preparing_play.load(std::memory_order_acquire)) {
-                std::string prepare_error;
-                if (PodcastPlayer::Prepare(cached, prepare_error)) {
-                    ESP_LOGI(TAG, "prepared cached first podcast");
-                }
-            }
             continue;
         }
         std::string error;
         const PodcastPlayInfo play =
             PodcastClient::ResolvePlayUrl(arg->ids[i], error);
-        if (i == 0 && play.ok &&
-            generation ==
-                s_prefetch_generation.load(std::memory_order_acquire) &&
-            IsCurrentSession(session) && !s_playing &&
-            !s_preparing_play.load(std::memory_order_acquire)) {
-            // 首条先真正打开音频流并解到首帧，点击时直接出声。
-            std::string prepare_error;
-            if (PodcastPlayer::Prepare(play.url, prepare_error)) {
-                ESP_LOGI(TAG, "prepared first podcast");
-            }
+        if (play.ok) {
+            ESP_LOGI(TAG, "prefetched play url #%u", static_cast<unsigned>(i));
         }
     }
     vTaskDelete(nullptr);
@@ -864,7 +855,9 @@ void PrefetchFirstPlayUrl() {
         s_playing || s_preparing_play.load(std::memory_order_acquire)) {
         return;
     }
-    constexpr size_t kPrefetchCount = 4;
+    // 只预取第一条：预取 4 条会连续开 4 次 TLS，与点击后的建流抢资源，
+    // 实测导致"播放失败@aud_dec"（建流超时）。
+    constexpr size_t kPrefetchCount = 1;
     auto* arg = new PrefetchTaskArg{};
     arg->session = CurrentSession();
     arg->generation =
@@ -978,7 +971,9 @@ void ApplyLoadResult(void* data) {
         SetStatusDirect(I18n::T("选择节目开始收听"));
     }
     RebuildList();
-    StartAudioCacheWorker();
+    // 不再在这里启动"整集音频缓存"：它会连续下载多集，和点击后的建流抢带宽，
+    // 实测直接把第二集撞成"播放失败@aud_dec"（建流超时）。
+    // 缓存留作后续"播放中顺手存"的独立开关，不在首播路径上。
 }
 
 void StartLoadWorker(bool manual_refresh) {
