@@ -135,6 +135,36 @@ bool LoadConfig(std::string& api_base, std::string& device_token,
     return true;
 }
 
+// 取出 URL 的 host（跳过 scheme 与端口），用于判断"是不是我们自己的域名"。
+std::string HostOfUrl(const std::string& url) {
+    const size_t scheme = url.find("://");
+    const size_t begin = scheme == std::string::npos ? 0 : scheme + 3;
+    size_t end = url.find_first_of("/?#", begin);
+    if (end == std::string::npos) {
+        end = url.size();
+    }
+    std::string host = url.substr(begin, end - begin);
+    const size_t colon = host.find(':');
+    if (colon != std::string::npos) {
+        host = host.substr(0, colon);
+    }
+    for (auto& c : host) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return host;
+}
+
+bool UrlBelongsToApiHost(const std::string& url) {
+    Settings settings(kSettingsNs, false);
+    const std::string api_base = TrimTrailingSlash(
+        settings.GetString(kKeyApiBase, CONFIG_PODCAST_API_BASE));
+    const std::string api_host = HostOfUrl(api_base);
+    if (api_host.empty()) {
+        return false;
+    }
+    return HostOfUrl(url) == api_host;
+}
+
 bool HttpGet(const std::string& url, const std::string& device_token,
              std::string& body, int& status, std::string& error) {
     auto network = Board::GetInstance().GetNetwork();
@@ -467,6 +497,10 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
 std::string PodcastClient::DeviceToken() {
     Settings settings(kSettingsNs, false);
     return settings.GetString(kKeyDeviceToken, CONFIG_PODCAST_DEVICE_TOKEN);
+}
+
+bool PodcastClient::IsOwnHost(const std::string& url) {
+    return UrlBelongsToApiHost(url);
 }
 
 void PodcastClient::PrefetchListAsync() {

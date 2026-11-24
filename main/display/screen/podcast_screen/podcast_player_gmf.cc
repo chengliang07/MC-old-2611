@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <strings.h>
@@ -112,6 +114,7 @@ std::atomic<uint32_t> s_prepare_generation{0};
 // stop 会阻塞到管线线程退出（最长等 HTTP 读超时），不能在 UI 线程里调用。
 // 生命周期锁只保护“正在后台 stop 的播放器指针”，绝不能跨越 stop 调用持有。
 std::mutex s_lifecycle_mutex;
+std::condition_variable s_stop_cv;  // 后台 stop 完成时唤醒等待销毁的一方
 esp_asp_handle_t s_pending_stop_player = nullptr;
 std::atomic<esp_gmf_io_handle_t> s_http_io{nullptr};
 std::atomic<uint32_t> s_http_io_generation{0};
@@ -442,6 +445,7 @@ void PodcastStopTask(void* data) {
         std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
         if (s_pending_stop_player == arg->player) {
             s_pending_stop_player = nullptr;
+            s_stop_cv.notify_all();
         }
     }
     vTaskDelete(nullptr);
@@ -590,8 +594,15 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
         const std::string user_agent = SystemInfo::GetUserAgent();
         esp_http_client_set_header(client, "User-Agent", user_agent.c_str());
 
+        // 只对自家域名带 Bearer：签名音频地址在第三方域，且 302 之后 GMF
+        // 不会再次触发 PRE_REQUEST，头会一路带到跳转目标。
         const std::string token = PodcastClient::DeviceToken();
-        if (!token.empty()) {
+        std::string url_copy;
+        {
+            std::lock_guard<std::mutex> lock(s_player_mutex);
+            url_copy = s_current_url;
+        }
+        if (!token.empty() && PodcastClient::IsOwnHost(url_copy)) {
             const std::string authorization = "Bearer " + token;
             esp_http_client_set_header(client, "Authorization",
                                        authorization.c_str());
@@ -607,6 +618,11 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
         }
     } else if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
         ParseResponseHeaders(client, player_ctx->generation);
+        // 3xx 之后可能是第三方域（CDN/签名存储）：把 Bearer 摘掉再跳。
+        const int status = esp_http_client_get_status_code(client);
+        if (status >= 300 && status < 400) {
+            esp_http_client_delete_header(client, "Authorization");
+        }
     }
     return 0;
 }
@@ -983,39 +999,23 @@ void PodcastPlayTask(void* arg) {
     }
 
     // 切换节目时 stop 在后台执行，必须等它退出后再销毁播放器，避免 UAF。
-    bool stop_pending = false;
-    {
-        std::lock_guard<std::mutex> life_lock(s_lifecycle_mutex);
-        stop_pending = (s_pending_stop_player == player);
-        if (!stop_pending) {
-            std::lock_guard<std::mutex> lock(s_player_mutex);
-            if (s_player == player) {
-                s_player = nullptr;
-            }
-        }
-    }
-    if (stop_pending) {
-        bool stopped = false;
-        for (int i = 0; i < 1500; ++i) {
-            {
-                std::lock_guard<std::mutex> life_lock(s_lifecycle_mutex);
-                if (s_pending_stop_player != player) {
-                    stopped = true;
-                    break;
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        if (!stopped) {
-            ESP_LOGE(TAG, "stop timeout, keep player %p alive", player);
-            FinishPlayTask(generation);
-            return;
-        }
-    }
-
+    // 关键点：等待用条件变量（不再 10ms 轮询），并且"确认没有 pending stop"
+    // 与"销毁"在同一个 lifecycle 临界区里完成 —— 原来两者分属两把锁，
+    // DetachCurrentPlayback 能插进中间，造成 stop 与 destroy 并发作用于同一句柄。
     bool still_current = false;
     {
-        std::lock_guard<std::mutex> api_lock(s_api_mutex);
+        std::unique_lock<std::mutex> life_lock(s_lifecycle_mutex);
+        if (s_pending_stop_player == player) {
+            const bool stopped = s_stop_cv.wait_for(
+                life_lock, std::chrono::seconds(15),
+                [&player]() { return s_pending_stop_player != player; });
+            if (!stopped) {
+                ESP_LOGE(TAG, "stop timeout, keep player %p alive", player);
+                life_lock.unlock();
+                FinishPlayTask(generation);
+                return;
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(s_player_mutex);
             if (s_player == player) {

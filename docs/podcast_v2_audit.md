@@ -85,4 +85,4 @@
 - 20KB IO 缓冲小于旧 1.5MB，极端弱网下抗抖动能力下降；先以默认值验证，必要时只增大 IO 缓冲，不恢复自建环形缓冲。
 - `stop` 最长需等一次 HTTP 读超时（8s）才返回，但已在后台任务执行，不阻塞 UI；若极端情况下
   15s 仍未退出，保留播放器不销毁以避免 use-after-free，代价是泄漏一个管线实例。
-- 回退点：`main/display/screen/podcast_screen/podcast_player.cc` 保留旧实现；将 `main/CMakeLists.txt` 的源文件切回旧文件即可。
+- 回退点：**已取消**。旧实现 `podcast_player.cc` 在 V2 稳定后已删除——它当时既不参与编译、又与 `podcast_player.h` 的接口不兼容（缺 `Prepare/PlayPrepared`），切回旧文件会直接编译链接失败，并不是可用的安全网。
