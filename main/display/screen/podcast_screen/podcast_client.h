@@ -22,6 +22,4 @@ public:
     // 只对自家域名（api_base 的 host）附 Bearer：签名音频地址在第三方域，
     // 不该带着设备令牌过去。
     static bool IsOwnHost(const std::string& url);
-    // 开机后台预取一次节目列表，落到 SD 缓存，首次进入播客页可直接显示。
-    static void PrefetchListAsync();
 };

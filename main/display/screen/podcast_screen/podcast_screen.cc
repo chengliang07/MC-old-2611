@@ -105,15 +105,15 @@ constexpr const char* kAudioCacheDir = "/sdcard/system/podcast";
 constexpr size_t kMaxCachedEpisodes = 12;
 constexpr int64_t kMaxAudioFileBytes = 96 * 1024 * 1024;
 
-void SaveListCache() {
+// 落盘在加载线程里做（不要再放回 LVGL 线程：写卡几十到几百毫秒会吃掉帧）。
+void SaveListCacheItems(const PodcastList& items, time_t at) {
     FILE* file = std::fopen(kListCachePath, "w");
     if (file == nullptr) {
         return;
     }
-    s_items_at = std::time(nullptr);
     // newlib-nano 不支持 %lld，写出来会变成 "ld"，导致每次进页都被判为过期。
-    std::fprintf(file, "#%d\n", static_cast<int>(s_items_at));
-    for (const auto& item : s_items) {
+    std::fprintf(file, "#%d\n", static_cast<int>(at));
+    for (const auto& item : items) {
         std::fprintf(file, "%s|%s|%d|%d\n", item.id.c_str(),
                      item.title.c_str(), item.duration_seconds,
                      item.completed ? 1 : 0);
@@ -972,7 +972,6 @@ void ApplyLoadResult(void* data) {
     s_items = std::move(result->items);
     s_cached_items = s_items;
     s_items_at = std::time(nullptr);
-    SaveListCache();
     if (s_items.empty()) {
         SetStatusDirect(I18n::T("暂无节目"));
     } else if (!s_preparing_play.load(std::memory_order_acquire)) {
@@ -1003,6 +1002,13 @@ void StartLoadWorker(bool manual_refresh) {
                 std::string error;
                 result->items = PodcastClient::FetchPodcasts(error);
                 result->error = std::move(error);
+                // 缓存写在加载线程里，避免 LVGL 线程同步写 SD 卡吃帧。
+                if (result->error.empty() && !result->items.empty() &&
+                    result->generation ==
+                        s_load_generation.load(std::memory_order_acquire) &&
+                    SdCardManager::GetInstance().IsMounted()) {
+                    SaveListCacheItems(result->items, std::time(nullptr));
+                }
                 if (lv_async_call(ApplyLoadResult, result) != LV_RESULT_OK) {
                     if (result->generation ==
                         s_load_generation.load(
