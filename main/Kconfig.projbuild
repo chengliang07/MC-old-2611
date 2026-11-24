@@ -193,9 +193,11 @@ config PODCAST_API_BASE
 
 config PODCAST_DEVICE_TOKEN
     string "Podcast Device Token"
-    default "2f8651538e9b1f1cc635af67fb1acf0ed11bfc8e105b7dc5c48976472ce05520"
+    default ""
     help
-        Device token issued by the Yidu reading site. Leave empty to use NVS.
+        Device token issued by the Yidu reading site. Leave empty in source:
+        the token is provisioned into NVS (namespace "podcast", key
+        "device_token") at binding time. Never commit a real token here.
 
 config USE_AUDIO_PROCESSOR
     bool "Enable Audio Noise Reduction"

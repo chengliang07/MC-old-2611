@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "http.h"
 #include "settings.h"
+#include "system_info.h"
 
 namespace {
 
@@ -97,6 +98,8 @@ bool HttpRequest(const char* method, const std::string& path,
     const std::string url = std::string(kApiBase) + path;
     http->SetTimeout(kHttpTimeoutMs);
     http->SetHeader("Accept", "application/json");
+    // Cloudflare 会直接 403 掉不带 User-Agent 的请求（固件里表现为“设备未授权”）。
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
     http->SetHeader("Connection", "close");
     http->SetHeader("Authorization", "Bearer " + token);
     if (!content.empty()) {

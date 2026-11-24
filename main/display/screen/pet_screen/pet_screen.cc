@@ -486,12 +486,13 @@ void BuildPetArt(const char* stage) {
         lv_image_set_src(group, PetImagePath(s_base_mood, egg));
         lv_obj_set_size(group, 360, 360);
         s_body_base_x = 150;
-        s_body_base_y = 0;
+        // 只上移宠物本体，保持上一版的面板尺寸和缩放不变。
+        s_body_base_y = -40;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
         if (!egg) {
             const int scale = std::strcmp(stage, "adult") == 0
-                                  ? 108
-                                  : std::strcmp(stage, "teen") == 0 ? 102 : 96;
+                                  ? 216
+                                  : std::strcmp(stage, "teen") == 0 ? 204 : 192;
             lv_obj_set_style_transform_pivot_x(group, 180, LV_PART_MAIN);
             lv_obj_set_style_transform_pivot_y(group, 180, LV_PART_MAIN);
             lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
@@ -820,7 +821,7 @@ void OnStatsClicked(lv_event_t* /*event*/);
 void OnSwipeBack();
 void OnScreenUnloaded(lv_event_t* event);
 void OnScreenDeleted(lv_event_t* event);
-void StartWorker(RequestKind kind);
+void StartWorker(RequestKind kind, bool silent = false);
 
 lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
                        int32_t width, int32_t height, const char* text,
@@ -998,7 +999,7 @@ void BuildContent(lv_obj_t* screen) {
                  kColorAccent, OnStudyClicked, nullptr);
 
     s_ui.status = lv_label_create(screen);
-    lv_label_set_text(s_ui.status, I18n::T("加载中..."));
+    lv_label_set_text(s_ui.status, "");
     lv_obj_set_width(s_ui.status, 640);
     lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
@@ -1107,7 +1108,7 @@ void PostRequestResult(RequestResult* result) {
     }
 }
 
-void StartWorker(RequestKind kind) {
+void StartWorker(RequestKind kind, bool silent) {
     auto* context = new RequestResult{};
     context->kind = kind;
     if (!BeginRequest(context)) {
@@ -1119,7 +1120,7 @@ void StartWorker(RequestKind kind) {
         if (!s_has_state) {
             SetStatus(I18n::T("加载中..."));
         }
-    } else if (kind == RequestKind::Feed) {
+    } else if (kind == RequestKind::Feed && !silent) {
         SetStatus(I18n::T("正在喂食..."));
     } else {
         SetStatus(I18n::T("正在孵化..."));
@@ -1165,7 +1166,17 @@ void OnActionClicked(lv_event_t* /*event*/) {
         return;
     }
     if (s_state.food_balance >= 1 && s_state.satiety < 90) {
-        StartWorker(RequestKind::Feed);
+        // 先本地结算并给出反馈，网络请求放到后台，避免点按后干等。
+        PetState optimistic = s_state;
+        optimistic.food_balance -= 1;
+        const int fed_satiety = optimistic.satiety + 25;
+        optimistic.satiety = fed_satiety > 100 ? 100 : fed_satiety;
+        SetState(optimistic);
+        SetStatus(I18n::T("好吃！饱腹 +25"));
+        ApplyFace(PetMood::Happy);
+        PlayPetRoll();
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+        StartWorker(RequestKind::Feed, true);
     }
 }
 
@@ -1301,8 +1312,10 @@ void PetScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         StartIdleTimer();
         if (s_has_state) {
             SetState(s_state);
+            SetStatus("");
+        } else {
+            StartWorker(RequestKind::Load);
         }
-        StartWorker(RequestKind::Load);
     } else {
         ESP_LOGI(TAG, "unload: pet_screen");
         s_screen_active.store(false, std::memory_order_release);

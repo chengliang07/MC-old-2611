@@ -70,7 +70,7 @@ std::string BuildFallbackAudioUrl(const std::string& text) {
             encoded.push_back(kHex[ch & 0x0F]);
         }
     }
-    return "https://fanyi.baidu.com/gettts?lan=en&spd=3&source=web&text=" +
+    return "https://fanyi.baidu.com/gettts?lan=en&spd=4&source=web&text=" +
            encoded;
 }
 
@@ -120,8 +120,7 @@ void SaveTasksCache() {
         return;
     }
     s_tasks_cache_at = std::time(nullptr);
-    std::fprintf(file, "#%lld\n",
-                 static_cast<long long>(s_tasks_cache_at));
+    std::fprintf(file, "#%d\n", static_cast<int>(s_tasks_cache_at));
     for (const auto& task : s_tasks) {
         std::fprintf(file, "%s|%s|%s|%d|%d\n", task.id.c_str(),
                      task.task_date.c_str(), task.status.c_str(),
@@ -206,6 +205,9 @@ std::atomic<int64_t> s_busy_since_us{0};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 std::atomic<bool> s_submit_busy{false};
+std::atomic<uint32_t> s_pronounce_generation{0};
+std::atomic<bool> s_pronounce_retried{false};
+std::string s_pronounce_url;
 
 // 复习中断后保留进度：只保留在当前固件进程内，不做跨重启持久化。
 std::string s_history_task_id;
@@ -995,11 +997,47 @@ void OnCardClicked(lv_event_t* /*event*/) {
     UpdateCard();
 }
 
+void StartPronunciation(const std::string& url) {
+    std::string error;
+    if (!PodcastPlayer::Start(url, error)) {
+        SetStatus(error.c_str());
+    }
+}
+
+void OnPronouncePlayerEvent(PodcastPlayerEvent event, const char* /*detail*/,
+                            void* /*ctx*/) {
+    if (event != PodcastPlayerEvent::Error) {
+        return;
+    }
+    auto* generation = new uint32_t(
+        s_pronounce_generation.load(std::memory_order_acquire));
+    if (lv_async_call(
+            [](void* data) {
+                std::unique_ptr<uint32_t> failed_generation(
+                    static_cast<uint32_t*>(data));
+                if (!s_screen_active.load(std::memory_order_acquire) ||
+                    *failed_generation !=
+                        s_pronounce_generation.load(
+                            std::memory_order_acquire)) {
+                    return;
+                }
+                // 播放器偶发被上一条音频的 stop 卡住时自动重试一次。
+                if (!s_pronounce_retried.exchange(true)) {
+                    PodcastPlayer::Stop();
+                    StartPronunciation(s_pronounce_url);
+                } else {
+                    SetStatus(I18n::T("发音加载失败，请再点一次"));
+                }
+            },
+            generation) != LV_RESULT_OK) {
+        delete generation;
+    }
+}
+
 void OnPronounceClicked(lv_event_t* /*event*/) {
     if (s_current_index >= s_review.entries.size()) {
         return;
     }
-    std::string error;
     const EnglishEntry& entry = s_review.entries[s_current_index];
     const std::string& source =
         !entry.phrase.empty() ? entry.phrase : entry.term;
@@ -1010,10 +1048,11 @@ void OnPronounceClicked(lv_event_t* /*event*/) {
         SetStatus(I18n::T("暂无发音音频"));
         return;
     }
-    PodcastPlayer::SetEventCallback(nullptr, nullptr);
-    if (!PodcastPlayer::Start(url, error)) {
-        SetStatus(error.c_str());
-    }
+    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_pronounce_retried.store(false, std::memory_order_release);
+    s_pronounce_url = url;
+    PodcastPlayer::SetEventCallback(OnPronouncePlayerEvent, nullptr);
+    StartPronunciation(url);
 }
 
 void OnChoiceClicked(lv_event_t* event) {
@@ -1037,6 +1076,9 @@ void OnChoiceClicked(lv_event_t* event) {
         static_cast<lv_obj_t*>(lv_event_get_target(event));
     lv_obj_t* correct_button =
         s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
+    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_pronounce_url.clear();
+    PodcastPlayer::SetEventCallback(nullptr, nullptr);
     PodcastPlayer::Stop();
     Application::GetInstance().PlaySound(
         selected == s_choice_correct ? Lang::Sounds::OGG_SUCCESS
@@ -1067,6 +1109,10 @@ void OnChoiceClicked(lv_event_t* event) {
 }
 
 void OnBackToListClicked(lv_event_t* /*event*/) {
+    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_pronounce_url.clear();
+    PodcastPlayer::SetEventCallback(nullptr, nullptr);
+    PodcastPlayer::Stop();
     SaveReviewProgress();
     s_review = EnglishReview{};
     s_current_task_id.clear();
@@ -1145,6 +1191,9 @@ void OnScreenUnloaded(lv_event_t* event) {
     }
     CancelChoiceFeedback();
     s_bound_screen = nullptr;
+    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_pronounce_url.clear();
+    PodcastPlayer::SetEventCallback(nullptr, nullptr);
     PodcastPlayer::Stop();
     s_screen_active.store(false, std::memory_order_release);
     s_busy.store(false, std::memory_order_release);
@@ -1273,6 +1322,10 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         }
     } else {
         ESP_LOGI(TAG, "unload: english_screen");
+        s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_pronounce_url.clear();
+        PodcastPlayer::SetEventCallback(nullptr, nullptr);
+        PodcastPlayer::Stop();
         s_screen_active.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);

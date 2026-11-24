@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "http.h"
 #include "settings.h"
+#include "system_info.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -94,6 +95,8 @@ bool HttpRequest(const char* method, const std::string& url,
 
     http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
+    // Cloudflare 会直接 403 掉不带 User-Agent 的请求（固件里表现为“设备未授权”）。
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
     http->SetHeader("Connection", "close");
     http->SetHeader("Authorization", "Bearer " + device_token);
     if (!content.empty()) {

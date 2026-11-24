@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 #include "http.h"
 #include "settings.h"
+#include "system_info.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -150,6 +151,8 @@ bool HttpGet(const std::string& url, const std::string& device_token,
     const std::string authorization = "Bearer " + device_token;
     http->SetTimeout(kHttpTimeoutMs);
     http->SetHeader("Accept", "application/json");
+    // Cloudflare 会直接 403 掉不带 User-Agent 的请求（固件里表现为“设备未授权”）。
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
     http->SetHeader("Connection", "close");
     http->SetHeader("Authorization", authorization);
     if (!http->Open("GET", url)) {
@@ -384,9 +387,9 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     PodcastPlayInfo result;
     const int64_t started_us = esp_timer_get_time();
     if (TryCachedPlayUrl(podcast_id, result)) {
-        ESP_LOGI(TAG, "[timing] resolve cache hit id=%s dt=%lldms",
+        ESP_LOGI(TAG, "[timing] resolve cache hit id=%s dt=%dms",
                  podcast_id.c_str(),
-                 static_cast<long long>(
+                 static_cast<int>(
                      (esp_timer_get_time() - started_us) / 1000));
         return result;
     }
@@ -432,9 +435,9 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
         return result;
     }
     result.ok = true;
-    ESP_LOGI(TAG, "[timing] resolve api id=%s dt=%lldms status=%d",
+    ESP_LOGI(TAG, "[timing] resolve api id=%s dt=%dms status=%d",
              podcast_id.c_str(),
-             static_cast<long long>((esp_timer_get_time() - started_us) / 1000),
+             static_cast<int>((esp_timer_get_time() - started_us) / 1000),
              status);
     {
         std::lock_guard<std::mutex> lock(s_play_cache_mutex);

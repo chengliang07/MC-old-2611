@@ -8,6 +8,7 @@
 #include <ctime>
 #include <string>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 
@@ -629,12 +630,8 @@ void OpenPetFromCurrentAsync(void* /*arg*/) {
         return;
     }
     const bool from_chat = origin == ChatScreen::CurrentScreen();
-    lv_obj_t* return_screen = from_chat ? origin : HomeScreen::Create();
-    lv_obj_t* pet = PetScreen::Create(return_screen);
+    lv_obj_t* pet = PetScreen::Create(origin);
     if (pet == nullptr) {
-        if (!from_chat && return_screen != nullptr) {
-            lv_obj_delete_async(return_screen);
-        }
         return;
     }
     if (from_chat) {
@@ -642,10 +639,7 @@ void OpenPetFromCurrentAsync(void* /*arg*/) {
     }
     screen_attach_lifecycle(pet, pet_lifecycle_cb);
     lv_screen_load(pet);
-    // 保留来源页；返回时回到点击进入前的页面。
-    if (!from_chat && origin != pet) {
-        // 不删除来源屏，避免逐次点击后累积 LVGL 异步删除任务。
-    }
+    // 保留来源页；返回时回到点击进入前的页面，避免额外创建隐藏 Home。
 }
 
 void OpenChatAsync(void* /*arg*/) {
@@ -2271,6 +2265,12 @@ void OnHomeScreenLoaded(lv_event_t* e) {
     }
 
     PwrKey_OnScreenLifecycle("home", SCREEN_LIFECYCLE_LOAD);
+    ESP_LOGI(TAG_HOME, "home load: tasks=%u internal=%uKB psram=%uKB",
+             static_cast<unsigned>(uxTaskGetNumberOfTasks()),
+             static_cast<unsigned>(
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             static_cast<unsigned>(
+                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     StartHomeIdleTimer();
 }
 

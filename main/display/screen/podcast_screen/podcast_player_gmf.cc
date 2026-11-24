@@ -27,6 +27,7 @@
 #include "freertos/task.h"
 #include "media_lib_adapter.h"
 #include "podcast_client.h"
+#include "system_info.h"
 
 #ifdef CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN
 #include "esp_gmf_rate_cvt.h"
@@ -45,6 +46,7 @@ struct PlayArg {
     int64_t range_bytes = 0;
     int64_t base_ms = 0;
     int64_t click_us = 0;
+    bool prepare = false;
 };
 
 struct PlayerContext {
@@ -82,6 +84,11 @@ std::atomic<bool> s_quick_url{false};
 std::atomic<bool> s_headers_parsed{false};
 std::atomic<uint32_t> s_first_pcm_generation{0};
 std::atomic<uint32_t> s_url_expired_generation{0};
+// 预播状态：进入播客页先跑通 HTTP 打开/解码，首帧到达后在输出回调里按住，
+// 用户点播时放开即可，省掉点击后 2-5 秒的连接与首包等待。
+std::atomic<bool> s_prepare_mode{false};
+std::atomic<bool> s_prepare_play{false};
+std::atomic<uint32_t> s_prepare_generation{0};
 // stop 会阻塞到管线线程退出（最长等 HTTP 读超时），不能在 UI 线程里调用。
 // 生命周期锁只保护“正在后台 stop 的播放器指针”，绝不能跨越 stop 调用持有。
 std::mutex s_lifecycle_mutex;
@@ -126,10 +133,10 @@ void TimingLog(uint32_t generation, const char* stage,
             since_click_ms = (now - click) / 1000;
         }
     }
-    ESP_LOGI(TAG, "[timing] gen=%u stage=%s dt=%lldms click=%lldms%s%s",
+    ESP_LOGI(TAG, "[timing] gen=%u stage=%s dt=%dms click=%dms%s%s",
              static_cast<unsigned>(generation), stage,
-             static_cast<long long>(dt_ms),
-             static_cast<long long>(since_click_ms),
+             static_cast<int>(dt_ms),
+             static_cast<int>(since_click_ms),
              extra != nullptr ? " " : "", extra != nullptr ? extra : "");
 }
 
@@ -315,11 +322,18 @@ void EnsureMediaLibAdapter() {
     }
 }
 
-void FinishPlayTask() {
+void FinishPlayTask(uint32_t generation = 0) {
     {
         std::lock_guard<std::mutex> lock(s_player_mutex);
         if (s_play_task == xTaskGetCurrentTaskHandle()) {
             s_play_task = nullptr;
+            // 预播任务退出（含失败/被切换）时解除按住，避免界面后续状态事件
+            // 一直被当成预播而丢弃。
+            if (generation != 0 &&
+                s_prepare_generation.load(std::memory_order_relaxed) ==
+                    generation) {
+                s_prepare_mode.store(false, std::memory_order_release);
+            }
         }
     }
     vTaskDelete(nullptr);
@@ -401,9 +415,9 @@ void PodcastStopTask(void* data) {
     const uint32_t generation = s_generation.load(std::memory_order_acquire);
     TimingLog(generation, "stop_begin");
     esp_audio_simple_player_stop(arg->player);
-    ESP_LOGI(TAG, "[timing] gen=%u stage=stop_done dt=%lldms",
+    ESP_LOGI(TAG, "[timing] gen=%u stage=stop_done dt=%dms",
              static_cast<unsigned>(generation),
-             static_cast<long long>((esp_timer_get_time() - started_us) / 1000));
+             static_cast<int>((esp_timer_get_time() - started_us) / 1000));
     {
         std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
         if (s_pending_stop_player == arg->player) {
@@ -511,8 +525,8 @@ void ParseResponseHeaders(esp_http_client_handle_t client, uint32_t generation) 
         }
     }
     const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
-    ESP_LOGI(TAG, "http headers status=%d total=%lld", status,
-             static_cast<long long>(total));
+    ESP_LOGI(TAG, "http headers status=%d total=%d", status,
+             static_cast<int>(total));
     if (s_duration_sec.load(std::memory_order_relaxed) <= 0 && total > 0) {
         // 接口没给时长时按 64kbps 估算量程，只用于进度条。
         s_estimated_duration_sec.store(
@@ -546,6 +560,11 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
             return 0;
         }
 
+        // 播客流同样不能缺 User-Agent：Cloudflare 会把无 UA 请求挡成 403，
+        // 在播放器里表现为“播放失败/地址过期”，排查时极易误判成签名问题。
+        const std::string user_agent = SystemInfo::GetUserAgent();
+        esp_http_client_set_header(client, "User-Agent", user_agent.c_str());
+
         const std::string token = PodcastClient::DeviceToken();
         if (!token.empty()) {
             const std::string authorization = "Bearer " + token;
@@ -556,8 +575,8 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
                             ConsumedPositionBytes(player_ctx->generation);
         if (pos > 0) {
             char range[48] = {};
-            snprintf(range, sizeof(range), "bytes=%lld-",
-                     static_cast<long long>(pos));
+            snprintf(range, sizeof(range), "bytes=%d-",
+                     static_cast<int>(pos));
             esp_http_client_set_header(client, "Range", range);
             ESP_LOGI(TAG, "http range %s", range);
         }
@@ -574,8 +593,11 @@ bool RegisterPodcastHttpIo(esp_asp_handle_t player, PlayerContext* player_ctx) {
     http_cfg.event_handle = PodcastHttpEvent;
     http_cfg.user_data = player_ctx;
     // 播客是持续码流，扩大环形缓冲以吸收 WiFi/4G 抖动，减少解码欠载卡顿。
-    http_cfg.io_cfg.buffer_cfg.buffer_size = 128 * 1024;
-    http_cfg.io_cfg.buffer_cfg.io_size = 8 * 1024;
+    // 短发音不需要大缓冲，避免每次点单词都多占 PSRAM。
+    const bool quick = s_quick_url.load(std::memory_order_relaxed);
+    http_cfg.io_cfg.buffer_cfg.buffer_size =
+        quick ? 64 * 1024 : 512 * 1024;
+    http_cfg.io_cfg.buffer_cfg.io_size = quick ? 4 * 1024 : 16 * 1024;
     http_cfg.io_cfg.enable_speed_monitor = false;
 
     esp_gmf_io_handle_t http_io = nullptr;
@@ -628,6 +650,22 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     if (s_http_io.load(std::memory_order_acquire) == nullptr) {
         CapturePipelineIo(player_ctx->player, player_ctx->generation);
     }
+    // 预播：数据已经解到首帧，这里把管线按住，让 HTTP 环形缓冲填满；
+    // 用户点播时放开即可直接出声。
+    if (s_prepare_mode.load(std::memory_order_acquire) &&
+        player_ctx->generation ==
+            s_prepare_generation.load(std::memory_order_acquire)) {
+        while (s_prepare_mode.load(std::memory_order_acquire) &&
+               player_ctx->generation ==
+                   s_generation.load(std::memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (player_ctx->generation !=
+                s_generation.load(std::memory_order_acquire) ||
+            !s_prepare_play.exchange(false, std::memory_order_acq_rel)) {
+            return 0;
+        }
+    }
     if (!s_output_enabled.load(std::memory_order_acquire) ||
         s_output_generation.load(std::memory_order_relaxed) !=
             s_generation.load(std::memory_order_relaxed) ||
@@ -639,7 +677,7 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     if (!s_quick_url.load(std::memory_order_relaxed) &&
         !s_start_gate_done.exchange(true, std::memory_order_acq_rel)) {
         TimingLog(player_ctx->generation, "first_pcm_buffered");
-        vTaskDelay(pdMS_TO_TICKS(400));
+        vTaskDelay(pdMS_TO_TICKS(200));
         if (player_ctx->generation !=
                 s_generation.load(std::memory_order_acquire) ||
             !s_output_enabled.load(std::memory_order_acquire)) {
@@ -732,6 +770,10 @@ int PodcastEventCallback(esp_asp_event_pkt_t* event, void* ctx) {
                event->payload_size == sizeof(esp_asp_state_t)) {
         esp_asp_state_t state = ESP_ASP_STATE_NONE;
         std::memcpy(&state, event->payload, event->payload_size);
+        // 预播阶段只做“打开 + 预解码”，不上报播放状态给界面。
+        if (s_prepare_mode.load(std::memory_order_acquire)) {
+            return 0;
+        }
         if (state == ESP_ASP_STATE_RUNNING) {
             // 管线刚运行时先抓住 HTTP IO，切集时 abort 才能立即打断读操作。
             CapturePipelineIo(player_ctx->player, player_ctx->generation);
@@ -779,17 +821,18 @@ void PodcastPlayTask(void* arg) {
     const uint32_t generation = play_arg->generation;
     const std::string url = play_arg->url;
     const int64_t base_ms = play_arg->base_ms;
+    const bool prepare = play_arg->prepare;
     delete play_arg;
     TimingLog(generation, "play_task_start");
 
     auto is_current = [generation]() {
         return generation == s_generation.load(std::memory_order_acquire);
     };
-    auto abandon = [](const char* detail) {
+    auto abandon = [generation](const char* detail) {
         if (detail != nullptr) {
             Emit(PodcastPlayerEvent::Error, detail);
         }
-        FinishPlayTask();
+        FinishPlayTask(generation);
     };
 
     if (!is_current()) {
@@ -864,10 +907,12 @@ void PodcastPlayTask(void* arg) {
     }
 
     codec->EnableOutput(true);
-    s_output_generation.store(generation, std::memory_order_relaxed);
-    s_output_enabled.store(true, std::memory_order_release);
+    if (!prepare) {
+        s_output_generation.store(generation, std::memory_order_relaxed);
+        s_output_enabled.store(true, std::memory_order_release);
+        ResetPositionClock(base_ms);
+    }
     s_http_capture_allowed.store(true, std::memory_order_release);
-    ResetPositionClock(base_ms);
 
     if (!is_current()) {
         s_output_enabled.store(false, std::memory_order_release);
@@ -893,8 +938,8 @@ void PodcastPlayTask(void* arg) {
         return;
     }
 
-    ESP_LOGI(TAG, "start MP3 playback, offset=%lld",
-             static_cast<long long>(s_range_offset.load(
+    ESP_LOGI(TAG, "start MP3 playback, offset=%d",
+             static_cast<int>(s_range_offset.load(
                  std::memory_order_relaxed)));
     TimingLog(generation, "run_begin");
     const esp_gmf_err_t result =
@@ -934,7 +979,7 @@ void PodcastPlayTask(void* arg) {
         }
         if (!stopped) {
             ESP_LOGE(TAG, "stop timeout, keep player %p alive", player);
-            FinishPlayTask();
+            FinishPlayTask(generation);
             return;
         }
     }
@@ -968,7 +1013,7 @@ void PodcastPlayTask(void* arg) {
             Emit(PodcastPlayerEvent::Error, detail);
         }
     }
-    FinishPlayTask();
+    FinishPlayTask(generation);
 }
 
 void PodcastStartTask(void* arg) {
@@ -1018,7 +1063,7 @@ void PodcastStartTask(void* arg) {
 
 static bool StartInternal(const std::string& url, std::string& error,
                           int64_t range_bytes, int64_t base_ms,
-                          int64_t click_us = 0) {
+                          int64_t click_us = 0, bool prepare = false) {
     error.clear();
     if (url.empty()) {
         error = "播放地址为空";
@@ -1031,6 +1076,13 @@ static bool StartInternal(const std::string& url, std::string& error,
         std::lock_guard<std::mutex> lock(s_player_mutex);
         const uint32_t generation =
             s_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+        s_prepare_play.store(false, std::memory_order_release);
+        s_prepare_generation.store(generation, std::memory_order_release);
+        s_prepare_mode.store(prepare, std::memory_order_release);
+        if (prepare) {
+            // 预播已经等过首帧，放开时不要再加首帧缓冲延时。
+            s_start_gate_done.store(true, std::memory_order_release);
+        }
         MarkTimingStart(generation, click_us);
         auto* arg = new PlayArg{};
         arg->generation = generation;
@@ -1038,6 +1090,7 @@ static bool StartInternal(const std::string& url, std::string& error,
         arg->range_bytes = range_bytes;
         arg->base_ms = base_ms;
         arg->click_us = click_us;
+        arg->prepare = prepare;
         s_current_url = url;
         s_quick_url.store(IsQuickPronunciationUrl(url),
                           std::memory_order_relaxed);
@@ -1056,6 +1109,7 @@ static bool StartInternal(const std::string& url, std::string& error,
             delete arg;
             error = "创建播放任务失败";
             create_failed = true;
+            s_prepare_mode.store(false, std::memory_order_release);
         }
     }
     return !create_failed;
@@ -1064,6 +1118,93 @@ static bool StartInternal(const std::string& url, std::string& error,
 bool PodcastPlayer::Start(const std::string& url, std::string& error,
                           int64_t click_us) {
     return StartInternal(url, error, 0, 0, click_us);
+}
+
+namespace {
+// 预播最多保留 45 秒：环形缓冲填满后连接会闲着，超过常见 keep-alive
+// 时限就可能被服务端关掉，宁可放弃也不要放出一段“播几秒就结束”的音频。
+constexpr int kPrepareHoldSeconds = 45;
+
+void PodcastPrepareWatchdog(void* arg) {
+    const uint32_t generation =
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
+    for (int i = 0; i < kPrepareHoldSeconds * 50; ++i) {
+        if (!s_prepare_mode.load(std::memory_order_acquire) ||
+            s_prepare_generation.load(std::memory_order_acquire) !=
+                generation) {
+            vTaskDelete(nullptr);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGW(TAG, "prepare timeout, cancel prepared player");
+    PodcastPlayer::Stop();
+    vTaskDelete(nullptr);
+}
+}  // namespace
+
+bool PodcastPlayer::Prepare(const std::string& url, std::string& error) {
+    error.clear();
+    if (url.empty()) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_player_mutex);
+        if (s_player != nullptr || s_play_task != nullptr ||
+            s_prepare_mode.load(std::memory_order_relaxed)) {
+            return false;
+        }
+    }
+    if (!StartInternal(url, error, 0, 0, 0, true)) {
+        return false;
+    }
+    const uint32_t generation =
+        s_prepare_generation.load(std::memory_order_acquire);
+    if (xTaskCreate(
+            PodcastPrepareWatchdog, "podcast_prep", 3072,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(generation)), 2,
+            nullptr) != pdPASS) {
+        ESP_LOGW(TAG, "create prepare watchdog failed");
+    }
+    return true;
+}
+
+bool PodcastPlayer::IsPreparedFor(const std::string& url) {
+    if (!s_prepare_mode.load(std::memory_order_acquire)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(s_player_mutex);
+    return s_player != nullptr && s_current_url == url;
+}
+
+bool PodcastPlayer::PlayPrepared(const std::string& url, std::string& error,
+                                 int64_t click_us) {
+    error.clear();
+    if (!IsPreparedFor(url)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(s_player_mutex);
+    if (s_player == nullptr || s_current_url != url ||
+        !s_prepare_mode.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const uint32_t generation =
+        s_prepare_generation.load(std::memory_order_acquire);
+    MarkTimingStart(generation, click_us);
+    s_output_generation.store(generation, std::memory_order_relaxed);
+    s_output_enabled.store(true, std::memory_order_release);
+    ResetPositionClock(0);
+    s_prepare_play.store(true, std::memory_order_release);
+    s_prepare_mode.store(false, std::memory_order_release);
+    TimingLog(generation, "prepared_release");
+    return true;
+}
+
+void PodcastPlayer::StopUnlessPrepared() {
+    if (s_prepare_mode.load(std::memory_order_acquire)) {
+        return;
+    }
+    Stop();
 }
 
 bool PodcastPlayer::Seek(int seconds, std::string& error) {
@@ -1158,6 +1299,8 @@ bool PodcastPlayer::Resume() {
 }
 
 void PodcastPlayer::Stop() {
+    s_prepare_mode.store(false, std::memory_order_release);
+    s_prepare_play.store(false, std::memory_order_release);
     DetachCurrentPlayback();
     s_clock_us.store(0, std::memory_order_relaxed);
     s_base_ms.store(0, std::memory_order_relaxed);

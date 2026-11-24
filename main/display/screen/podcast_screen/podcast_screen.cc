@@ -1,25 +1,34 @@
 #include "podcast_screen.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <dirent.h>
 #include <memory>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include "application.h"
+#include "board.h"
 #include "chat_screen/chat_screen.h"
+#include "dual_network_board.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
+#include "http.h"
 #include "i18n.h"
 #include "podcast_client.h"
 #include "podcast_player.h"
 #include "podcast_types.h"
+#include "SdCardManager.hpp"
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
@@ -57,6 +66,7 @@ struct PodcastUi {
 
 struct LoadResult {
     uint32_t session = 0;
+    uint32_t generation = 0;
     PodcastList items;
     std::string error;
 };
@@ -91,6 +101,9 @@ bool s_url_retried = false;
 int64_t s_click_us = 0;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
+constexpr const char* kAudioCacheDir = "/sdcard/system/podcast";
+constexpr size_t kMaxCachedEpisodes = 12;
+constexpr int64_t kMaxAudioFileBytes = 96 * 1024 * 1024;
 
 void SaveListCache() {
     FILE* file = std::fopen(kListCachePath, "w");
@@ -98,8 +111,8 @@ void SaveListCache() {
         return;
     }
     s_items_at = std::time(nullptr);
-    std::fprintf(file, "#%lld\n",
-                 static_cast<long long>(s_items_at));
+    // newlib-nano 不支持 %lld，写出来会变成 "ld"，导致每次进页都被判为过期。
+    std::fprintf(file, "#%d\n", static_cast<int>(s_items_at));
     for (const auto& item : s_items) {
         std::fprintf(file, "%s|%s|%d|%d\n", item.id.c_str(),
                      item.title.c_str(), item.duration_seconds,
@@ -163,17 +176,116 @@ void LoadListCache() {
         s_items_at = std::time(nullptr);
     }
 }
+
+void EnsureAudioCacheDir() {
+    mkdir("/sdcard/system", 0775);
+    mkdir(kAudioCacheDir, 0775);
+}
+
+std::string SanitizeCacheId(const std::string& podcast_id) {
+    std::string safe;
+    safe.reserve(podcast_id.size());
+    for (char c : podcast_id) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' ||
+            c == '_') {
+            safe.push_back(c);
+        }
+    }
+    if (safe.empty()) {
+        safe = "podcast";
+    }
+    if (safe.size() > 96) {
+        safe.resize(96);
+    }
+    return safe;
+}
+
+std::string AudioCacheExtension(const std::string& url,
+                                const std::string& format) {
+    auto normalize = [](const std::string& value) {
+        std::string ext;
+        for (char c : value) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                ext.push_back(
+                    static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            }
+        }
+        return ext;
+    };
+    std::string ext = normalize(format);
+    if (ext.size() >= 2 && ext.size() <= 5) {
+        return "." + ext;
+    }
+    const std::string path = url.substr(0, url.find('?'));
+    const size_t dot = path.find_last_of('.');
+    const size_t slash = path.find_last_of('/');
+    if (dot != std::string::npos &&
+        (slash == std::string::npos || dot > slash)) {
+        ext = normalize(path.substr(dot + 1));
+        if (ext.size() >= 2 && ext.size() <= 5) {
+            return "." + ext;
+        }
+    }
+    return ".mp3";
+}
+
+std::string FindCachedAudio(const std::string& podcast_id) {
+    const std::string prefix = SanitizeCacheId(podcast_id) + ".";
+    DIR* dir = opendir(kAudioCacheDir);
+    if (dir == nullptr) {
+        return {};
+    }
+    std::string found;
+    while (dirent* entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name.size() <= prefix.size() ||
+            name.compare(0, prefix.size(), prefix) != 0) {
+            continue;
+        }
+        if (name.size() >= 5 &&
+            name.compare(name.size() - 5, 5, ".part") == 0) {
+            continue;
+        }
+        found = std::string(kAudioCacheDir) + "/" + name;
+        break;
+    }
+    closedir(dir);
+    return found;
+}
+
+void ClearAudioCache() {
+    DIR* dir = opendir(kAudioCacheDir);
+    if (dir == nullptr) {
+        return;
+    }
+    while (dirent* entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name.empty() || name == "." || name == "..") {
+            continue;
+        }
+        const std::string path = std::string(kAudioCacheDir) + "/" + name;
+        unlink(path.c_str());
+    }
+    closedir(dir);
+}
+
 std::string s_current_title;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_loading{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 std::atomic<bool> s_preparing_play{false};
+std::atomic<uint32_t> s_prefetch_generation{0};
+std::atomic<uint32_t> s_load_generation{0};
+std::atomic<bool> s_download_running{false};
+std::atomic<uint32_t> s_download_generation{0};
+std::atomic<bool> s_playback_active{false};
 bool s_playing = false;
 int s_progress_max = 1;
 bool s_paused = false;
 
 void SetStatusDirect(const char* text);
+void StartLoadWorker(bool manual_refresh = false);
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -182,6 +294,246 @@ uint32_t CurrentSession() {
 bool IsCurrentSession(uint32_t session) {
     return s_screen_active.load(std::memory_order_relaxed) &&
            session == CurrentSession();
+}
+
+bool DownloadAudioToCache(const std::string& url, const std::string& path,
+                          uint32_t generation) {
+    auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        return false;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        return false;
+    }
+    const std::string part =
+        path + "." + std::to_string(generation) + ".part";
+    FILE* file = std::fopen(part.c_str(), "wb");
+    if (file == nullptr) {
+        return false;
+    }
+    http->SetTimeout(20000);
+    http->SetHeader("Connection", "close");
+    bool ok = http->Open("GET", url);
+    const int status = ok ? http->GetStatusCode() : 0;
+    if (ok && (status < 200 || status >= 300)) {
+        ok = false;
+    }
+    int64_t written = 0;
+    char buffer[4096];
+    while (ok) {
+        if (generation !=
+                s_download_generation.load(std::memory_order_acquire) ||
+            !s_screen_active.load(std::memory_order_acquire)) {
+            ok = false;
+            break;
+        }
+        if (s_preparing_play.load(std::memory_order_acquire) ||
+            s_playback_active.load(std::memory_order_acquire)) {
+            ok = false;
+            break;
+        }
+        const int read = http->Read(buffer, sizeof(buffer));
+        if (read < 0) {
+            ok = false;
+            break;
+        }
+        if (read == 0) {
+            break;
+        }
+        if (std::fwrite(buffer, 1, static_cast<size_t>(read), file) !=
+            static_cast<size_t>(read)) {
+            ok = false;
+            break;
+        }
+        written += read;
+        if (written > kMaxAudioFileBytes) {
+            ok = false;
+            break;
+        }
+    }
+    const size_t expected = ok ? http->GetBodyLength() : 0;
+    if (expected > 0 && static_cast<size_t>(written) != expected) {
+        ok = false;
+    }
+    http->Close();
+    std::fflush(file);
+    fsync(fileno(file));
+    std::fclose(file);
+    if (!ok || written < 4096) {
+        unlink(part.c_str());
+        return false;
+    }
+    unlink(path.c_str());
+    if (std::rename(part.c_str(), path.c_str()) != 0) {
+        unlink(part.c_str());
+        return false;
+    }
+    return true;
+}
+
+void PruneAudioCache(const std::string& keep_id) {
+    struct CacheEntry {
+        std::string path;
+        time_t mtime = 0;
+    };
+    DIR* dir = opendir(kAudioCacheDir);
+    if (dir == nullptr) {
+        return;
+    }
+    std::vector<CacheEntry> entries;
+    while (dirent* entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name.empty() || name == "." || name == "..") {
+            continue;
+        }
+        if (name.size() >= 5 &&
+            name.compare(name.size() - 5, 5, ".part") == 0) {
+            continue;
+        }
+        const std::string path = std::string(kAudioCacheDir) + "/" + name;
+        struct stat info = {};
+        if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
+            continue;
+        }
+        entries.push_back({path, info.st_mtime});
+    }
+    closedir(dir);
+    if (entries.size() <= kMaxCachedEpisodes) {
+        return;
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const CacheEntry& a, const CacheEntry& b) {
+                  return a.mtime < b.mtime;
+              });
+    const std::string keep_prefix = SanitizeCacheId(keep_id) + ".";
+    size_t excess = entries.size() - kMaxCachedEpisodes;
+    for (const auto& entry : entries) {
+        if (excess == 0) {
+            break;
+        }
+        const size_t slash = entry.path.find_last_of('/');
+        const std::string name =
+            slash == std::string::npos ? entry.path
+                                       : entry.path.substr(slash + 1);
+        if (name.compare(0, keep_prefix.size(), keep_prefix) == 0) {
+            continue;
+        }
+        if (unlink(entry.path.c_str()) == 0) {
+            --excess;
+        }
+    }
+}
+
+struct AudioCacheTaskArg {
+    uint32_t generation = 0;
+    std::vector<std::string> ids;
+};
+
+void AudioCacheWorker(void* data) {
+    std::unique_ptr<AudioCacheTaskArg> arg(
+        static_cast<AudioCacheTaskArg*>(data));
+    const uint32_t generation = arg->generation;
+    EnsureAudioCacheDir();
+    for (size_t i = 0; i < arg->ids.size();) {
+        if (generation !=
+                s_download_generation.load(std::memory_order_acquire) ||
+            !s_screen_active.load(std::memory_order_acquire)) {
+            break;
+        }
+        const std::string& id = arg->ids[i];
+        if (!FindCachedAudio(id).empty()) {
+            ++i;
+            continue;
+        }
+        if (s_playback_active.load(std::memory_order_acquire) ||
+            s_preparing_play.load(std::memory_order_acquire)) {
+            while (s_playback_active.load(std::memory_order_acquire) ||
+                   s_preparing_play.load(std::memory_order_acquire)) {
+                if (generation !=
+                        s_download_generation.load(
+                            std::memory_order_acquire) ||
+                    !s_screen_active.load(std::memory_order_acquire)) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+            if (generation !=
+                    s_download_generation.load(
+                        std::memory_order_acquire) ||
+                !s_screen_active.load(std::memory_order_acquire)) {
+                break;
+            }
+            continue;
+        }
+        std::string error;
+        const PodcastPlayInfo play = PodcastClient::ResolvePlayUrl(id, error);
+        if (!play.ok) {
+            ++i;
+            continue;
+        }
+        if (generation !=
+            s_download_generation.load(std::memory_order_acquire)) {
+            break;
+        }
+        const std::string path = std::string(kAudioCacheDir) + "/" +
+                                 SanitizeCacheId(id) +
+                                 AudioCacheExtension(play.url, play.format);
+        if (DownloadAudioToCache(play.url, path, generation)) {
+            ESP_LOGI(TAG, "audio cached %s", path.c_str());
+            PruneAudioCache(id);
+            ++i;
+        } else if (
+            (s_playback_active.load(std::memory_order_acquire) ||
+             s_preparing_play.load(std::memory_order_acquire)) &&
+            generation ==
+                s_download_generation.load(std::memory_order_acquire)) {
+            // 播放抢占了带宽，这次下载已作废；等播放结束后重试同一条。
+            continue;
+        } else {
+            ++i;
+        }
+    }
+    if (generation ==
+        s_download_generation.load(std::memory_order_acquire)) {
+        s_download_running.store(false, std::memory_order_release);
+    }
+    vTaskDelete(nullptr);
+}
+
+void StartAudioCacheWorker() {
+    if (!s_screen_active.load(std::memory_order_acquire) ||
+        s_items.empty()) {
+        return;
+    }
+    if (!SdCardManager::GetInstance().IsMounted()) {
+        return;
+    }
+    auto* dual = dynamic_cast<DualNetworkBoard*>(&Board::GetInstance());
+    if (dual == nullptr || dual->GetNetworkType() != NetworkType::WIFI) {
+        return;
+    }
+    if (s_download_running.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    auto* arg = new AudioCacheTaskArg{};
+    const uint32_t generation = s_download_generation.fetch_add(1) + 1;
+    arg->generation = generation;
+    const size_t count =
+        s_items.size() < kMaxCachedEpisodes ? s_items.size()
+                                            : kMaxCachedEpisodes;
+    arg->ids.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        arg->ids.push_back(s_items[i].id);
+    }
+    if (xTaskCreate(AudioCacheWorker, "podcast_cache", 8192, arg, 2,
+                    nullptr) != pdPASS) {
+        delete arg;
+        if (generation ==
+            s_download_generation.load(std::memory_order_acquire)) {
+            s_download_running.store(false, std::memory_order_release);
+        }
+    }
 }
 
 void FormatDuration(int seconds, char* buffer, size_t size) {
@@ -246,6 +598,10 @@ void UpdateTimeLabel(int position, int duration) {
 void OnProgressTimer(lv_timer_t* /*timer*/) {
     if (!s_screen_active.load(std::memory_order_relaxed) ||
         s_ui.progress == nullptr) {
+        return;
+    }
+    // 预播阶段管线会提前解码，位置不能拿来推进度条。
+    if (!s_playing && !s_paused) {
         return;
     }
     if (lv_obj_has_state(s_ui.progress, LV_STATE_PRESSED)) {
@@ -349,7 +705,9 @@ void BeginPlayAt(size_t index) {
     const uint32_t request_generation =
         s_request_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
     const uint32_t session = CurrentSession();
-    PodcastPlayer::Stop();
+    // 别的节目在播就立刻停；只有“已预播未开始”的播放器要留给下面复用。
+    PodcastPlayer::StopUnlessPrepared();
+    s_playback_active.store(false, std::memory_order_release);
     s_playing = false;
     s_paused = false;
     s_preparing_play.store(true, std::memory_order_release);
@@ -366,22 +724,48 @@ void BeginPlayAt(size_t index) {
             [](void* arg) {
                 auto* result = static_cast<ResolveResult*>(arg);
                 std::string error;
-                const PodcastPlayInfo play =
-                    PodcastClient::ResolvePlayUrl(result->podcast_id, error);
-                if (!play.ok) {
-                    result->error =
-                        play.error.empty() ? error : play.error;
-                } else if (
-                    result->session != CurrentSession() ||
+                const std::string cached =
+                    FindCachedAudio(result->podcast_id);
+                if (result->session != CurrentSession() ||
                     result->request_generation !=
                         s_request_generation.load(
                             std::memory_order_relaxed)) {
                     result->error = "播放请求已取消";
-                } else if (!PodcastPlayer::Start(play.url, error,
-                                                 result->click_us)) {
-                    result->error = error;
+                } else if (!cached.empty()) {
+                    ESP_LOGI(TAG, "[timing] play local id=%s dt=%dms",
+                             result->podcast_id.c_str(),
+                             static_cast<int>((esp_timer_get_time() -
+                                               result->click_us) /
+                                              1000));
+                    if (!PodcastPlayer::PlayPrepared(cached, error,
+                                                     result->click_us)) {
+                        PodcastPlayer::Stop();
+                        if (!PodcastPlayer::Start(cached, error,
+                                                  result->click_us)) {
+                            result->error = error;
+                        }
+                    }
                 } else {
-                    result->duration_seconds = play.duration_seconds;
+                    const PodcastPlayInfo play =
+                        PodcastClient::ResolvePlayUrl(result->podcast_id,
+                                                     error);
+                    if (!play.ok) {
+                        result->error =
+                            play.error.empty() ? error : play.error;
+                    } else if (PodcastPlayer::PlayPrepared(
+                                   play.url, error, result->click_us)) {
+                        // 进入列表时已预播：这里几乎立即出声。
+                        result->duration_seconds = play.duration_seconds;
+                    } else {
+                        PodcastPlayer::Stop();
+                        if (!PodcastPlayer::Start(play.url, error,
+                                                  result->click_us)) {
+                            result->error = error;
+                        } else {
+                            result->duration_seconds =
+                                play.duration_seconds;
+                        }
+                    }
                 }
                 if (lv_async_call(
                     [](void* data) {
@@ -394,6 +778,8 @@ void BeginPlayAt(size_t index) {
                             resolved->error != "播放请求已取消") {
                             s_preparing_play.store(false,
                                                    std::memory_order_release);
+                            s_playback_active.store(
+                                false, std::memory_order_release);
                             SetStatusDirect(resolved->error.c_str());
                             UpdateControls(false, false);
                         } else if (resolved->duration_seconds > 0) {
@@ -425,6 +811,74 @@ void OnPodcastClicked(lv_event_t* event) {
         lv_event_get_user_data(event)));
     s_url_retried = false;
     BeginPlayAt(index);
+}
+
+struct PrefetchTaskArg {
+    uint32_t session = 0;
+    uint32_t generation = 0;
+    std::vector<std::string> ids;
+};
+
+// 任务函数必须是普通函数指针，不能捕获外部变量，参数一律走 arg。
+void PrefetchFirstPlayUrlWorker(void* data) {
+    std::unique_ptr<PrefetchTaskArg> arg(static_cast<PrefetchTaskArg*>(data));
+    const uint32_t session = arg->session;
+    const uint32_t generation = arg->generation;
+    for (size_t i = 0; i < arg->ids.size(); ++i) {
+        if (generation !=
+                s_prefetch_generation.load(std::memory_order_acquire) ||
+            !IsCurrentSession(session)) {
+            break;
+        }
+        const std::string cached = FindCachedAudio(arg->ids[i]);
+        if (!cached.empty()) {
+            if (i == 0 && !s_playing &&
+                !s_preparing_play.load(std::memory_order_acquire)) {
+                std::string prepare_error;
+                if (PodcastPlayer::Prepare(cached, prepare_error)) {
+                    ESP_LOGI(TAG, "prepared cached first podcast");
+                }
+            }
+            continue;
+        }
+        std::string error;
+        const PodcastPlayInfo play =
+            PodcastClient::ResolvePlayUrl(arg->ids[i], error);
+        if (i == 0 && play.ok &&
+            generation ==
+                s_prefetch_generation.load(std::memory_order_acquire) &&
+            IsCurrentSession(session) && !s_playing &&
+            !s_preparing_play.load(std::memory_order_acquire)) {
+            // 首条先真正打开音频流并解到首帧，点击时直接出声。
+            std::string prepare_error;
+            if (PodcastPlayer::Prepare(play.url, prepare_error)) {
+                ESP_LOGI(TAG, "prepared first podcast");
+            }
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+void PrefetchFirstPlayUrl() {
+    if (s_items.empty() || !s_screen_active.load(std::memory_order_acquire) ||
+        s_playing || s_preparing_play.load(std::memory_order_acquire)) {
+        return;
+    }
+    constexpr size_t kPrefetchCount = 4;
+    auto* arg = new PrefetchTaskArg{};
+    arg->session = CurrentSession();
+    arg->generation =
+        s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const size_t count =
+        s_items.size() < kPrefetchCount ? s_items.size() : kPrefetchCount;
+    arg->ids.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        arg->ids.push_back(s_items[i].id);
+    }
+    if (xTaskCreate(PrefetchFirstPlayUrlWorker, "podcast_prefetch", 12288, arg,
+                    3, nullptr) != pdPASS) {
+        delete arg;
+    }
 }
 
 void RebuildList() {
@@ -496,11 +950,15 @@ void RebuildList() {
         lv_obj_align(duration_label, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
         screen_make_input_passive(duration_label);
     }
+    // 列表刷新后后台预取第一条播放地址，点击时直接命中缓存。
+    PrefetchFirstPlayUrl();
 }
 
 void ApplyLoadResult(void* data) {
     std::unique_ptr<LoadResult> result(static_cast<LoadResult*>(data));
-    if (!IsCurrentSession(result->session)) {
+    if (!IsCurrentSession(result->session) ||
+        result->generation !=
+            s_load_generation.load(std::memory_order_acquire)) {
         return;
     }
     s_loading.store(false, std::memory_order_release);
@@ -521,19 +979,24 @@ void ApplyLoadResult(void* data) {
         SetStatusDirect(I18n::T("选择节目开始收听"));
     }
     RebuildList();
+    StartAudioCacheWorker();
 }
 
-void StartLoadWorker() {
-    bool expected = false;
-    if (!s_loading.compare_exchange_strong(expected, true)) {
-        return;
-    }
+void StartLoadWorker(bool manual_refresh) {
+    s_loading.store(true, std::memory_order_release);
     const uint32_t session = CurrentSession();
-    if (s_items.empty()) {
-        SetStatusDirect(I18n::T("正在加载节目..."));
+    const uint32_t generation =
+        s_load_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (!s_playing && !s_preparing_play.load(std::memory_order_acquire)) {
+        if (manual_refresh) {
+            SetStatusDirect(I18n::T("正在刷新节目..."));
+        } else if (s_items.empty()) {
+            SetStatusDirect(I18n::T("正在加载节目..."));
+        }
     }
     auto* context = new LoadResult{};
     context->session = session;
+    context->generation = generation;
     if (xTaskCreate(
             [](void* arg) {
                 auto* result = static_cast<LoadResult*>(arg);
@@ -541,13 +1004,20 @@ void StartLoadWorker() {
                 result->items = PodcastClient::FetchPodcasts(error);
                 result->error = std::move(error);
                 if (lv_async_call(ApplyLoadResult, result) != LV_RESULT_OK) {
-                    s_loading.store(false, std::memory_order_release);
+                    if (result->generation ==
+                        s_load_generation.load(
+                            std::memory_order_acquire)) {
+                        s_loading.store(false, std::memory_order_release);
+                    }
                     delete result;
                 }
                 vTaskDelete(nullptr);
             },
             "podcast_list", 8192, context, 4, nullptr) != pdPASS) {
-        s_loading.store(false, std::memory_order_release);
+        if (generation ==
+            s_load_generation.load(std::memory_order_acquire)) {
+            s_loading.store(false, std::memory_order_release);
+        }
         delete context;
         SetStatusDirect(I18n::T("加载节目失败"));
     }
@@ -562,6 +1032,7 @@ void ApplyPlayerEvent(void* data) {
     switch (event->event) {
         case PodcastPlayerEvent::Playing:
             s_preparing_play.store(false, std::memory_order_release);
+            s_playback_active.store(true, std::memory_order_release);
             s_playing = true;
             s_paused = false;
             UpdateControls(true, true);
@@ -577,6 +1048,7 @@ void ApplyPlayerEvent(void* data) {
             break;
         case PodcastPlayerEvent::Finished:
             s_preparing_play.store(false, std::memory_order_release);
+            s_playback_active.store(false, std::memory_order_release);
             s_playing = false;
             s_paused = false;
             UpdateControls(false, false);
@@ -584,6 +1056,7 @@ void ApplyPlayerEvent(void* data) {
             break;
         case PodcastPlayerEvent::Error:
             s_preparing_play.store(false, std::memory_order_release);
+            s_playback_active.store(false, std::memory_order_release);
             s_playing = false;
             s_paused = false;
             UpdateControls(false, false);
@@ -645,6 +1118,7 @@ void OnPauseClicked(lv_event_t* /*event*/) {
 void OnStopClicked(lv_event_t* /*event*/) {
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     s_preparing_play.store(false, std::memory_order_release);
+    s_playback_active.store(false, std::memory_order_release);
     PodcastPlayer::Stop();
     s_playing = false;
     s_paused = false;
@@ -655,7 +1129,11 @@ void OnStopClicked(lv_event_t* /*event*/) {
 void ReturnHome() {
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_running.store(false, std::memory_order_release);
     s_preparing_play.store(false, std::memory_order_release);
+    s_playback_active.store(false, std::memory_order_release);
     s_screen_active.store(false, std::memory_order_release);
     PodcastPlayer::Stop();
     lv_obj_t* old_screen = lv_screen_active();
@@ -687,6 +1165,7 @@ void ReturnHome() {
 void HandleBack() {
     if (s_playing || s_paused) {
         s_preparing_play.store(false, std::memory_order_release);
+        s_playback_active.store(false, std::memory_order_release);
         PodcastPlayer::Stop();
         s_playing = false;
         s_paused = false;
@@ -707,6 +1186,28 @@ void OnSwipeBack() {
     HandleBack();
 }
 
+void OnRefreshClicked(lv_event_t* /*event*/) {
+    s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_load_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_running.store(false, std::memory_order_release);
+    s_preparing_play.store(false, std::memory_order_release);
+    s_playback_active.store(false, std::memory_order_release);
+    s_playing = false;
+    s_paused = false;
+    PodcastPlayer::Stop();
+    UpdateControls(false, false);
+
+    s_items.clear();
+    s_cached_items.clear();
+    s_items_at = 0;
+    unlink(kListCachePath);
+    ClearAudioCache();
+    RebuildList();
+    StartLoadWorker(true);
+}
+
 void OnScreenUnloaded(lv_event_t* event) {
     lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
     if (target != s_bound_screen) {
@@ -716,7 +1217,11 @@ void OnScreenUnloaded(lv_event_t* event) {
     s_screen_active.store(false, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_running.store(false, std::memory_order_release);
     s_preparing_play.store(false, std::memory_order_release);
+    s_playback_active.store(false, std::memory_order_release);
     PodcastPlayer::SetEventCallback(nullptr, nullptr);
     PodcastPlayer::Stop();
     s_current_title.clear();
@@ -753,6 +1258,27 @@ void BuildHeader(lv_obj_t* screen) {
                                 LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
     screen_make_input_passive(title);
+
+    lv_obj_t* refresh = lv_button_create(screen);
+    lv_obj_set_size(refresh, 120, 56);
+    lv_obj_set_pos(refresh, 580, 24);
+    lv_obj_set_style_radius(refresh, 18, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x25324A),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x34466A),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(refresh, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(refresh, 0, LV_PART_MAIN);
+    screen_swipe_back_ignore(refresh, true);
+    lv_obj_add_event_cb(refresh, OnRefreshClicked, LV_EVENT_CLICKED,
+                        nullptr);
+    lv_obj_t* refresh_label = lv_label_create(refresh);
+    lv_label_set_text(refresh_label, I18n::T("刷新"));
+    lv_obj_set_style_text_font(refresh_label, &font_puhui_20_4,
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_color(refresh_label, lv_color_hex(kColorText),
+                                LV_PART_MAIN);
+    lv_obj_center(refresh_label);
 }
 
 }  // namespace
@@ -862,7 +1388,7 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
     if (!s_cached_items.empty()) {
         s_items = s_cached_items;
         RebuildList();
-        SetStatusDirect(I18n::T("正在刷新节目..."));
+        SetStatusDirect(I18n::T("选择节目开始收听"));
     }
 
     s_bound_screen = screen;
@@ -883,6 +1409,7 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_playing = false;
         s_paused = false;
         s_preparing_play.store(false, std::memory_order_release);
+        s_playback_active.store(false, std::memory_order_release);
         PodcastPlayer::SetEventCallback(OnPlayerEvent, nullptr);
         UpdateControls(false, false);
         if (!s_items.empty()) {
@@ -892,12 +1419,19 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         if (s_items.empty() || s_items_at == 0 ||
             std::time(nullptr) - s_items_at > 30 * 60) {
             StartLoadWorker();
+        } else {
+            StartAudioCacheWorker();
         }
     } else {
         ESP_LOGI(TAG, "unload: podcast_screen");
         s_screen_active.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_download_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_download_running.store(false, std::memory_order_release);
+        s_playback_active.store(false, std::memory_order_release);
+        PodcastPlayer::SetEventCallback(nullptr, nullptr);
         PodcastPlayer::Stop();
     }
 }

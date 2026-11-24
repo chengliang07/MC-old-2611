@@ -33,3 +33,7 @@ sync-from-xingzhi.sh
 git-commit.sh
 merge_firmware.sh
 local-changes-summary.md
+# 本地构建/串口抓包日志：含后端地址、token 长度等现场信息，勿入库
+*.log
+# 设备绑定文件：含真实 token，绝不能入库
+podcast_token.txt

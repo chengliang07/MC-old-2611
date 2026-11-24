@@ -113,17 +113,13 @@ class PixelCanvas:
 
 def draw_sprout(c: PixelCanvas) -> None:
     """头顶绿色小芽，一丢的识别标志。"""
-    c.rect(35, 5, 36, 9, "green_dark")
-    c.rect(35, 6, 35, 9, "green")
-    c.ellipse(32.0, 4.5, 3.0, 2.2, "green")
-    c.ellipse(31.5, 4.0, 1.6, 1.2, "green_light")
-    c.ellipse(40.0, 4.5, 3.0, 2.2, "green")
-    c.ellipse(39.5, 4.0, 1.6, 1.2, "green_light")
+    # Q 版不再长芽，保留空实现以兼容旧调用。
+    _ = c
 
 
 def draw_ear_tufts(c: PixelCanvas, tall: bool = False) -> None:
-    top = 8 if tall else 11
-    for side, cx in ((-1, 23), (1, 49)):
+    top = 2 if tall else 4
+    for side, cx in ((-1, 20), (1, 52)):
         for i in range(4 if tall else 3):
             half = max(0, (4 if tall else 3) - i - 1)
             c.hline(cx - half, cx + half, top + i, "brown_dark")
@@ -131,126 +127,134 @@ def draw_ear_tufts(c: PixelCanvas, tall: bool = False) -> None:
 
 
 def draw_body(c: PixelCanvas) -> None:
-    c.ellipse(36.0, 64.5, 16.0, 2.6, (59, 39, 24), SHADOW_ALPHA)
-    c.ellipse(36.0, 46.5, 17.0, 14.0, "outline")
-    c.ellipse(36.0, 46.5, 16.0, 13.0, "brown")
-    c.ellipse(36.0, 50.5, 10.5, 8.5, "cream")
-    # 底部阴影增强体块感
-    c.ellipse(36.0, 57.5, 12.0, 3.0, "brown_dark")
-    c.ellipse(36.0, 50.5, 10.5, 7.6, "cream")
+    # Q 版：身体缩得很小，只露出头部下方一小截。
+    c.ellipse(36.0, 69.5, 15.0, 2.4, (59, 39, 24), SHADOW_ALPHA)
+    c.ellipse(36.0, 62.0, 10.5, 7.5, "outline")
+    c.ellipse(36.0, 62.0, 9.5, 6.5, "brown")
+    c.ellipse(36.0, 63.5, 6.0, 4.0, "cream")
 
 
 def draw_wings(c: PixelCanvas) -> None:
-    c.ellipse(17.0, 47.0, 5.4, 9.5, "outline")
-    c.ellipse(17.0, 47.0, 4.4, 8.5, "brown_dark")
-    c.ellipse(16.0, 44.0, 2.4, 3.4, "brown")
-    c.ellipse(55.0, 47.0, 5.4, 9.5, "outline")
-    c.ellipse(55.0, 47.0, 4.4, 8.5, "brown_dark")
-    c.ellipse(56.0, 44.0, 2.4, 3.4, "brown")
+    c.ellipse(24.0, 61.0, 3.6, 5.4, "outline")
+    c.ellipse(24.0, 61.0, 2.8, 4.6, "brown_dark")
+    c.ellipse(48.0, 61.0, 3.6, 5.4, "outline")
+    c.ellipse(48.0, 61.0, 2.8, 4.6, "brown_dark")
 
 
 def draw_feet(c: PixelCanvas) -> None:
-    for x0 in (27, 39):
-        c.rect(x0, 59, x0 + 5, 62, "outline")
-        c.rect(x0 + 1, 60, x0 + 4, 62, "orange")
-        c.hline(x0 + 1, x0 + 4, 63, "orange_dark")
+    for x0 in (31, 38):
+        c.rect(x0, 66, x0 + 3, 68, "outline")
+        c.rect(x0 + 1, 66, x0 + 2, 68, "orange")
+        c.hline(x0 + 1, x0 + 2, 69, "orange_dark")
 
 
 def draw_head(c: PixelCanvas) -> None:
-    c.ellipse(36.0, 27.0, 19.5, 17.5, "outline")
-    c.ellipse(36.0, 27.0, 18.5, 16.5, "brown")
+    # Q 版：头部占满画布宽度，脸盘和眼睛同比放大。
+    c.ellipse(36.0, 30.0, 33.0, 28.0, "outline")
+    c.ellipse(36.0, 30.0, 32.0, 27.0, "brown")
     # 面部奶油色圆盘
-    c.ellipse(29.0, 29.0, 10.5, 9.5, "cream")
-    c.ellipse(43.0, 29.0, 10.5, 9.5, "cream")
-    c.ellipse(36.0, 33.0, 6.0, 4.5, "cream")
+    c.ellipse(26.0, 33.0, 15.5, 14.0, "cream")
+    c.ellipse(46.0, 33.0, 15.5, 14.0, "cream")
+    c.ellipse(36.0, 39.0, 9.0, 7.0, "cream")
     # 顶部高光块
-    c.ellipse(33.0, 14.0, 7.0, 2.4, "brown_light")
+    c.ellipse(30.0, 9.0, 8.0, 2.6, "brown_light")
 
 
-def draw_eye(c: PixelCanvas, cx: float, cy: float, mood: str) -> None:
+def draw_eye(c: PixelCanvas, cx: float, cy: float, mood: str,
+             scale: float = 1.0) -> None:
+    s = scale
     if mood in ("blink", "blink_half", "sleep"):
-        c.ellipse(cx, cy, 7.2, 6.8, "outline")
-        c.ellipse(cx, cy, 6.2, 5.8, "cream")
+        c.ellipse(cx, cy, 7.2 * s, 6.8 * s, "outline")
+        c.ellipse(cx, cy, 6.2 * s, 5.8 * s, "cream")
         ix, iy = int(cx), int(cy)
+        n = max(2, int(round(5 * s)))
         if mood == "sleep":
-            c.hline(ix - 4, ix + 4, iy + 2, "eye_black")
-            c.set(ix - 5, iy + 1, "eye_black")
-            c.set(ix + 5, iy + 1, "eye_black")
+            c.hline(ix - n + 1, ix + n - 1, iy + 2, "eye_black")
+            c.set(ix - n, iy + 1, "eye_black")
+            c.set(ix + n, iy + 1, "eye_black")
         elif mood == "blink_half":
-            c.hline(ix - 5, ix + 5, iy + 2, "eye_black")
-            c.hline(ix - 4, ix + 4, iy + 3, "eye_black")
-            c.hline(ix - 6, ix + 6, iy - 1, "cream_dark")
+            c.hline(ix - n, ix + n, iy + 2, "eye_black")
+            c.hline(ix - n + 1, ix + n - 1, iy + 3, "eye_black")
+            c.hline(ix - n - 1, ix + n + 1, iy - 1, "cream_dark")
         else:
-            c.hline(ix - 5, ix + 5, iy + 1, "eye_black")
-            c.hline(ix - 4, ix + 4, iy + 2, "eye_black")
+            c.hline(ix - n, ix + n, iy + 1, "eye_black")
+            c.hline(ix - n + 1, ix + n - 1, iy + 2, "eye_black")
         return
 
-    c.ellipse(cx, cy, 7.4, 7.0, "outline")
-    c.ellipse(cx, cy, 6.4, 6.0, "eye_white")
+    c.ellipse(cx, cy, 7.4 * s, 7.0 * s, "outline")
+    c.ellipse(cx, cy, 6.4 * s, 6.0 * s, "eye_white")
 
-    pupil_dx, pupil_dy, pupil_r = 0.0, 0.0, 3.4
+    pupil_dx, pupil_dy, pupil_r = 0.0, 0.0, 3.4 * s
     if mood == "curious":
-        pupil_dy = -0.8
-        pupil_r = 3.9
+        pupil_dy = -0.8 * s
+        pupil_r = 3.9 * s
     elif mood == "think":
-        pupil_dx, pupil_dy = -1.2, -1.4
-        pupil_r = 3.0
+        pupil_dx, pupil_dy = -1.2 * s, -1.4 * s
+        pupil_r = 3.0 * s
     elif mood == "listening":
-        pupil_r = 3.8
+        pupil_r = 3.8 * s
     elif mood == "happy":
         # 开心：弯月眼
-        c.ellipse(cx, cy, 6.4, 6.0, "cream")
-        c.line(int(cx - 5), int(cy + 3), int(cx - 1), int(cy - 2), "eye_black")
-        c.line(int(cx - 1), int(cy - 2), int(cx + 3), int(cy + 3), "eye_black")
-        c.line(int(cx - 5), int(cy + 4), int(cx - 1), int(cy - 1), "eye_black")
-        c.line(int(cx - 1), int(cy - 1), int(cx + 3), int(cy + 4), "eye_black")
+        c.ellipse(cx, cy, 6.4 * s, 6.0 * s, "cream")
+        dx = int(round(4 * s))
+        dy = int(round(3 * s))
+        c.line(int(cx - dx), int(cy + dy), int(cx - dx / 3), int(cy - dy),
+               "eye_black")
+        c.line(int(cx - dx / 3), int(cy - dy), int(cx + dx), int(cy + dy),
+               "eye_black")
+        c.line(int(cx - dx), int(cy + dy + 1),
+               int(cx - dx / 3), int(cy - dy + 1), "eye_black")
+        c.line(int(cx - dx / 3), int(cy - dy + 1),
+               int(cx + dx), int(cy + dy + 1), "eye_black")
         return
 
     c.ellipse(cx + pupil_dx, cy + pupil_dy, pupil_r, pupil_r, "eye_black")
-    c.ellipse(cx + pupil_dx - 1.2, cy + pupil_dy - 1.2, 1.1, 1.1, "eye_blue")
-    c.set(int(cx + pupil_dx + 0.5), int(cy + pupil_dy + 1.5), "eye_white")
+    c.ellipse(cx + pupil_dx - 1.2 * s, cy + pupil_dy - 1.2 * s,
+              1.1 * s, 1.1 * s, "eye_blue")
+    c.set(int(cx + pupil_dx + 0.5), int(cy + pupil_dy + 1.5 * s),
+          "eye_white")
 
 
 def draw_eyes(c: PixelCanvas, mood: str) -> None:
-    draw_eye(c, 29.0, 29.0, mood)
-    draw_eye(c, 43.0, 29.0, mood)
+    draw_eye(c, 26.0, 33.0, mood, scale=1.55)
+    draw_eye(c, 46.0, 33.0, mood, scale=1.55)
 
 
 def draw_beak(c: PixelCanvas, open_beak: bool = False) -> None:
     if open_beak:
-        c.rect(34, 36, 38, 39, "orange_dark")
-        c.rect(35, 37, 37, 41, "orange")
-        c.hline(35, 37, 40, "outline")
+        c.rect(33, 42, 39, 46, "orange_dark")
+        c.rect(34, 43, 38, 48, "orange")
+        c.hline(34, 38, 47, "outline")
         return
-    c.rect(35, 36, 37, 38, "orange_dark")
-    c.rect(35, 36, 37, 37, "orange")
-    c.set(36, 39, "orange_dark")
+    c.rect(34, 42, 38, 45, "orange_dark")
+    c.rect(34, 42, 38, 43, "orange")
+    c.set(36, 46, "orange_dark")
 
 
 def draw_blush(c: PixelCanvas) -> None:
-    c.rect(21, 35, 24, 36, "blush")
-    c.rect(48, 35, 51, 36, "blush")
+    c.rect(15, 41, 19, 42, "blush")
+    c.rect(53, 41, 57, 42, "blush")
 
 
 def draw_zzz(c: PixelCanvas) -> None:
     # 5x5 像素小 Z，避免依赖字体。
-    c.rect(56, 12, 60, 12, "cream_light")
-    c.set(59, 13, "cream_light")
-    c.set(58, 14, "cream_light")
-    c.set(57, 15, "cream_light")
-    c.rect(56, 16, 60, 16, "cream_light")
+    c.rect(60, 6, 64, 6, "cream_light")
+    c.set(63, 7, "cream_light")
+    c.set(62, 8, "cream_light")
+    c.set(61, 9, "cream_light")
+    c.rect(60, 10, 64, 10, "cream_light")
 
 
 def draw_sound_waves(c: PixelCanvas) -> None:
     for i, r in enumerate((9, 12)):
         for dy in range(-r, r + 1):
-            x = int(round(58 + (r * r - dy * dy) ** 0.5)) if abs(dy) <= r else 0
+            x = int(round(64 + (r * r - dy * dy) ** 0.5)) if abs(dy) <= r else 0
             if i == 0:
-                c.set(x, 27 + dy, "cream_dark")
+                c.set(x, 33 + dy, "cream_dark")
         for dy in range(-r, r + 1):
-            x = int(round(58 + (r * r - dy * dy) ** 0.5)) if abs(dy) <= r else 0
+            x = int(round(64 + (r * r - dy * dy) ** 0.5)) if abs(dy) <= r else 0
             if i == 1:
-                c.set(x, 27 + dy, "cream_dark")
+                c.set(x, 33 + dy, "cream_dark")
 
 
 def draw_egg(c: PixelCanvas) -> None:
