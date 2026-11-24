@@ -849,11 +849,33 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
         codec_->EnableInput(false);
     }
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
-        codec_->EnableOutput(false);
+    // 外部播放（播客等）自己占着喇叭：这里不知道它是否还在放，
+    // 一关就是永久静音（播客没有重新使能的路径），所以整段跳过。
+    if (!external_playback_) {
+        if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+            codec_->EnableOutput(false);
+        }
     }
     if (!codec_->input_enabled() && !codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
+    }
+}
+
+void AudioService::SetExternalPlayback(bool active) {
+    const bool was_active = external_playback_.exchange(active);
+    if (active) {
+        // 接管喇叭：停掉省电检查，避免 15s 后把播客静音。
+        esp_timer_stop(audio_power_timer_);
+        last_output_time_ = std::chrono::steady_clock::now();
+        ESP_LOGI(TAG, "external playback begin (power timer held)");
+        return;
+    }
+    if (was_active) {
+        // 交还喇叭：刷新时间戳再重新上弦，让 15s 空闲计时从头算。
+        last_output_time_ = std::chrono::steady_clock::now();
+        esp_timer_start_periodic(audio_power_timer_,
+                                 AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        ESP_LOGI(TAG, "external playback end (power timer resumed)");
     }
 }
 

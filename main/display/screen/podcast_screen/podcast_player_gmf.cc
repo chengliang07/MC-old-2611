@@ -28,6 +28,7 @@
 #include "media_lib_adapter.h"
 #include "podcast_client.h"
 #include "system_info.h"
+#include "application.h"
 
 #ifdef CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN
 #include "esp_gmf_rate_cvt.h"
@@ -55,6 +56,20 @@ struct PlayerContext {
     uint32_t generation = 0;
 };
 
+// 播客自己占着喇叭：进播放任务时接管 AudioService 的 15s 省电检查，
+// 任务退出（正常结束/出错/被停止）时自动交还，避免中途被静音且无法恢复。
+// 预播（prepare）期间播放任务同样存活着，所以这里不区分 prepare。
+struct ExternalPlaybackGuard {
+    ExternalPlaybackGuard() {
+        Application::GetInstance().GetAudioService().SetExternalPlayback(true);
+    }
+    ~ExternalPlaybackGuard() {
+        Application::GetInstance().GetAudioService().SetExternalPlayback(false);
+    }
+    ExternalPlaybackGuard(const ExternalPlaybackGuard&) = delete;
+    ExternalPlaybackGuard& operator=(const ExternalPlaybackGuard&) = delete;
+};
+
 std::mutex s_player_mutex;
 std::mutex s_api_mutex;
 esp_asp_handle_t s_player = nullptr;
@@ -75,6 +90,11 @@ bool s_media_lib_ready = false;
 // 位置优先按“已消费音频字节 / 总字节”换算；总字节未知时退回墙钟估算。
 std::atomic<int64_t> s_range_offset{0};
 std::atomic<int64_t> s_total_bytes{0};
+// 已消费的压缩字节：live 是当前连接的实时值，committed 是之前连接累计值。
+// 断流重连时 GMF 的 info.pos 不会随读取推进，只能靠自己记这份账喂 Range，
+// 否则每次都从 bytes=0 重播。
+std::atomic<int64_t> s_consumed_live{0};
+std::atomic<int64_t> s_consumed_committed{0};
 std::atomic<int64_t> s_base_ms{0};
 std::atomic<int64_t> s_clock_us{0};
 std::atomic<int> s_speed_q1000{1000};
@@ -182,23 +202,8 @@ int64_t ClampPositionMs(int64_t ms) {
     return ms;
 }
 
-// 已消费字节 = GMF IO 的 pos（release_read 时更新）。
-// 不能用网络已读字节，否则重连会跳过尚未播放的缓冲。
-int64_t ConsumedPositionBytes(uint32_t generation) {
-    std::lock_guard<std::mutex> lock(s_io_mutex);
-    if (s_http_io_generation.load(std::memory_order_acquire) != generation) {
-        return 0;
-    }
-    esp_gmf_io_handle_t io = s_http_io.load(std::memory_order_acquire);
-    if (io != nullptr) {
-        esp_gmf_info_file_t info = {};
-        if (esp_gmf_io_get_info(io, &info) == ESP_GMF_ERR_OK) {
-            return static_cast<int64_t>(info.pos);
-        }
-    }
-    return 0;
-}
-
+// 已消费字节（压缩口径）。info.pos 只在 seek 时写入、读取过程不推进，
+// 所以必须用 speed monitor 的 total_bytes - 缓冲余量自己算。
 int64_t ConsumedAudioBytes(uint32_t generation) {
     std::lock_guard<std::mutex> lock(s_io_mutex);
     if (s_http_io_generation.load(std::memory_order_acquire) != generation) {
@@ -218,16 +223,31 @@ int64_t ConsumedAudioBytes(uint32_t generation) {
     }
     const int64_t consumed =
         static_cast<int64_t>(stats.total_bytes) - static_cast<int64_t>(filled);
-    return consumed > 0 ? consumed : 0;
+    if (consumed <= 0) {
+        return 0;
+    }
+    // 单调递增采样：给重连时的 Range 用，进度条也读它。
+    int64_t prev = s_consumed_live.load(std::memory_order_relaxed);
+    if (consumed > prev) {
+        s_consumed_live.store(consumed, std::memory_order_relaxed);
+    }
+    return consumed;
+}
+
+// 本集累计已消费字节（含之前各次连接的贡献）。
+int64_t TotalConsumedBytes() {
+    return s_consumed_committed.load(std::memory_order_relaxed) +
+           s_consumed_live.load(std::memory_order_relaxed);
 }
 
 int64_t CurrentPositionMs() {
     const int duration = EffectiveDurationSeconds();
     const int64_t total = s_total_bytes.load(std::memory_order_relaxed);
     if (duration > 0 && total > 0) {
+        // 先采样一次刷新 s_consumed_live（进度条 500ms 调一次，足够细）。
+        ConsumedAudioBytes(s_generation.load(std::memory_order_relaxed));
         int64_t bytes =
-            s_range_offset.load(std::memory_order_relaxed) +
-            ConsumedAudioBytes(s_generation.load(std::memory_order_relaxed));
+            s_range_offset.load(std::memory_order_relaxed) + TotalConsumedBytes();
         if (bytes > total) {
             bytes = total;
         }
@@ -548,6 +568,11 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
     if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
         TimingLog(player_ctx->generation, "http_request");
         s_headers_parsed.store(false, std::memory_order_release);
+        // 新连接开始：把上一连接已消费的量并入累计，Range 才能接着往下要。
+        // committed + live 的和在提交前后不变，所以重复进入也安全。
+        s_consumed_committed.fetch_add(
+            s_consumed_live.exchange(0, std::memory_order_acq_rel),
+            std::memory_order_acq_rel);
         // 限制阻塞读时长，停止/切节目时不会被默认 30s 读超时拖住。
         esp_http_client_set_timeout_ms(
             client, s_quick_url.load(std::memory_order_relaxed) ? 5000 : 8000);
@@ -572,7 +597,7 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
                                        authorization.c_str());
         }
         const int64_t pos = s_range_offset.load(std::memory_order_relaxed) +
-                            ConsumedPositionBytes(player_ctx->generation);
+                            s_consumed_committed.load(std::memory_order_relaxed);
         if (pos > 0) {
             char range[48] = {};
             snprintf(range, sizeof(range), "bytes=%d-",
@@ -598,7 +623,9 @@ bool RegisterPodcastHttpIo(esp_asp_handle_t player, PlayerContext* player_ctx) {
     http_cfg.io_cfg.buffer_cfg.buffer_size =
         quick ? 64 * 1024 : 512 * 1024;
     http_cfg.io_cfg.buffer_cfg.io_size = quick ? 4 * 1024 : 16 * 1024;
-    http_cfg.io_cfg.enable_speed_monitor = false;
+    // 进度/续传要靠 speed monitor 的字节统计：关掉它 get_speed_stats 恒返回 0，
+    // 进度条会永远停在 0、重连也会从 0 重播。
+    http_cfg.io_cfg.enable_speed_monitor = true;
 
     esp_gmf_io_handle_t http_io = nullptr;
     if (esp_gmf_io_http_init(&http_cfg, &http_io) != ESP_GMF_ERR_OK ||
@@ -907,6 +934,8 @@ void PodcastPlayTask(void* arg) {
     }
 
     codec->EnableOutput(true);
+    // 从这里到任务退出，喇叭归播客，电源定时器不再关输出。
+    ExternalPlaybackGuard output_guard;
     if (!prepare) {
         s_output_generation.store(generation, std::memory_order_relaxed);
         s_output_enabled.store(true, std::memory_order_release);
@@ -1095,6 +1124,8 @@ static bool StartInternal(const std::string& url, std::string& error,
         s_quick_url.store(IsQuickPronunciationUrl(url),
                           std::memory_order_relaxed);
         s_range_offset.store(range_bytes, std::memory_order_relaxed);
+        s_consumed_live.store(0, std::memory_order_relaxed);
+        s_consumed_committed.store(0, std::memory_order_relaxed);
         s_http_capture_allowed.store(false, std::memory_order_release);
         ClearHttpIo(0);
         s_headers_parsed.store(false, std::memory_order_relaxed);
@@ -1305,6 +1336,8 @@ void PodcastPlayer::Stop() {
     s_clock_us.store(0, std::memory_order_relaxed);
     s_base_ms.store(0, std::memory_order_relaxed);
     s_range_offset.store(0, std::memory_order_relaxed);
+    s_consumed_live.store(0, std::memory_order_relaxed);
+    s_consumed_committed.store(0, std::memory_order_relaxed);
     s_total_bytes.store(0, std::memory_order_relaxed);
     s_estimated_duration_sec.store(0, std::memory_order_relaxed);
     s_http_capture_allowed.store(false, std::memory_order_release);

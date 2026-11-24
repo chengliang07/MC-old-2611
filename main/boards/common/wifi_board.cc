@@ -174,6 +174,9 @@ void WifiBoard::ResetWifiConfiguration() {
         Settings settings("wifi", true);
         settings.SetInt("force_ap", 1);
     }
+    // 写入是异步排队的：重启前必须等它落盘，否则可能丢掉这个标志，
+    // 表现为“点了配网但重启后还是老网络”。
+    Settings::Flush(1500);
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
     vTaskDelay(pdMS_TO_TICKS(1000));
     // Reboot the device

@@ -73,6 +73,8 @@ void DualNetworkBoard::SwitchNetworkType() {
         display->ShowNotification(Lang::Strings::SWITCH_TO_WIFI_NETWORK);
     }
     vTaskDelay(pdMS_TO_TICKS(1000));
+    // NVS 写入是异步排队的，重启前必须确认落盘，否则网络类型可能没切换成功。
+    Settings::Flush(1500);
     auto& app = Application::GetInstance();
     app.Reboot();
 }

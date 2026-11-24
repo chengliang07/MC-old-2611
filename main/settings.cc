@@ -26,7 +26,10 @@ QueueHandle_t s_write_queue = nullptr;
 StaticTask_t s_writer_tcb;
 StaticQueue_t s_write_queue_cb;
 StackType_t s_writer_stack[3072];
-uint32_t s_write_queue_storage[12 * sizeof(NvsWriteJob*) / sizeof(uint32_t)];
+// 音量拖动 / 亮度滑动这类高频写很容易把队列刷满；32 槽足够覆盖一次手势。
+constexpr size_t kNvsWriteQueueDepth = 32;
+uint32_t s_write_queue_storage[kNvsWriteQueueDepth * sizeof(NvsWriteJob*) /
+                               sizeof(uint32_t)];
 
 void NvsWriterTask(void* /*arg*/) {
     NvsWriteJob* job = nullptr;
@@ -50,7 +53,7 @@ QueueHandle_t GetWriteQueue() {
     static std::once_flag once;
     std::call_once(once, []() {
         s_write_queue = xQueueCreateStatic(
-            12, sizeof(NvsWriteJob*),
+            kNvsWriteQueueDepth, sizeof(NvsWriteJob*),
             reinterpret_cast<uint8_t*>(s_write_queue_storage),
             &s_write_queue_cb);
         if (s_write_queue == nullptr) {
@@ -81,9 +84,26 @@ void Settings::EnqueueWrite(
     auto* job = new NvsWriteJob{ns, fn};
     // 只入队、不等待：调用方通常是 LVGL 线程，绝不能在调参时阻塞。
     if (xQueueSend(queue, &job, 0) != pdTRUE) {
-        ESP_LOGE(TAG, "nvs write queue full, drop write for %s", ns.c_str());
+        ESP_LOGW(TAG, "nvs write queue full, drop write for %s", ns.c_str());
         delete job;
     }
+}
+
+bool Settings::Flush(uint32_t timeout_ms) {
+    QueueHandle_t queue = GetWriteQueue();
+    if (queue == nullptr) {
+        return false;
+    }
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (uxQueueMessagesWaiting(queue) > 0) {
+        if (xTaskGetTickCount() > deadline) {
+            ESP_LOGW(TAG, "nvs write flush timed out, %u left",
+                     static_cast<unsigned>(uxQueueMessagesWaiting(queue)));
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
 }
 
 Settings::Settings(const std::string& ns, bool read_write) : ns_(ns), read_write_(read_write) {
@@ -120,8 +140,24 @@ std::string Settings::GetString(const std::string& key, const std::string& defau
     }
 
     std::string value;
+    esp_err_t err = ESP_OK;
     value.resize(length);
-    ESP_ERROR_CHECK(nvs_get_str(handle, key.c_str(), value.data(), &length));
+    if (length > 0) {
+        err = nvs_get_str(handle, key.c_str(), value.data(), &length);
+    }
+    if (err != ESP_OK) {
+        // 两次查询之间写任务改了同一个 key 时长度会变（INVALID_LENGTH）。
+        // 重试一次再放弃：这里绝不能用 ESP_ERROR_CHECK，否则设置写一半就整机重启。
+        length = 0;
+        if (nvs_get_str(handle, key.c_str(), nullptr, &length) != ESP_OK ||
+            length == 0) {
+            return default_value;
+        }
+        value.assign(length, '\0');
+        if (nvs_get_str(handle, key.c_str(), value.data(), &length) != ESP_OK) {
+            return default_value;
+        }
+    }
     while (!value.empty() && value.back() == '\0') {
         value.pop_back();
     }

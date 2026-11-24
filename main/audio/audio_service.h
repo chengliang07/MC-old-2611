@@ -118,6 +118,9 @@ public:
     AudioProcessor* GetAudioProcessor() { return audio_processor_.get(); }
     // 播放 TTS 期间只上传本地 VAD 判定为外部语音的音频，避免回声上行。
     void SetBargeInActive(bool active);
+    // 外部模块（播客/发音等）直接驱动 codec 输出时，用它接管喇叭：
+    // 期间停掉 15s 省电检查，否则播客会被中途静音且无法恢复。
+    void SetExternalPlayback(bool active);
     // 诊断用：静音上行，只保留本地 AFE 处理
     void SetVoiceUploadMuted(bool muted) { voice_upload_muted_ = muted; }
     // 自供 AEC 参考：用实际播放的 PCM 替代模组参考通道
@@ -181,6 +184,7 @@ private:
     bool device_aec_enabled_ = false;  // 偏好；等语音处理器创建后再落到 AFE
     bool voice_detected_ = false;
     std::atomic<bool> barge_in_active_{false};
+    std::atomic<bool> external_playback_{false};
     std::atomic<bool> voice_upload_muted_{false};
     std::atomic<bool> self_aec_ref_{false};
     std::atomic<int> aec_ref_delay_ms_{40};

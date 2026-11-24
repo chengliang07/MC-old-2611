@@ -9,7 +9,7 @@
 #include <cmath>
 #include "application.h"
 
-extern Application* g_barge_in_app;
+extern std::atomic<Application*> g_barge_in_app;
 extern std::atomic<bool> g_barge_in_pending;
 #include <memory>
 #include <sstream>
@@ -285,9 +285,10 @@ void AfeWakeWord::AudioDetectionTask() {
                 }
                 if (!is_speaking_ && speech_frames_ >= 2) {
                     is_speaking_ = true;
-                    if (g_barge_in_app != nullptr) {
+                    Application* app = g_barge_in_app.load(std::memory_order_acquire);
+                    if (app != nullptr) {
                         g_barge_in_pending.store(true, std::memory_order_relaxed);
-                        xEventGroupSetBits(g_barge_in_app->GetEventGroup(),
+                        xEventGroupSetBits(app->GetEventGroup(),
                                            MAIN_EVENT_BARGE_IN);
                     }
                 }

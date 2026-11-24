@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -126,9 +127,13 @@ private:
     bool TryEnableWakeWordForVoiceUi();
 
     bool has_server_time_ = false;
-    bool aborted_ = false;
+    // 跨任务读写（主任务写在协议 RX 任务里读），必须原子。
+    std::atomic<bool> aborted_{false};
     int64_t barge_in_ready_at_us_ = 0;
-    int64_t abort_suppress_until_us_ = 0;
+    std::atomic<int64_t> abort_suppress_until_us_{0};
+    // 一次打断只愿意丢弃「一条」迟到的 tts start；之后必须放行，
+    // 否则用户打断后紧接着的新一轮回答也会被当成旧 TTS 丢掉。
+    std::atomic<int> stale_starts_ignored_{0};
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
     TaskHandle_t main_event_loop_task_handle_ = nullptr;

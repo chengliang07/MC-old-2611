@@ -1065,10 +1065,14 @@ void stop_session() {
 }
 
 void on_screen_clicked(lv_event_t* /*event*/) {
-    if (s_waiting_wake.load(std::memory_order_acquire) &&
-        !s_worker_running.load(std::memory_order_acquire)) {
-        start_session();
+    // worker 没在跑 = 未连接 / 连不上 / 已断开 / 说完再见，
+    // 这时点屏幕都应该重试。之前只认 s_waiting_wake，导致连接失败 3 次后
+    // 页面“点不动”，只能退出重进。
+    if (s_worker_running.load(std::memory_order_acquire)) {
+        return;
     }
+    s_waiting_wake.store(false, std::memory_order_release);
+    start_session();
 }
 
 void exit_to_return_screen() {

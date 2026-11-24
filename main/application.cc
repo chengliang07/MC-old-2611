@@ -37,7 +37,7 @@ constexpr bool kBargeInByVad = true;
 // 自供 AEC 参考延迟：实测 40~100ms 效果最好，固定使用，不再轮换
 constexpr int kSelfAecDelayMs = 40;
 std::atomic<bool> g_barge_in_pending{false};
-Application* g_barge_in_app = nullptr;
+std::atomic<Application*> g_barge_in_app{nullptr};
 
 #ifdef HAVE_LVGL
 #include "ota_screen.h"
@@ -607,7 +607,12 @@ void Application::Start() {
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (aborted_) {
-            return;
+            // 抑制窗过期就恢复接收，避免 aborted_ 永久为真把下行音频全丢掉。
+            if (esp_timer_get_time() >= abort_suppress_until_us_.load()) {
+                aborted_ = false;
+            } else {
+                return;
+            }
         }
         if (device_state_ == kDeviceStateSpeaking) {
             packet->generation = audio_service_.GetPlaybackGeneration();
@@ -638,9 +643,11 @@ void Application::Start() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this, display]() {
-                    if (esp_timer_get_time() < abort_suppress_until_us_) {
-                        // 本地打断后服务端可能还在发旧 TTS，忽略迟到的 start，
-                        // 否则会被拉回 Speaking 继续播放，导致用户这句话识别不到。
+                    if (esp_timer_get_time() < abort_suppress_until_us_.load() &&
+                        stale_starts_ignored_.fetch_add(1) == 0) {
+                        // 本地打断后服务端可能还在发旧 TTS，只丢这一条迟到的 start；
+                        // 之后再来的 start 视为新一轮回答，必须放行，否则用户
+                        // 打断后紧接着的追问会静默无响应。
                         ESP_LOGW(TAG, "ignore stale tts start after abort");
                         return;
                     }
@@ -955,7 +962,10 @@ void Application::OnWakeWordDetected() {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
-    abort_suppress_until_us_ = esp_timer_get_time() + 2500000;
+    // 1.2s 足够挡住被中断那轮的残留 TTS 包；原来 2.5s 会把用户打断后
+    // 很快就到达的新一轮回答也一起吞掉。
+    abort_suppress_until_us_ = esp_timer_get_time() + 1200000;
+    stale_starts_ignored_ = 0;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }

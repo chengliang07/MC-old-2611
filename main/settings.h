@@ -22,6 +22,9 @@ public:
     // 在内部 RAM 栈的专用任务上串行执行所有 NVS 写入。
     static void EnqueueWrite(const std::string& ns,
                              const std::function<void(nvs_handle_t)>& fn);
+    // 等排队中的写入落盘（最多等 timeout_ms）。写完就立刻重启的路径
+    // （例如 wifi_board 的 ResetWifiConfiguration）必须调用它。
+    static bool Flush(uint32_t timeout_ms = 1000);
 
 private:
     // 写入型对象不在构造时打开 NVS，避免在 LVGL 任务里触发 Flash 操作。

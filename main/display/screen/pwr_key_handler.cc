@@ -68,6 +68,14 @@ void OnEnterStandbyAsync(void* /*arg*/) { StandbyScreen::Show(); }
 
 void OnLeaveStandbyAsync(void* /*arg*/) { StandbyScreen::ReturnHome(); }
 
+// 按键回调跑在 IOExpander 任务里，口语页的中断处理会读 lv_screen_active() 并动控件，
+// 必须回到 LVGL 线程执行，否则是跨线程碰 LVGL（偶发花屏/崩溃）。
+void OnOralInterruptAsync(void* /*arg*/) {
+    if (s_oral_short_press != nullptr) {
+        s_oral_short_press();
+    }
+}
+
 void OnShortPress() {
     const char* screen = PwrKey_ActiveScreen();
     ESP_LOGI(TAG, "short-press on screen=%s (depth=%d)", screen, s_depth);
@@ -98,8 +106,8 @@ void OnShortPress() {
     }
 
     if (std::strcmp(screen, "oral") == 0 && s_oral_short_press != nullptr) {
-        ESP_LOGI(TAG, "dispatch: oral interrupt");
-        s_oral_short_press();
+        ESP_LOGI(TAG, "dispatch: oral interrupt (marshalled to LVGL)");
+        lv_async_call(OnOralInterruptAsync, nullptr);
         return;
     }
 
