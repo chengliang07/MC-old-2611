@@ -1,9 +1,11 @@
 name: Release Metalio Claw4
 
 on:
-  push:
-    tags:
-      - "v*"
+  # 自动发布已关闭：推 v* 标签不再自动构建/发 Release，改为只在手动触发时执行。
+  # 需要恢复时，把下面这段加回来：
+  # push:
+  #   tags:
+  #     - "v*"
   workflow_dispatch:
     inputs:
       version:

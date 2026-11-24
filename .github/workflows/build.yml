@@ -149,7 +149,10 @@ jobs:
   publish-latest-release:
     name: Publish Latest release
     needs: [prepare, build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
+    # 发布已关闭：只想自用保存版本时，构建产物留在 Actions artifact 即可（仅自己可下载，90 天过期）。
+    # 需要恢复自动发布时，把下面改回：
+    # if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
