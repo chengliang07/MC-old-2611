@@ -20,8 +20,10 @@
 - 症状：`assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
   cache_utils.c:141 (esp_task_stack_is_sane_cache_disabled())`。
 - NVS 写入会关闭 Cache，此时 PSRAM 栈不可访问，必然断言。
-- 处理：`Settings` 的所有写操作已改为在内部 RAM 栈的临时任务上执行
-  （`main/settings.cc` 的 `RunNvsWrite`）。
+- 处理：`Settings` 的所有写操作已改为投递到内部 RAM 栈的常驻任务串行执行
+  （`main/settings.cc` 的 `EnqueueWrite` / `NvsWriterTask`，队列 32 槽，每次最多等 20ms）。
+  写入是**异步**的：写完立刻 `esp_restart()` 的路径必须先调
+  `Settings::Flush(ms)`（配网、网络切换这两处已加），否则可能丢写。
 
 ## 4. 不要关闭这两个配置
 

@@ -65,7 +65,7 @@ def validate(doc: dict) -> None:
                 pass
 
 
-def generate(catalog_path: str, output_path: str) -> None:
+def generate(catalog_path: str, output_path: str, check_only: bool = False) -> bool:
     with open(catalog_path, "r", encoding="utf-8") as f:
         doc = json.load(f)
     validate(doc)
@@ -159,14 +159,30 @@ def generate(catalog_path: str, output_path: str) -> None:
     lines.append("}  // namespace I18n")
     lines.append("")
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     content = "\n".join(lines)
+    if check_only:
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+        except FileNotFoundError:
+            print(f"CHECK FAILED: {output_path} missing")
+            return False
+        if existing != content:
+            print(
+                f"CHECK FAILED: {output_path} is stale, run "
+                f"python {os.path.basename(__file__)} to regenerate"
+            )
+            return False
+        print(f"CHECK OK: {output_path} up to date ({len(strings)} strings)")
+        return True
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(content)
     print(
         f"Generated {output_path}: {len(strings)} strings × "
         f"{len(locale_ids)} locales"
     )
+    return True
 
 
 def main() -> int:
@@ -181,9 +197,14 @@ def main() -> int:
         "--output",
         default=os.path.join(root, "main", "i18n", "i18n_strings_gen.h"),
     )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="只校验生成物是否与 catalog 一致，不写文件（CI 用）",
+    )
     args = ap.parse_args()
-    generate(args.catalog, args.output)
-    return 0
+    ok = generate(args.catalog, args.output, check_only=args.check)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

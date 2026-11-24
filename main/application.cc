@@ -545,9 +545,12 @@ void Application::Start() {
 
     /* Wait for the network to be ready */
     board.StartNetwork();
-    // lwIP 就绪后再启用 UDP 诊断通道（提前创建 socket 会导致启动崩溃）
-    // kSelfAecDelayMs 为自供 AEC 参考延迟，由 SetDeviceState 在播放时设置
+    // lwIP 就绪后再启用 UDP 诊断通道（提前创建 socket 会导致启动崩溃）。
+    // 默认关闭：它会把设备状态广播到局域网，并给每行日志加一次格式化 +
+    // 三次子串扫描。需要无线抓日志时在 menuconfig 里打开。
+#if CONFIG_DIAG_UDP_LOG
     DiagLogEnableUdp(true);
+#endif
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
@@ -707,7 +710,16 @@ void Application::Start() {
                      user_text.find("看看") != std::string::npos ||
                      user_text.find("喂") != std::string::npos ||
                      user_text.find("孵化") != std::string::npos);
-                if (wants_podcast || wants_english || wants_pet) {
+                // 否定句直接放过：说"我不想听播客 / 别放英语"不该跳进那一页。
+                const bool negative =
+                    user_text.find("不想") != std::string::npos ||
+                    user_text.find("不要") != std::string::npos ||
+                    user_text.find("不用") != std::string::npos ||
+                    user_text.find("别") != std::string::npos ||
+                    user_text.find("停止") != std::string::npos ||
+                    user_text.find("关掉") != std::string::npos;
+                if (!negative &&
+                    (wants_podcast || wants_english || wants_pet)) {
                     Schedule([this, wants_podcast, wants_pet]() {
                         ESP_LOGI(TAG, "local intent: open %s",
                                  wants_podcast ? "podcast" :

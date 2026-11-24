@@ -199,6 +199,15 @@ config PODCAST_DEVICE_TOKEN
         the token is provisioned into NVS (namespace "podcast", key
         "device_token") at binding time. Never commit a real token here.
 
+config DIAG_UDP_LOG
+    bool "Broadcast diagnostic log lines over UDP"
+    default n
+    help
+        Sends selected log lines (STATE:, echo diag, aec ref delay) to the LAN on
+        UDP port 8266. Off by default: it exposes device state on the network and
+        adds a vsnprintf + three strstr to every log line. Enable only when
+        debugging without a serial console.
+
 config USE_AUDIO_PROCESSOR
     bool "Enable Audio Noise Reduction"
     default y

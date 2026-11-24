@@ -82,9 +82,11 @@ void Settings::EnqueueWrite(
         return;
     }
     auto* job = new NvsWriteJob{ns, fn};
-    // 只入队、不等待：调用方通常是 LVGL 线程，绝不能在调参时阻塞。
-    if (xQueueSend(queue, &job, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "nvs write queue full, drop write for %s", ns.c_str());
+    // 只等最多 20ms（约一帧）：正常情况立刻入队；真赶上队列满时宁可让
+    // 调用方卡一帧，也不静默丢写（音量/亮度拖动刷满队列时会丢设置）。
+    if (xQueueSend(queue, &job, pdMS_TO_TICKS(20)) != pdTRUE) {
+        ESP_LOGE(TAG, "nvs write queue full after 20ms, drop write for %s",
+                 ns.c_str());
         delete job;
     }
 }

@@ -182,8 +182,11 @@ static void LogBootBanner() {
              api_base.c_str(), static_cast<int>(device_token.size()));
 }
 
+#if CONFIG_DIAG_UDP_LOG
 // 调试通道：把关键日志同时通过 UDP 广播到局域网（8266），
 // 避免 USB Serial/JTAG 句柄在运行中失效导致无法抓日志。
+// 默认关闭（menuconfig: DIAG_UDP_LOG）：它会广播设备状态，且给每行日志
+// 加一次 vsnprintf + 三次 strstr。
 static int s_diag_udp_sock = -1;
 static vprintf_like_t s_prev_log_vprintf = nullptr;
 static bool s_diag_udp_enabled = false;
@@ -241,11 +244,18 @@ static int DiagLogVprintf(const char* fmt, va_list ap) {
     return vprintf(fmt, ap);
 }
 
+#else
+// 未启用 UDP 诊断时的空实现：application.cc 里的调用点仍可编译。
+void DiagLogEnableUdp(bool /*enable*/) {}
+#endif
+
 extern "C" void app_main(void)
 {
+#if CONFIG_DIAG_UDP_LOG
     s_prev_log_vprintf = esp_log_set_vprintf(DiagLogVprintf);
     s_boot_reset_reason = static_cast<int>(esp_reset_reason());
-    ESP_LOGI(TAG, "@@RESET@@ reason=%d", s_boot_reset_reason);
+#endif
+    ESP_LOGI(TAG, "@@RESET@@ reason=%d", static_cast<int>(esp_reset_reason()));
 
     // Initialize the default event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());

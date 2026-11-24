@@ -122,6 +122,30 @@ jobs:
           source $IDF_PATH/export.sh
           python scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
 
+      - name: Verify i18n and image budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 翻译表生成物必须与 catalog.json 一致，否则英文界面会静默回落中文。
+          python3 scripts/gen_i18n.py --check
+
+          # 应用镜像必须小于 ota_0；超了就是"设备永远升级不了"的前兆。
+          APP_BYTES=$(stat -c%s build/xiaozhi.bin)
+          OTA0_RAW=$(grep -E '^\s*ota_0' partitions/v1/32m_dual.csv | head -1 | awk -F',' '{gsub(/ /,"",$5); print $5}')
+          case "$OTA0_RAW" in
+            *M) OTA0_BYTES=$(( ${OTA0_RAW%M} * 1024 * 1024 )) ;;
+            *K) OTA0_BYTES=$(( ${OTA0_RAW%K} * 1024 )) ;;
+            *)  OTA0_BYTES=0 ;;
+          esac
+          if [ "$OTA0_BYTES" -le 0 ]; then
+            echo "::warning::cannot parse ota_0 size from partition csv, skip budget check"
+          elif [ "$APP_BYTES" -ge "$OTA0_BYTES" ]; then
+            echo "::error::app image $APP_BYTES >= ota_0 $OTA0_BYTES"
+            exit 1
+          else
+            echo "image budget ok: $APP_BYTES / $OTA0_BYTES"
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

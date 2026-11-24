@@ -1040,7 +1040,9 @@ void start_session() {
         s_resample_position = 0;
     }
     s_worker_running.store(true, std::memory_order_release);
-    if (xTaskCreate(worker_task, "oral_ws", 8192, nullptr, 4, &s_worker_task) != pdPASS) {
+    // 这个任务里同时做 DNS 解析、TLS 握手和 WebSocket 升级，
+    // 8KB 栈在弱网/证书链较长时余量太小，加到 12KB。
+    if (xTaskCreate(worker_task, "oral_ws", 12288, nullptr, 4, &s_worker_task) != pdPASS) {
         s_worker_running.store(false, std::memory_order_release);
         s_worker_task = nullptr;
         post_ui(s_session.load(), State::Error, "启动口语会话失败", BubbleRole::Assistant, nullptr);

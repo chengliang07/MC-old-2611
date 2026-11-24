@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -877,27 +878,28 @@ void StartReviewWorker(const std::string& task_id) {
     }
 }
 
-void StartSubmitWorker(const std::string& result) {
-    if (s_current_task_id.empty() ||
-        s_current_index >= s_review.entries.size()) {
-        return;
-    }
+struct PendingSubmit {
+    std::string task_id;
+    std::string word_id;
+    std::string result;
+};
+// 提交串行化：上一题的 POST 还没回来时，新结果排队而不是丢弃
+// （之前 busy 直接 return，UI 仍显示"已保存"，一行记录就没了）。
+std::deque<PendingSubmit> s_pending_submits;
+constexpr size_t kMaxPendingSubmits = 8;
+
+void PostSubmitNext();
+
+bool BeginSubmit(const std::string& task_id, const std::string& word_id,
+                 const std::string& result) {
     if (s_submit_busy.exchange(true, std::memory_order_acq_rel)) {
-        return;
+        return false;
     }
     auto* context = new RequestResult{};
     context->kind = RequestKind::Result;
-    context->task_id = s_current_task_id;
-    const EnglishEntry& entry = s_review.entries[s_current_index];
-    if (!entry.word_id_from_server) {
-        ESP_LOGW(TAG, "skip result submit: entry has no server word_id");
-        delete context;
-        s_submit_busy.store(false, std::memory_order_release);
-        return;
-    }
-    context->word_id = entry.word_id;
+    context->task_id = task_id;
+    context->word_id = word_id;
     context->result = result;
-    context->index = static_cast<int>(s_current_index);
     // 结果保存走独立任务，不占用全局 busy 锁：
     // 否则一题的 POST 未返回时，列表刷新和进入下一任务都会被挡 5 秒。
     SetStatus(I18n::T("正在保存结果..."));
@@ -917,6 +919,8 @@ void StartSubmitWorker(const std::string& result) {
                 }
                 delete request;
                 s_submit_busy.store(false, std::memory_order_release);
+                // 回到 LVGL 线程把排队中的下一条发出去。
+                PostSubmitNext();
                 FinishWorkerTask();
             },
             "english_result", 8192, context) != pdPASS) {
@@ -924,6 +928,43 @@ void StartSubmitWorker(const std::string& result) {
         s_submit_busy.store(false, std::memory_order_release);
         SetStatus(I18n::T("保存结果失败"));
     }
+    return true;
+}
+
+void DrainPendingSubmitAsync(void* /*arg*/) {
+    if (s_submit_busy.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (s_pending_submits.empty()) {
+        return;
+    }
+    PendingSubmit next = std::move(s_pending_submits.front());
+    s_pending_submits.pop_front();
+    BeginSubmit(next.task_id, next.word_id, next.result);
+}
+
+void PostSubmitNext() { lv_async_call(DrainPendingSubmitAsync, nullptr); }
+
+void StartSubmitWorker(const std::string& result) {
+    if (s_current_task_id.empty() ||
+        s_current_index >= s_review.entries.size()) {
+        return;
+    }
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (!entry.word_id_from_server) {
+        ESP_LOGW(TAG, "skip result submit: entry has no server word_id");
+        return;
+    }
+    if (BeginSubmit(s_current_task_id, entry.word_id, result)) {
+        return;
+    }
+    if (s_pending_submits.size() >= kMaxPendingSubmits) {
+        s_pending_submits.pop_front();
+    }
+    s_pending_submits.push_back(
+        PendingSubmit{s_current_task_id, entry.word_id, result});
+    ESP_LOGW(TAG, "submit busy, queued (%u pending)",
+             static_cast<unsigned>(s_pending_submits.size()));
 }
 
 void OnTaskClicked(lv_event_t* event) {
