@@ -864,7 +864,7 @@ void PrefetchFirstPlayUrlWorker(void* data) {
         // 也不能把别的模块挤到 CreateHttp 失败。
         const size_t largest_internal = heap_caps_get_largest_free_block(
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (largest_internal < 120 * 1024) {
+        if (largest_internal < 96 * 1024) {
             ESP_LOGW(TAG, "skip prepare, internal largest=%u",
                      static_cast<unsigned>(largest_internal));
             continue;
