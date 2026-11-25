@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""生成宠物页弹窗用的 6 个彩色猫头鹰头像，以及右上角蛋按钮的小图。
+
+头像只保留头部（耳羽 + 脸盘 + 眼睛 + 喙），每个一种主色，用来区分不同应用入口。
+画法与 generate_owl.py 完全一致：72x72 逻辑画布，纯色像素块，2 倍最近邻放大后
+按内容裁切，输出到 main/xingzhi-assets/ic_pet_head_*.png 与 ic_pet_egg_icon.png。
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+from PIL import Image
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from generate_owl import PixelCanvas, draw_beak, draw_eyes  # noqa: E402
+
+ASSETS = os.path.normpath(os.path.join(HERE, "..", "..", "main", "xingzhi-assets"))
+LOGICAL_SCALE = 2
+
+# 文件名 -> (主色, 中文名用途)
+HEADS = {
+    "ic_pet_head_word": (0x4C, 0x6F, 0xFF),     # 单词丢
+    "ic_pet_head_oral": (0x8B, 0x5C, 0xF6),     # 口语丢
+    "ic_pet_head_math": (0xF5, 0x9E, 0x0B),     # 数学丢
+    "ic_pet_head_podcast": (0x10, 0xB9, 0x81),  # 播客丢
+    "ic_pet_head_plan": (0xEC, 0x48, 0x99),     # 计划丢
+    "ic_pet_head_task": (0x06, 0xB6, 0xD4),     # 任务丢
+}
+
+
+def darker(rgb: tuple[int, int, int], k: float = 0.72) -> tuple[int, int, int]:
+    return tuple(int(v * k) for v in rgb)
+
+
+def lighter(rgb: tuple[int, int, int], k: float = 1.35) -> tuple[int, int, int]:
+    return tuple(min(255, int(v * k)) for v in rgb)
+
+
+def draw_ears(c: PixelCanvas, color: tuple[int, int, int]) -> None:
+    top = 2
+    for cx in (20, 52):
+        for i in range(4):
+            half = max(0, 4 - i - 1)
+            c.hline(cx - half, cx + half, top + i, color)
+        c.set(cx, top - 1, "outline")
+
+
+def draw_head(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
+    c.ellipse(36.0, 30.0, 33.0, 28.0, "outline")
+    c.ellipse(36.0, 30.0, 32.0, 27.0, fill)
+    # 奶油色脸盘
+    c.ellipse(26.0, 33.0, 15.5, 14.0, "cream")
+    c.ellipse(46.0, 33.0, 15.5, 14.0, "cream")
+    c.ellipse(36.0, 39.0, 9.0, 7.0, "cream")
+    c.ellipse(30.0, 9.0, 8.0, 2.6, lighter(fill))
+
+
+def canvas_to_square_png(c: PixelCanvas, path: str) -> None:
+    small = c.to_image().resize(
+        (c.size * LOGICAL_SCALE, c.size * LOGICAL_SCALE), Image.NEAREST)
+    bbox = small.split()[-1].getbbox()
+    if bbox is None:
+        raise ValueError("empty canvas for " + path)
+    cropped = small.crop(bbox)
+    side = max(cropped.size)
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    square.alpha_composite(
+        cropped, ((side - cropped.width) // 2, (side - cropped.height) // 2))
+    square.save(path)
+
+
+def build_head(rgb: tuple[int, int, int]) -> PixelCanvas:
+    c = PixelCanvas()
+    draw_ears(c, darker(rgb))
+    draw_head(c, rgb)
+    draw_eyes(c, "idle")
+    draw_beak(c, 0)
+    return c
+
+
+def main() -> int:
+    for name, rgb in HEADS.items():
+        canvas_to_square_png(build_head(rgb), os.path.join(ASSETS, name + ".png"))
+        print("wrote", name + ".png")
+
+    # 右上角蛋按钮：只要那颗蛋，不要整张 360 画布。
+    egg = PixelCanvas()
+    egg.ellipse(36.0, 63.0, 14.0, 2.4, (59, 39, 24), 190)
+    egg.ellipse(36.0, 40.0, 16.5, 21.0, "outline")
+    egg.ellipse(36.0, 40.0, 15.5, 20.0, "cream")
+    egg.ellipse(31.0, 33.0, 5.0, 7.0, "cream_light")
+    for (x, y, w, h) in ((28, 46, 3, 2), (40, 33, 3, 3), (43, 45, 2, 2),
+                         (33, 52, 2, 2), (24, 38, 2, 2)):
+        egg.rect(x, y, x + w - 1, y + h - 1, "brown_light")
+    canvas_to_square_png(egg, os.path.join(ASSETS, "ic_pet_egg_icon.png"))
+    print("wrote ic_pet_egg_icon.png")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
