@@ -11,12 +11,12 @@
 #include "chat_screen/chat_screen.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
 #include "i18n.h"
 #include "pet_client.h"
-#include "pet_widget.h"
 #include "pet_types.h"
 
 LV_FONT_DECLARE(font_puhui_20_4);
@@ -67,9 +67,13 @@ struct PetUi {
     lv_obj_t* status = nullptr;
     lv_timer_t* idle_timer = nullptr;
     lv_timer_t* blink_timer = nullptr;
-    lv_obj_t* pet_widget = nullptr;
+    lv_timer_t* wander_timer = nullptr;
+    lv_timer_t* speak_timer = nullptr;
     bool use_image_art = true;
 };
+
+// 说话口型当前帧：由口型定时器在 LVGL 线程内翻转。
+bool s_speak_frame = false;
 
 enum class PetMood : uint8_t {
     Idle,
@@ -79,10 +83,10 @@ enum class PetMood : uint8_t {
     Happy,
     Celebrate,
     Listen,
+    Speak,
 };
 
 const char* PetImagePath(PetMood mood, bool egg) {
-    (void)mood;
     if (egg) {
         return "A:ic_pet_egg.spng";
     }
@@ -98,6 +102,10 @@ const char* PetImagePath(PetMood mood, bool egg) {
             return "A:ic_pet_happy.spng";
         case PetMood::Listen:
             return "A:ic_pet_listening.spng";
+        case PetMood::Speak:
+            // 说话两帧：张嘴 / 微张，由 s_speak_frame 轮换做口型。
+            return s_speak_frame ? "A:ic_pet_speaking.spng"
+                                 : "A:ic_pet_speaking_soft.spng";
         case PetMood::Idle:
         default:
             return "A:ic_pet_idle.spng";
@@ -144,6 +152,14 @@ std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 
+// 互动：随机走动 / 打盹 / 内容触发的表情。
+int32_t s_walk_offset = 0;        // 相对 s_body_base_x 的横向偏移
+uint32_t s_last_active_ms = 0;    // 最近一次交互（点按 / 语音）时刻
+bool s_has_transient = false;     // 瞬时表情是否生效
+uint32_t s_transient_until_ms = 0;
+bool s_has_pending_reaction = false;  // 本轮回答结束后要播的表情
+PetMood s_pending_reaction = PetMood::Idle;
+
 // 语音对话：与聊天页/数字人页共用 Application 的唤醒词、协议与 TTS 播放链路，
 // 宠物页只负责字幕和表情。状态由 LVGL 定时器轮询，跨线程不碰 LVGL。
 DeviceState s_voice_state = kDeviceStateUnknown;
@@ -152,6 +168,11 @@ lv_timer_t* s_voice_timer = nullptr;
 
 void StartIdleMotion();
 bool IsEggStage();
+void StartSpeakFrames();
+void StopSpeakFrames();
+void MaybeExpireTransient();
+void ApplyTransientFace(PetMood mood, uint32_t duration_ms);
+void NoteAssistantText(const char* text);
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -324,26 +345,10 @@ void DrawCreature(lv_obj_t* group, const char* stage) {
 
 void ApplyFace(PetMood mood) {
     s_mood = mood;
-    if (s_ui.pet_widget != nullptr) {
-        switch (mood) {
-            case PetMood::Sleep:
-                pet_widget_set_state(s_ui.pet_widget, PET_STATE_SLEEP);
-                break;
-            case PetMood::Think:
-                pet_widget_set_state(s_ui.pet_widget, PET_STATE_THINKING);
-                break;
-            case PetMood::Listen:
-                pet_widget_set_state(s_ui.pet_widget, PET_STATE_LISTENING);
-                break;
-            case PetMood::Happy:
-            case PetMood::Celebrate:
-                pet_widget_trigger_happy(s_ui.pet_widget);
-                break;
-            default:
-                pet_widget_set_state(s_ui.pet_widget, PET_STATE_IDLE);
-                break;
-        }
-        return;
+    if (mood == PetMood::Speak) {
+        StartSpeakFrames();
+    } else {
+        StopSpeakFrames();
     }
     if (s_ui.use_image_art) {
         if (s_ui.body == nullptr) {
@@ -455,6 +460,34 @@ void ApplyFace(PetMood mood) {
     }
 }
 
+// 说话口型：两个张嘴档位之间以 180ms 轮换，眼睛保持睁开。
+void OnSpeakFrameTick(lv_timer_t* /*timer*/) {
+    if (!s_screen_active.load(std::memory_order_relaxed) ||
+        s_ui.body == nullptr || !s_ui.use_image_art ||
+        s_mood != PetMood::Speak) {
+        return;
+    }
+    s_speak_frame = !s_speak_frame;
+    lv_image_set_src(s_ui.body, PetImagePath(PetMood::Speak, false));
+}
+
+void StartSpeakFrames() {
+    if (!s_ui.use_image_art || s_ui.body == nullptr) {
+        return;
+    }
+    if (s_ui.speak_timer == nullptr) {
+        s_ui.speak_timer = lv_timer_create(OnSpeakFrameTick, 180, nullptr);
+    }
+}
+
+void StopSpeakFrames() {
+    if (s_ui.speak_timer != nullptr) {
+        lv_timer_delete(s_ui.speak_timer);
+        s_ui.speak_timer = nullptr;
+    }
+    s_speak_frame = false;
+}
+
 void BuildPetArt(const char* stage) {
     if (s_ui.art == nullptr) {
         return;
@@ -495,7 +528,7 @@ void BuildPetArt(const char* stage) {
         // 蛋图不缩放，视觉中心已接近舞台中心；孵化后的幼体/成体按 0.75
         // 左右缩放后整体偏上，这里单独下移 38px，让本体落在舞台垂直中线。
         s_body_base_y = egg ? -40 : -2;
-        lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
+        lv_obj_set_pos(group, s_body_base_x + s_walk_offset, s_body_base_y);
         if (!egg) {
             const int scale = std::strcmp(stage, "adult") == 0
                                   ? 216
@@ -566,8 +599,8 @@ PetMood VoiceMood() {
         case kDeviceStateConnecting:
             return PetMood::Think;
         case kDeviceStateSpeaking:
-            // 目前没有说话帧，先用开心脸表达“正在回应”，口型后续再补。
-            return PetMood::Happy;
+            // 说话用张嘴两帧做口型，眼睛保持睁开（旧的 happy 图是闭眼笑）。
+            return PetMood::Speak;
         default:
             return s_base_mood;
     }
@@ -601,6 +634,75 @@ void SetSubtitle(const char* text, uint32_t color) {
     lv_obj_remove_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ---------------------------------------------------------------------------
+// 瞬时表情：好奇 / 思考 / 开心等只在几秒内生效，到点回基础态。
+// ---------------------------------------------------------------------------
+void MaybeExpireTransient() {
+    if (!s_has_transient) {
+        return;
+    }
+    if (VoiceOverrideActive()) {
+        return;
+    }
+    if (static_cast<int32_t>(lv_tick_get() - s_transient_until_ms) < 0) {
+        return;
+    }
+    s_has_transient = false;
+    if (s_screen_active.load(std::memory_order_relaxed)) {
+        ApplyFace(s_base_mood);
+    }
+}
+
+void ApplyTransientFace(PetMood mood, uint32_t duration_ms) {
+    if (!s_screen_active.load(std::memory_order_relaxed)) {
+        return;
+    }
+    ApplyFace(mood);
+    s_has_transient = true;
+    s_transient_until_ms = lv_tick_get() + duration_ms;
+}
+
+// 按回答内容挑表情：命中的关键词越靠前优先级越高。
+PetMood ReactionFromText(const char* text) {
+    struct Rule {
+        const char* key;
+        PetMood mood;
+    };
+    static const Rule kRules[] = {
+        {"答对", PetMood::Celebrate},  {"正确", PetMood::Celebrate},
+        {"满分", PetMood::Celebrate},  {"全对", PetMood::Celebrate},
+        {"哈哈", PetMood::Happy},      {"太棒", PetMood::Happy},
+        {"真棒", PetMood::Happy},      {"厉害", PetMood::Happy},
+        {"喜欢", PetMood::Happy},      {"开心", PetMood::Happy},
+        {"恭喜", PetMood::Happy},      {"不错", PetMood::Happy},
+        {"晚安", PetMood::Sleep},      {"早点睡", PetMood::Sleep},
+        {"休息", PetMood::Sleep},      {"困了", PetMood::Sleep},
+        {"为什么", PetMood::Curious},  {"是什么", PetMood::Curious},
+        {"？", PetMood::Curious},      {"?", PetMood::Curious},
+        {"想一想", PetMood::Think},    {"算一算", PetMood::Think},
+        {"多少", PetMood::Think},      {"几加", PetMood::Think},
+    };
+    for (const auto& rule : kRules) {
+        if (std::strstr(text, rule.key) != nullptr) {
+            return rule.mood;
+        }
+    }
+    return PetMood::Idle;
+}
+
+void NoteAssistantText(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return;
+    }
+    const PetMood mood = ReactionFromText(text);
+    if (mood == PetMood::Idle) {
+        return;
+    }
+    s_pending_reaction = mood;
+    s_has_pending_reaction = true;
+    ESP_LOGI(TAG, "reaction queued: %d", static_cast<int>(mood));
+}
+
 void RefreshVoiceUi() {
     auto& app = Application::GetInstance();
     if (!s_voice_enabled && app.IsDeviceActivated()) {
@@ -611,14 +713,29 @@ void RefreshVoiceUi() {
 
     const DeviceState state = app.GetDeviceState();
     if (state == s_voice_state) {
+        MaybeExpireTransient();
         return;
     }
+    const DeviceState prev = s_voice_state;
     s_voice_state = state;
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking) {
+        s_last_active_ms = lv_tick_get();
+    }
+    if (state == kDeviceStateSpeaking) {
+        s_has_transient = false;
+    }
     if (state == kDeviceStateConnecting || state == kDeviceStateListening) {
         // 新一轮对话开始，清掉上一轮字幕。
         SetSubtitle("", 0);
     }
     ApplyFace(VoiceMood());
+    if (prev == kDeviceStateSpeaking && state != kDeviceStateSpeaking &&
+        s_has_pending_reaction) {
+        // 回答说完了，按回答内容做一个 3 秒左右的表情反应。
+        ApplyTransientFace(s_pending_reaction, 3200);
+        s_has_pending_reaction = false;
+    }
     SetStatus(VoiceHint());
     ESP_LOGI(TAG, "voice state -> %d", static_cast<int>(state));
 }
@@ -667,6 +784,7 @@ void UpdateActionButton() {
     lv_obj_t* button = s_ui.action_btn;
     lv_obj_t* label = s_ui.action_label;
     bool enabled = false;
+    bool hidden = false;
     uint32_t color = kColorDisabled;
     uint32_t label_color = kColorSubtle;
     char text[48];
@@ -688,7 +806,8 @@ void UpdateActionButton() {
     } else if (s_state.food_balance < 1) {
         std::snprintf(text, sizeof(text), "%s", I18n::T("粮食不足"));
     } else if (s_state.satiety >= 90) {
-        std::snprintf(text, sizeof(text), "%s", I18n::T("已经吃饱"));
+        // 吃饱了：不摆一个“已经吃饱”的灰按钮，直接隐藏。
+        hidden = true;
     } else {
         std::snprintf(text, sizeof(text), "%s %s",
                       s_state.dormant ? I18n::T("唤醒") : I18n::T("喂食"),
@@ -698,6 +817,11 @@ void UpdateActionButton() {
         label_color = kColorBg;
     }
 
+    if (hidden) {
+        lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, lv_color_hex(label_color),
                                 LV_PART_MAIN);
@@ -786,7 +910,13 @@ void StopIdleTimer() {
         lv_timer_delete(s_ui.blink_timer);
         s_ui.blink_timer = nullptr;
     }
+    if (s_ui.wander_timer != nullptr) {
+        lv_timer_delete(s_ui.wander_timer);
+        s_ui.wander_timer = nullptr;
+    }
+    StopSpeakFrames();
     s_blink_step = 0;
+    s_has_transient = false;
     if (s_ui.body != nullptr) {
         lv_anim_delete(s_ui.body, nullptr);
     }
@@ -803,6 +933,10 @@ void AnimSetY(void* var, int32_t value) {
     lv_obj_set_y(static_cast<lv_obj_t*>(var), s_body_base_y + value);
 }
 
+void AnimSetX(void* var, int32_t value) {
+    lv_obj_set_x(static_cast<lv_obj_t*>(var), s_body_base_x + value);
+}
+
 void StartIdleMotion() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
@@ -810,7 +944,7 @@ void StartIdleMotion() {
     }
 
     lv_anim_delete(body, nullptr);
-    lv_obj_set_x(body, s_body_base_x);
+    lv_obj_set_x(body, s_body_base_x + s_walk_offset);
     lv_obj_set_y(body, s_body_base_y);
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
 
@@ -872,6 +1006,74 @@ void PlayPetRoll() {
     lv_anim_start(&anim);
 }
 
+// 随机互动：在舞台内左右走动、无聊时打盹、偶尔好奇/思考。
+void SleepNow() {
+    s_has_transient = false;
+    ApplyFace(PetMood::Sleep);
+}
+
+void WalkToRandom() {
+    lv_obj_t* body = s_ui.body;
+    if (body == nullptr) {
+        return;
+    }
+    int32_t target = static_cast<int32_t>(esp_random() % 181) - 90;
+    if (target > s_walk_offset - 30 && target < s_walk_offset + 30) {
+        // 目标太近，走到另一侧才有“走过去”的感觉。
+        target = s_walk_offset >= 0 ? -72 : 72;
+    }
+    const int32_t from = s_walk_offset;
+    s_walk_offset = target;
+
+    lv_anim_delete(body, AnimSetY);
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, body);
+    lv_anim_set_user_data(&anim, body);
+    lv_anim_set_exec_cb(&anim, AnimSetX);
+    lv_anim_set_values(&anim, from, target);
+    lv_anim_set_duration(&anim,
+                         700 + static_cast<uint32_t>(esp_random() % 500));
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_set_completed_cb(&anim, [](lv_anim_t* finished) {
+        auto* pet = static_cast<lv_obj_t*>(lv_anim_get_user_data(finished));
+        if (pet == s_ui.body &&
+            s_screen_active.load(std::memory_order_relaxed)) {
+            StartIdleMotion();
+        }
+    });
+    lv_anim_start(&anim);
+}
+
+void OnWanderTick(lv_timer_t* /*timer*/) {
+    if (!s_screen_active.load(std::memory_order_relaxed) ||
+        s_ui.body == nullptr || IsEggStage()) {
+        return;
+    }
+    if (VoiceOverrideActive() || s_busy.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (s_mood == PetMood::Speak || s_has_transient) {
+        return;
+    }
+    if (s_mood == PetMood::Sleep) {
+        return;  // 睡着就等点按或说话唤醒
+    }
+    const uint32_t idle_ms = lv_tick_elaps(s_last_active_ms);
+    const uint32_t roll = esp_random() % 100;
+    if (idle_ms > 45000 && roll < 25) {
+        SleepNow();
+        return;
+    }
+    if (roll < 45) {
+        WalkToRandom();
+        return;
+    }
+    if (roll < 65) {
+        ApplyTransientFace(roll < 55 ? PetMood::Curious : PetMood::Think, 2600);
+    }
+}
+
 void StartIdleTimer() {
     StartIdleMotion();
     if (s_ui.idle_timer == nullptr && !s_ui.use_image_art) {
@@ -904,7 +1106,7 @@ void StartIdleTimer() {
             if (!s_screen_active.load(std::memory_order_relaxed) ||
                 s_ui.body == nullptr || IsEggStage() ||
                 s_mood == PetMood::Sleep || s_mood == PetMood::Happy ||
-                s_mood == PetMood::Celebrate) {
+                s_mood == PetMood::Celebrate || s_mood == PetMood::Speak) {
                 s_blink_step = 0;
                 lv_timer_set_period(timer, 4500);
                 return;
@@ -926,10 +1128,12 @@ void StartIdleTimer() {
         };
         s_ui.blink_timer = lv_timer_create(on_blink_tick, 4500, nullptr);
     }
+    if (s_ui.wander_timer == nullptr && s_ui.use_image_art) {
+        s_ui.wander_timer = lv_timer_create(OnWanderTick, 6000, nullptr);
+    }
 }
 
 void OnBackClicked(lv_event_t* /*event*/);
-void OnStudyClicked(lv_event_t* /*event*/);
 void OnActionClicked(lv_event_t* /*event*/);
 void OnPetClicked(lv_event_t* /*event*/);
 void OnStatsClicked(lv_event_t* /*event*/);
@@ -1020,7 +1224,7 @@ void BuildStatsPanel(lv_obj_t* screen) {
     lv_obj_t* panel = lv_obj_create(screen);
     lv_obj_remove_style_all(panel);
     lv_obj_set_pos(panel, 470, 84);
-    lv_obj_set_size(panel, 230, 202);
+    lv_obj_set_size(panel, 230, 272);
     lv_obj_set_style_bg_color(panel, lv_color_hex(kColorCard), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(panel, 22, LV_PART_MAIN);
@@ -1032,12 +1236,73 @@ void BuildStatsPanel(lv_obj_t* screen) {
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
 
-    BuildStatRow(panel, 14, I18n::T("粮食"), &s_ui.food_value);
-    BuildStatRow(panel, 76, I18n::T("饱腹"), &s_ui.satiety_value);
-    BuildStatRow(panel, 138, I18n::T("等级"), &s_ui.level_value);
+    BuildStatRow(panel, 12, I18n::T("粮食"), &s_ui.food_value);
+    BuildStatRow(panel, 70, I18n::T("饱腹"), &s_ui.satiety_value);
+    BuildStatRow(panel, 128, I18n::T("等级"), &s_ui.level_value);
 
+    // 先把面板本身设成不接收触摸，再挂按钮：screen_make_input_passive 会递归
+    // 清掉子对象的 CLICKABLE，先设后挂才能让喂食按钮保留点击。
     s_ui.stats = panel;
     screen_make_input_passive(panel);
+
+    // 喂食 / 孵化收进属性面板：底部空间留给应用入口。
+    s_ui.action_btn =
+        CreateButton(panel, 16, 196, 198, 60, I18n::T("孵化"),
+                     kColorSuccess, OnActionClicked, &s_ui.action_label);
+}
+
+// 底部应用入口：四个圆形小按钮，打开 launcher 里对应的应用。
+void OnEnglishClicked(lv_event_t* /*event*/) {
+    HomeScreen::RequestOpenEnglishFromCurrentScreen();
+}
+
+void OnOralClicked(lv_event_t* /*event*/) {
+    HomeScreen::RequestOpenOralFromCurrentScreen();
+}
+
+void OnPodcastClicked(lv_event_t* /*event*/) {
+    HomeScreen::RequestOpenPodcastFromCurrentScreen();
+}
+
+void OnMathClicked(lv_event_t* /*event*/) {
+    // 一丢数学还没开发，先占位不响应。
+}
+
+void BuildAppDock(lv_obj_t* screen) {
+    struct DockItem {
+        const char* text;
+        uint32_t color;
+        lv_event_cb_t callback;
+    };
+    const DockItem items[] = {
+        {I18n::T("英"), 0x3B82F6, OnEnglishClicked},
+        {I18n::T("口"), 0x8B5CF6, OnOralClicked},
+        {I18n::T("播"), 0x10B981, OnPodcastClicked},
+        {I18n::T("数"), 0x64748B, OnMathClicked},
+    };
+
+    constexpr int32_t kDial = 88;
+    constexpr int32_t kGap = 74;
+    constexpr int32_t kLeft = 72;
+    for (int i = 0; i < 4; ++i) {
+        lv_obj_t* button = lv_button_create(screen);
+        lv_obj_set_pos(button, kLeft + i * (kDial + kGap), 536);
+        lv_obj_set_size(button, kDial, kDial);
+        lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
+        SetButtonColor(button, items[i].color);
+        screen_swipe_back_ignore(button, true);
+        lv_obj_add_event_cb(button, items[i].callback, LV_EVENT_CLICKED,
+                            nullptr);
+
+        lv_obj_t* label = lv_label_create(button);
+        lv_label_set_text(label, items[i].text);
+        lv_obj_set_style_text_font(label, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF),
+                                    LV_PART_MAIN);
+        lv_obj_center(label);
+    }
 }
 
 void BuildContent(lv_obj_t* screen) {
@@ -1108,11 +1373,7 @@ void BuildContent(lv_obj_t* screen) {
     CreateButton(screen, 590, 16, 108, 56, I18n::T("属性"), kColorAccent,
                  OnStatsClicked, &s_ui.stats_toggle_label);
 
-    s_ui.action_btn = CreateButton(
-        screen, 40, 528, 310, 72, I18n::T("孵化"), kColorSuccess,
-        OnActionClicked, &s_ui.action_label);
-    CreateButton(screen, 370, 528, 310, 72, I18n::T("去复习"),
-                 kColorAccent, OnStudyClicked, nullptr);
+    BuildAppDock(screen);
 
     s_ui.status = lv_label_create(screen);
     lv_label_set_text(s_ui.status, "");
@@ -1124,7 +1385,7 @@ void BuildContent(lv_obj_t* screen) {
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 614);
+    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 644);
     screen_make_input_passive(s_ui.status);
 }
 
@@ -1302,11 +1563,9 @@ void OnPetClicked(lv_event_t* /*event*/) {
         return;
     }
     s_last_tap_ms = now;
+    s_last_active_ms = now;
+    s_has_transient = false;
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-    if (s_ui.pet_widget != nullptr) {
-        pet_widget_trigger_happy(s_ui.pet_widget);
-        return;
-    }
     ApplyFace(PetMood::Happy);
     PlayPetRoll();
 
@@ -1332,11 +1591,6 @@ void OnStatsClicked(lv_event_t* /*event*/) {
         lv_label_set_text(s_ui.stats_toggle_label,
                           show ? I18n::T("收起") : I18n::T("属性"));
     }
-}
-
-void OnStudyClicked(lv_event_t* /*event*/) {
-    SetStatus(I18n::T("正在打开一丢英语..."));
-    HomeScreen::RequestOpenEnglishFromCurrentScreen();
 }
 
 void ReturnHome() {
@@ -1388,6 +1642,8 @@ void OnScreenDeleted(lv_event_t* event) {
     }
     StopVoiceUi();
     StopIdleTimer();
+    s_walk_offset = 0;
+    s_has_pending_reaction = false;
     s_ui = PetUi{};
     s_bound_screen = nullptr;
 }
@@ -1433,6 +1689,9 @@ void PetScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+        s_last_active_ms = lv_tick_get();
+        s_has_transient = false;
+        s_has_pending_reaction = false;
         StartIdleTimer();
         if (s_has_state) {
             SetState(s_state);
@@ -1473,6 +1732,8 @@ void PetScreen::ShowAssistantText(const char* text) {
         return;
     }
     SetSubtitle(text, kColorText);
+    // 回答内容决定说话结束后播哪个表情（开心 / 好奇 / 思考 / 庆祝 / 犯困）。
+    NoteAssistantText(text);
 }
 
 void PetScreen::ClearText() {

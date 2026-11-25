@@ -220,11 +220,21 @@ def draw_eyes(c: PixelCanvas, mood: str) -> None:
     draw_eye(c, 46.0, 33.0, mood, scale=1.55)
 
 
-def draw_beak(c: PixelCanvas, open_beak: bool = False) -> None:
-    if open_beak:
-        c.rect(33, 42, 39, 46, "orange_dark")
-        c.rect(34, 43, 38, 48, "orange")
-        c.hline(34, 38, 47, "outline")
+def draw_beak(c: PixelCanvas, openness: int = 0) -> None:
+    """openness：0=闭喙，1=微张，2=张大（说话口型的两帧）。
+
+    张开的喙拆成「上喙 / 口腔 / 下喙」三段，纯色块，不用渐变。
+    """
+    if openness >= 2:
+        c.rect(34, 42, 38, 43, "orange")
+        c.rect(33, 44, 39, 47, "outline")
+        c.rect(34, 48, 38, 49, "orange_dark")
+        return
+    if openness == 1:
+        c.rect(34, 42, 38, 43, "orange")
+        c.rect(34, 44, 38, 45, "outline")
+        c.rect(35, 46, 37, 46, "orange_dark")
+        c.set(36, 42, "orange_light")
         return
     c.rect(34, 42, 38, 45, "orange_dark")
     c.rect(34, 42, 38, 43, "orange")
@@ -269,6 +279,14 @@ def draw_egg(c: PixelCanvas) -> None:
     draw_sprout(c)
 
 
+# 口型档位：0=闭上，1=微张，2=张大。说话时在两帧之间轮换。
+BEAK_OPENNESS = {
+    "happy": 1,
+    "speaking": 2,
+    "speaking_soft": 1,
+}
+
+
 def build_state(mood: str) -> PixelCanvas:
     c = PixelCanvas()
     if mood == "egg":
@@ -282,7 +300,7 @@ def build_state(mood: str) -> PixelCanvas:
     draw_wings(c)
     draw_head(c)
     draw_eyes(c, mood)
-    draw_beak(c, open_beak=(mood == "happy"))
+    draw_beak(c, openness=BEAK_OPENNESS.get(mood, 0))
     if mood == "happy":
         draw_blush(c)
     if mood == "listening":
@@ -305,6 +323,8 @@ STATES = [
     ("curious", "ic_pet_curious"),
     ("think", "ic_pet_think"),
     ("listening", "ic_pet_listening"),
+    ("speaking", "ic_pet_speaking"),
+    ("speaking_soft", "ic_pet_speaking_soft"),
     ("sleep", "ic_pet_sleep"),
 ]
 
