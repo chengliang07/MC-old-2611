@@ -17,6 +17,7 @@
 #include "screen/chat_screen/chat_screen.h"
 #include "screen/digital_people_screen/digital_people_screen.h"
 #include "screen/home_screen/home_screen.h"
+#include "screen/pet_screen/pet_screen.h"
 
 #include "application.h"
 
@@ -221,19 +222,29 @@ void LVAdapterDisplay::SetChatMessage(const char* const role, const char* const 
     }
 
     // 路由策略：
-    //   1) 聊天屏在前台 -> 历史滚动气泡（双侧）。
-    //   2) 数字人屏在前台 -> user 走底部气泡，bot 走 gif 左上方气泡。
-    //   3) 其它屏 -> 直接丢弃，避免在后台无界堆积。
+    //   1) 宠物屏在前台 -> 字幕（宠物本身是对话主体）。
+    //   2) 聊天屏在前台 -> 历史滚动气泡（双侧）。
+    //   3) 数字人屏在前台 -> user 走底部气泡，bot 走 gif 左上方气泡。
+    //   4) 其它屏 -> 直接丢弃，避免在后台无界堆积。
+    // 宠物页必须排第一：从聊天页临时进入宠物页时 ChatScreen 的对象仍保留，
+    // 但它不在前台，消息归属宠物页。
+    const bool pet_active  = PetScreen::IsActive();
     const bool chat_active = ChatScreen::IsActive();
     const bool dp_active   = DigitalPeopleScreen::IsActive();
-    if (!chat_active && !dp_active) {
+    if (!pet_active && !chat_active && !dp_active) {
         return;
     }
 
     if (esp_lv_adapter_lock(-1) != ESP_OK) {
         return;
     }
-    if (chat_active) {
+    if (pet_active) {
+        if (is_user) {
+            PetScreen::ShowUserText(content);
+        } else {
+            PetScreen::ShowAssistantText(content);
+        }
+    } else if (chat_active) {
         if (std::strcmp(role, "assistant") == 0) {
             ChatScreen::AppendAssistantMessage(content);
         } else {
