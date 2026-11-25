@@ -1421,7 +1421,9 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
             std::time(nullptr) - s_items_at > 30 * 60) {
             StartLoadWorker();
         } else {
-            StartAudioCacheWorker();
+            // 只预取第一集的播放地址；不要在这里启动"整集缓存"，
+            // 那会连续下载多集，和点击后的建流抢带宽（实测把第二集撞成建流超时）。
+            PrefetchFirstPlayUrl();
         }
     } else {
         ESP_LOGI(TAG, "unload: podcast_screen");
@@ -1433,6 +1435,7 @@ void PodcastScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         s_download_running.store(false, std::memory_order_release);
         s_playback_active.store(false, std::memory_order_release);
         PodcastPlayer::SetEventCallback(nullptr, nullptr);
-        PodcastPlayer::Stop();
+        // 等收尾完成再离开：否则立刻再进来点第一集会报“播放器正忙”。
+        PodcastPlayer::StopAndWait(4000);
     }
 }

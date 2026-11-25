@@ -31,6 +31,8 @@ public:
     static bool Pause();
     static bool Resume();
     static void Stop();
+    // 停止并等收尾完成（离开播客页时用）：再进来点播不会撞上"播放器正忙"。
+    static void StopAndWait(uint32_t timeout_ms = 4000);
     // 拖动进度条：按时长比例换算成字节偏移，重新从该位置拉流。
     static bool Seek(int seconds, std::string& error);
     static void SetDuration(int seconds);

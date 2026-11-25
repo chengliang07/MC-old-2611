@@ -1077,8 +1077,11 @@ void PodcastStartTask(void* arg) {
     const uint32_t generation = play_arg->generation;
     bool ready = false;
     TimingLog(generation, "start_task_wait");
-    // 旧管线退出最长要等 HTTP 读超时，给足 12 秒，避免切节目直接报“播放器正忙”。
-    for (int i = 0; i < 600; ++i) {
+    // 旧管线退出最长要等 HTTP 读超时，给足 6 秒。
+    // 注意判据是"旧播放器已经没了"，而不是"旧任务句柄没了"：
+    // 退出播客页时旧播放任务可能还卡在收尾里，只要播放器已停止就该放行，
+    // 否则用户"出去再进来点第一集"会一直报"播放器正忙"。
+    for (int i = 0; i < 300; ++i) {
         if (generation != s_generation.load(std::memory_order_acquire)) {
             delete play_arg;
             vTaskDelete(nullptr);
@@ -1086,7 +1089,7 @@ void PodcastStartTask(void* arg) {
         }
         {
             std::lock_guard<std::mutex> lock(s_player_mutex);
-            if (s_play_task == nullptr) {
+            if (s_play_task == nullptr || s_player == nullptr) {
                 ready = true;
                 break;
             }
@@ -1371,9 +1374,29 @@ void PodcastPlayer::Stop() {
     ClearHttpIo(0);
 }
 
+void PodcastPlayer::StopAndWait(uint32_t timeout_ms) {
+    Stop();
+    const int64_t deadline =
+        esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000;
+    while (esp_timer_get_time() < deadline) {
+        bool idle = false;
+        {
+            std::lock_guard<std::mutex> life_lock(s_lifecycle_mutex);
+            std::lock_guard<std::mutex> lock(s_player_mutex);
+            idle = (s_player == nullptr) && (s_play_task == nullptr) &&
+                   (s_pending_stop_player == nullptr);
+        }
+        if (idle) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGW(TAG, "StopAndWait timeout after %ums",
+             static_cast<unsigned>(timeout_ms));
+}
+
 void PodcastPlayer::SetEventCallback(PodcastPlayerEventCallback callback,
-                                     void* ctx) {
-    std::lock_guard<std::mutex> lock(s_player_mutex);
+                                     void* ctx) {    std::lock_guard<std::mutex> lock(s_player_mutex);
     s_event_cb = callback;
     s_event_ctx = ctx;
 }
