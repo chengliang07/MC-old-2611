@@ -710,6 +710,30 @@ void CapturePipelineIo(esp_asp_handle_t player, uint32_t generation) {
     }
 }
 
+// 首帧前的最短缓冲等待：缓冲已经填够就立刻放行，只有缓冲偏空时才等满上限。
+// 原来无条件等 200ms，等于每次点击都白等一截；这里把它变成“按需等”。
+void WaitInitialBuffer(PlayerContext* player_ctx, uint32_t target_bytes,
+                       int max_wait_ms) {
+    for (int waited = 0; waited < max_wait_ms; waited += 10) {
+        if (player_ctx->generation !=
+                s_generation.load(std::memory_order_acquire) ||
+            !s_output_enabled.load(std::memory_order_acquire)) {
+            return;
+        }
+        uint32_t filled = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_io_mutex);
+            esp_gmf_io_handle_t io = s_http_io.load(std::memory_order_acquire);
+            if (io != nullptr &&
+                esp_gmf_io_get_db_filled_size(io, &filled) == ESP_GMF_ERR_OK &&
+                filled >= target_bytes) {
+                return;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     auto* player_ctx = static_cast<PlayerContext*>(ctx);
     if (player_ctx == nullptr || player_ctx->codec == nullptr ||
@@ -747,7 +771,7 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     if (!s_quick_url.load(std::memory_order_relaxed) &&
         !s_start_gate_done.exchange(true, std::memory_order_acq_rel)) {
         TimingLog(player_ctx->generation, "first_pcm_buffered");
-        vTaskDelay(pdMS_TO_TICKS(200));
+        WaitInitialBuffer(player_ctx, 48 * 1024, 200);
         if (player_ctx->generation !=
                 s_generation.load(std::memory_order_acquire) ||
             !s_output_enabled.load(std::memory_order_acquire)) {
@@ -1094,7 +1118,7 @@ void PodcastStartTask(void* arg) {
                 break;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     TimingLog(generation, ready ? "start_task_ready" : "start_task_timeout");
     bool started = false;

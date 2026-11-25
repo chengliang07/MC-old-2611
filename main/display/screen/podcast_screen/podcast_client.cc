@@ -277,6 +277,19 @@ void PodcastClient::InvalidatePlayUrl(const std::string& podcast_id) {
     }
 }
 
+void PodcastClient::InvalidateListCache() {
+    std::lock_guard<std::mutex> lock(s_list_cache_mutex);
+    s_list_cache.clear();
+    s_list_cache_at = 0;
+    ESP_LOGI(TAG, "list cache invalidated");
+}
+
+void PodcastClient::InvalidateAllPlayUrls() {
+    std::lock_guard<std::mutex> lock(s_play_cache_mutex);
+    s_play_cache.clear();
+    ESP_LOGI(TAG, "all play url caches invalidated");
+}
+
 bool IsLeapYear(int year) {
     return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
 }

@@ -18,6 +18,10 @@ public:
                                           std::string& error);
     // 音频地址返回 403 时，只失效该节目对应的签名地址缓存。
     static void InvalidatePlayUrl(const std::string& podcast_id);
+    // 手动刷新：列表接口有 30 分钟内存缓存，必须显式失效才会真正重拉。
+    static void InvalidateListCache();
+    // 手动刷新时一并丢掉旧的签名播放地址，避免继续用快过期的地址。
+    static void InvalidateAllPlayUrls();
     static std::string DeviceToken();
     // 只对自家域名（api_base 的 host）附 Bearer：签名音频地址在第三方域，
     // 不该带着设备令牌过去。

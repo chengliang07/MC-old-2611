@@ -37,18 +37,26 @@ namespace {
 
 constexpr const char* TAG = "PodcastScreen";
 constexpr int32_t kPanelSize = 720;
-constexpr int32_t kHeaderHeight = 84;
-constexpr int32_t kListX = 24;
-constexpr int32_t kListY = 102;
-constexpr int32_t kListWidth = 672;
-constexpr int32_t kListHeight = 396;
+constexpr int32_t kListX = 20;
+constexpr int32_t kListY = 104;
+constexpr int32_t kListWidth = 680;
+constexpr int32_t kListHeight = 424;
 constexpr uint32_t kColorBg = 0x0B1020;
+constexpr uint32_t kColorBgBottom = 0x070B15;
 constexpr uint32_t kColorPanel = 0x111827;
 constexpr uint32_t kColorCard = 0x182033;
 constexpr uint32_t kColorCardPressed = 0x24314D;
+constexpr uint32_t kColorCardPlaying = 0x1B2A47;
 constexpr uint32_t kColorAccent = 0x60A5FA;
+constexpr uint32_t kColorAccentDeep = 0x2563EB;
 constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
+constexpr uint32_t kColorDanger = 0xF87171;
+constexpr uint32_t kColorDone = 0x4ADE80;
+// 三档语速：0.8 慢速、1.0 原速、1.2 快速。
+constexpr float kSpeedOptions[] = {0.8f, 1.0f, 1.2f};
+constexpr size_t kSpeedOptionCount =
+    sizeof(kSpeedOptions) / sizeof(kSpeedOptions[0]);
 
 struct PodcastUi {
     lv_obj_t* screen = nullptr;
@@ -59,8 +67,8 @@ struct PodcastUi {
     lv_obj_t* stop_btn = nullptr;
     lv_obj_t* progress = nullptr;
     lv_obj_t* time_label = nullptr;
-    lv_obj_t* speed_btn = nullptr;
-    lv_obj_t* speed_label = nullptr;
+    lv_obj_t* speed_btn[kSpeedOptionCount] = {};
+    lv_obj_t* speed_label[kSpeedOptionCount] = {};
     lv_timer_t* progress_timer = nullptr;
 };
 
@@ -253,23 +261,9 @@ std::string FindCachedAudio(const std::string& podcast_id) {
     return found;
 }
 
-void ClearAudioCache() {
-    DIR* dir = opendir(kAudioCacheDir);
-    if (dir == nullptr) {
-        return;
-    }
-    while (dirent* entry = readdir(dir)) {
-        const std::string name = entry->d_name;
-        if (name.empty() || name == "." || name == "..") {
-            continue;
-        }
-        const std::string path = std::string(kAudioCacheDir) + "/" + name;
-        unlink(path.c_str());
-    }
-    closedir(dir);
-}
-
 std::string s_current_title;
+// 最近一次列表加载失败的原因；空列表时显示给用户，并配一个刷新按钮。
+std::string s_last_error;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_loading{false};
 std::atomic<uint32_t> s_session{0};
@@ -286,6 +280,7 @@ bool s_paused = false;
 
 void SetStatusDirect(const char* text);
 void StartLoadWorker(bool manual_refresh = false);
+void OnRefreshClicked(lv_event_t* event);
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -556,7 +551,8 @@ void UpdateControls(bool visible, bool playing) {
         s_ui.pause_label == nullptr) {
         return;
     }
-    lv_obj_t* extra[] = {s_ui.progress, s_ui.time_label, s_ui.speed_btn};
+    // 语速三档常驻可见：开始播放前也能先选好，播放中随时切换。
+    lv_obj_t* extra[] = {s_ui.progress, s_ui.time_label};
     if (visible) {
         lv_obj_remove_flag(s_ui.pause_btn, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_ui.stop_btn, LV_OBJ_FLAG_HIDDEN);
@@ -634,24 +630,33 @@ void OnProgressReleased(lv_event_t* event) {
     SetStatusDirect(I18n::T("正在跳转..."));
 }
 
-void OnSpeedClicked(lv_event_t* /*event*/) {
-    static constexpr float kSpeeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f};
-    constexpr size_t kSpeedCount = sizeof(kSpeeds) / sizeof(kSpeeds[0]);
-    const float current = PodcastPlayer::GetSpeed();
-    size_t index = 0;
-    for (size_t i = 0; i < kSpeedCount; ++i) {
-        if (current <= kSpeeds[i] + 0.01f) {
-            index = i;
-            break;
+// 三档语速按钮的选中态：当前档位用实色强调，其余保持暗色。
+void ApplySpeedUi() {
+    const float speed = PodcastPlayer::GetSpeed();
+    for (size_t i = 0; i < kSpeedOptionCount; ++i) {
+        const bool active =
+            speed > kSpeedOptions[i] - 0.001f && speed < kSpeedOptions[i] + 0.001f;
+        if (s_ui.speed_btn[i] != nullptr) {
+            lv_obj_set_style_bg_color(
+                s_ui.speed_btn[i],
+                lv_color_hex(active ? kColorAccentDeep : 0x1F2A3E), LV_PART_MAIN);
+        }
+        if (s_ui.speed_label[i] != nullptr) {
+            lv_obj_set_style_text_color(
+                s_ui.speed_label[i],
+                lv_color_hex(active ? 0xFFFFFF : kColorSubtle), LV_PART_MAIN);
         }
     }
-    const float speed = kSpeeds[(index + 1) % kSpeedCount];
-    PodcastPlayer::SetSpeed(speed);
-    if (s_ui.speed_label != nullptr) {
-        char text[16] = {};
-        std::snprintf(text, sizeof(text), "%gx", static_cast<double>(speed));
-        lv_label_set_text(s_ui.speed_label, text);
+}
+
+void OnSpeedClicked(lv_event_t* event) {
+    const auto index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    if (index >= kSpeedOptionCount) {
+        return;
     }
+    PodcastPlayer::SetSpeed(kSpeedOptions[index]);
+    ApplySpeedUi();
 }
 
 void SetStatusDirect(const char* text) {
@@ -660,12 +665,13 @@ void SetStatusDirect(const char* text) {
     }
 }
 
-lv_obj_t* CreateActionButton(lv_obj_t* parent, int32_t x, const char* text,
-                             lv_event_cb_t callback) {
+lv_obj_t* CreateActionButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
+                             int32_t h, const char* text,
+                             lv_event_cb_t callback, void* user_data = nullptr) {
     lv_obj_t* button = lv_button_create(parent);
-    lv_obj_set_size(button, 150, 56);
-    lv_obj_set_pos(button, x, 628);
-    lv_obj_set_style_radius(button, 18, LV_PART_MAIN);
+    lv_obj_set_size(button, w, h);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_style_radius(button, 16, LV_PART_MAIN);
     lv_obj_set_style_bg_color(button, lv_color_hex(0x25324A),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(button, lv_color_hex(0x34466A),
@@ -673,7 +679,7 @@ lv_obj_t* CreateActionButton(lv_obj_t* parent, int32_t x, const char* text,
     lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
     screen_swipe_back_ignore(button, true);
-    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
 
     lv_obj_t* label = lv_label_create(button);
     lv_label_set_text(label, text);
@@ -874,6 +880,97 @@ void PrefetchFirstPlayUrl() {
     }
 }
 
+// 取标题首个字符（UTF-8），用作列表左侧的字母头像。
+std::string FirstGlyph(const std::string& text) {
+    size_t i = 0;
+    while (i < text.size() &&
+           (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) {
+        ++i;
+    }
+    if (i >= text.size()) {
+        return "-";
+    }
+    const unsigned char lead = static_cast<unsigned char>(text[i]);
+    size_t len = 1;
+    if ((lead & 0xE0) == 0xC0) {
+        len = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        len = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        len = 4;
+    }
+    if (i + len > text.size()) {
+        len = text.size() - i;
+    }
+    return text.substr(i, len);
+}
+
+lv_obj_t* CreatePillButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
+                           int32_t h, const char* text,
+                           lv_event_cb_t callback, void* user_data) {
+    lv_obj_t* button = lv_button_create(parent);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, w, h);
+    lv_obj_set_style_radius(button, h / 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x22304A), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x34466A),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
+    screen_swipe_back_ignore(button, true);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+    lv_obj_t* label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(kColorText),
+                                LV_PART_MAIN);
+    lv_obj_center(label);
+    return button;
+}
+
+// 空列表 / 加载失败：居中提示 + 刷新按钮，避免用户卡在“暂无节目”无路可走。
+void BuildEmptyState() {
+    lv_obj_t* box = lv_obj_create(s_ui.list);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, kListWidth - 48, kListHeight - 48);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 12, LV_PART_MAIN);
+    screen_make_input_passive(box);
+
+    lv_obj_t* emblem = lv_label_create(box);
+    lv_label_set_text(emblem, "Podcast");
+    lv_obj_set_style_text_font(emblem, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(emblem, lv_color_hex(kColorAccent),
+                                LV_PART_MAIN);
+    screen_make_input_passive(emblem);
+
+    lv_obj_t* hint = lv_label_create(box);
+    lv_label_set_text(hint, I18n::T("暂无节目"));
+    lv_obj_set_style_text_font(hint, &font_puhui_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint, lv_color_hex(kColorText),
+                                LV_PART_MAIN);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    screen_make_input_passive(hint);
+
+    if (!s_last_error.empty()) {
+        lv_obj_t* error = lv_label_create(box);
+        lv_label_set_text(error, s_last_error.c_str());
+        lv_label_set_long_mode(error, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(error, 520);
+        lv_obj_set_style_text_font(error, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(error, lv_color_hex(kColorDanger),
+                                    LV_PART_MAIN);
+        lv_obj_set_style_text_align(error, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        screen_make_input_passive(error);
+    }
+
+    CreatePillButton(box, 0, 0, 180, 56, I18n::T("刷新"), OnRefreshClicked,
+                     nullptr);
+}
+
 void RebuildList() {
     if (s_ui.list == nullptr) {
         return;
@@ -881,67 +978,94 @@ void RebuildList() {
     lv_obj_clean(s_ui.list);
 
     if (s_items.empty()) {
-        lv_obj_t* hint = lv_label_create(s_ui.list);
-        lv_label_set_text(hint, I18n::T("暂无节目"));
-        lv_obj_set_style_text_font(hint, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_set_style_text_color(hint, lv_color_hex(kColorSubtle),
-                                    LV_PART_MAIN);
-        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER,
-                                    LV_PART_MAIN);
-        lv_obj_set_width(hint, kListWidth - 32);
-        lv_obj_align(hint, LV_ALIGN_CENTER, 0, 0);
-        screen_make_input_passive(hint);
+        BuildEmptyState();
         return;
     }
 
     for (size_t index = 0; index < s_items.size(); ++index) {
         const PodcastItem& item = s_items[index];
+        const bool is_current = !s_current_podcast_id.empty() &&
+                                item.id == s_current_podcast_id &&
+                                (s_playing || s_paused ||
+                                 s_preparing_play.load(std::memory_order_acquire));
         lv_obj_t* row = lv_obj_create(s_ui.list);
-        lv_obj_set_size(row, kListWidth - 8, 88);
-        lv_obj_set_style_radius(row, 18, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(row, lv_color_hex(kColorCard),
-                                  LV_PART_MAIN);
+        lv_obj_set_size(row, kListWidth - 24, 92);
+        lv_obj_set_style_radius(row, 20, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(
+            row, lv_color_hex(is_current ? kColorCardPlaying : kColorCard),
+            LV_PART_MAIN);
         lv_obj_set_style_bg_color(row, lv_color_hex(kColorCardPressed),
                                   LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(row, 16, LV_PART_MAIN);
+        lv_obj_set_style_border_width(row, is_current ? 2 : 0, LV_PART_MAIN);
+        lv_obj_set_style_border_color(row, lv_color_hex(kColorAccent),
+                                      LV_PART_MAIN);
+        lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             row, OnPodcastClicked, LV_EVENT_CLICKED,
             reinterpret_cast<void*>(static_cast<uintptr_t>(index)));
 
+        // 左侧字母头像：无封面图也能有稳定的视觉锚点。
+        lv_obj_t* avatar = lv_obj_create(row);
+        lv_obj_remove_flag(avatar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(avatar, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_set_pos(avatar, 16, 16);
+        lv_obj_set_size(avatar, 60, 60);
+        lv_obj_set_style_radius(avatar, 18, LV_PART_MAIN);
+        lv_obj_set_style_border_width(avatar, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(avatar, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(avatar, lv_color_hex(kColorAccentDeep),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_grad_color(
+            avatar, lv_color_hex(is_current ? kColorAccent : 0x1E3A8A),
+            LV_PART_MAIN);
+        lv_obj_set_style_bg_grad_dir(avatar, LV_GRAD_DIR_VER, LV_PART_MAIN);
+        lv_obj_t* glyph = lv_label_create(avatar);
+        const std::string initial = FirstGlyph(item.title);
+        lv_label_set_text(glyph, initial.c_str());
+        lv_obj_set_style_text_font(glyph, &font_puhui_30_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(glyph, lv_color_hex(0xFFFFFF),
+                                    LV_PART_MAIN);
+        lv_obj_center(glyph);
+        screen_make_input_passive(glyph);
+
         lv_obj_t* title = lv_label_create(row);
         lv_label_set_text(title, item.title.c_str());
         lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(title, 470);
+        lv_obj_set_pos(title, 92, 16);
+        lv_obj_set_width(title, 452);
         lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
-        lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
-                                    LV_PART_MAIN);
-        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_set_style_text_color(
+            title, lv_color_hex(is_current ? kColorAccent : kColorText),
+            LV_PART_MAIN);
         screen_make_input_passive(title);
 
         char duration[24];
         FormatDuration(item.duration_seconds, duration, sizeof(duration));
+        char meta_text[96] = {};
+        std::snprintf(meta_text, sizeof(meta_text), "%s · %s", duration,
+                      item.completed ? I18n::T("已完成")
+                                     : I18n::T("未完成"));
         lv_obj_t* meta = lv_label_create(row);
-        lv_label_set_text(meta, item.completed
-                                    ? I18n::T("已完成")
-                                    : I18n::T("未完成"));
+        lv_label_set_text(meta, meta_text);
+        lv_obj_set_pos(meta, 92, 46);
         lv_obj_set_style_text_font(meta, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(
-            meta, lv_color_hex(item.completed ? 0x4ADE80 : kColorSubtle),
+            meta, lv_color_hex(item.completed ? kColorDone : kColorSubtle),
             LV_PART_MAIN);
-        lv_obj_align(meta, LV_ALIGN_TOP_RIGHT, 0, 0);
         screen_make_input_passive(meta);
 
-        lv_obj_t* duration_label = lv_label_create(row);
-        lv_label_set_text(duration_label, duration);
-        lv_obj_set_style_text_font(duration_label, &font_puhui_20_4,
-                                   LV_PART_MAIN);
-        lv_obj_set_style_text_color(duration_label,
-                                    lv_color_hex(kColorSubtle),
-                                    LV_PART_MAIN);
-        lv_obj_align(duration_label, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-        screen_make_input_passive(duration_label);
+        if (is_current) {
+            lv_obj_t* badge = lv_label_create(row);
+            lv_label_set_text(badge, I18n::T("正在播放"));
+            lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -20, 0);
+            lv_obj_set_style_text_font(badge, &font_puhui_20_4,
+                                       LV_PART_MAIN);
+            lv_obj_set_style_text_color(badge, lv_color_hex(kColorAccent),
+                                        LV_PART_MAIN);
+            screen_make_input_passive(badge);
+        }
     }
     // 列表刷新后后台预取第一条播放地址，点击时直接命中缓存。
     PrefetchFirstPlayUrl();
@@ -957,18 +1081,24 @@ void ApplyLoadResult(void* data) {
     s_loading.store(false, std::memory_order_release);
     if (!result->error.empty()) {
         // 后台刷新失败时保留已有列表，不打断正在看的节目。
+        s_last_error = result->error;
         if (s_items.empty() && !s_cached_items.empty()) {
             // 连"上次的节目"都不显示会让人以为列表被清空了：先用缓存顶上。
             s_items = s_cached_items;
             RebuildList();
-            SetStatusDirect("网络不稳，显示上次的节目");
+            SetStatusDirect(I18n::T("加载节目失败"));
             return;
         }
-        if (s_items.empty()) {
+        if (!s_items.empty()) {
             SetStatusDirect(result->error.c_str());
+            return;
         }
+        // 列表本来就是空的：状态栏给结论，空态里给出原因和刷新按钮。
+        SetStatusDirect(I18n::T("加载节目失败"));
+        RebuildList();
         return;
     }
+    s_last_error.clear();
     s_items = std::move(result->items);
     s_cached_items = s_items;
     s_items_at = std::time(nullptr);
@@ -1089,6 +1219,10 @@ void ApplyPlayerEvent(void* data) {
             }
             break;
     }
+    // 播放状态变化后同步列表高亮（“正在播放”/暂停/结束）。
+    if (event->event != PodcastPlayerEvent::UrlExpired) {
+        RebuildList();
+    }
 }
 
 void OnPlayerEvent(PodcastPlayerEvent event, const char* detail,
@@ -1132,6 +1266,7 @@ void OnStopClicked(lv_event_t* /*event*/) {
     s_paused = false;
     UpdateControls(false, false);
     SetStatusDirect(I18n::T("已停止"));
+    RebuildList();
 }
 
 void ReturnHome() {
@@ -1207,15 +1342,12 @@ void OnRefreshClicked(lv_event_t* /*event*/) {
     PodcastPlayer::Stop();
     UpdateControls(false, false);
 
-    s_items.clear();
-    s_cached_items.clear();
-    s_items_at = 0;
-    unlink(kListCachePath);
-    ClearAudioCache();
-    RebuildList();
+    // 不先清空列表：刷新失败时继续显示上一批节目，不再直接掉到“暂无节目”。
+    // 列表接口本身有 30 分钟内存缓存，不强制失效的话“刷新”等于没刷新。
+    PodcastClient::InvalidateListCache();
+    PodcastClient::InvalidateAllPlayUrls();
     StartLoadWorker(true);
 }
-
 void OnScreenUnloaded(lv_event_t* event) {
     lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
     if (target != s_bound_screen) {
@@ -1264,13 +1396,13 @@ void BuildHeader(lv_obj_t* screen) {
     lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_pos(title, 96, 16);
     screen_make_input_passive(title);
 
     lv_obj_t* refresh = lv_button_create(screen);
-    lv_obj_set_size(refresh, 120, 56);
-    lv_obj_set_pos(refresh, 580, 24);
-    lv_obj_set_style_radius(refresh, 18, LV_PART_MAIN);
+    lv_obj_set_size(refresh, 112, 52);
+    lv_obj_set_pos(refresh, 588, 28);
+    lv_obj_set_style_radius(refresh, 16, LV_PART_MAIN);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0x25324A),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0x34466A),
@@ -1322,7 +1454,7 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
 
     s_ui.status = lv_label_create(screen);
     lv_label_set_text(s_ui.status, I18n::T("正在加载节目..."));
-    lv_obj_set_width(s_ui.status, 640);
+    lv_obj_set_width(s_ui.status, 672);
     lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
                                LV_PART_MAIN);
@@ -1330,12 +1462,12 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 506);
+    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 530);
     screen_make_input_passive(s_ui.status);
 
     s_ui.progress = lv_slider_create(screen);
-    lv_obj_set_size(s_ui.progress, 552, 12);
-    lv_obj_set_pos(s_ui.progress, 74, 548);
+    lv_obj_set_size(s_ui.progress, 592, 10);
+    lv_obj_set_pos(s_ui.progress, 64, 592);
     s_progress_max = 1;
     lv_slider_set_range(s_ui.progress, 0, 1);
     lv_slider_set_value(s_ui.progress, 0, LV_ANIM_OFF);
@@ -1357,39 +1489,32 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.time_label, lv_color_hex(kColorSubtle),
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.time_label, LV_ALIGN_TOP_RIGHT, -40, 566);
+    lv_obj_align(s_ui.time_label, LV_ALIGN_TOP_RIGHT, -64, 606);
     screen_make_input_passive(s_ui.time_label);
 
-    s_ui.speed_btn = lv_button_create(screen);
-    lv_obj_set_size(s_ui.speed_btn, 110, 56);
-    lv_obj_set_pos(s_ui.speed_btn, 556, 628);
-    lv_obj_set_style_radius(s_ui.speed_btn, 18, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_ui.speed_btn, lv_color_hex(0x25324A),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_ui.speed_btn, lv_color_hex(0x34466A),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_shadow_width(s_ui.speed_btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_ui.speed_btn, 0, LV_PART_MAIN);
-    screen_swipe_back_ignore(s_ui.speed_btn, true);
-    lv_obj_add_event_cb(s_ui.speed_btn, OnSpeedClicked, LV_EVENT_CLICKED,
-                        nullptr);
-    s_ui.speed_label = lv_label_create(s_ui.speed_btn);
-    lv_label_set_text(s_ui.speed_label, "1x");
-    lv_obj_set_style_text_font(s_ui.speed_label, &font_puhui_20_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_ui.speed_label, lv_color_hex(kColorText),
-                                LV_PART_MAIN);
-    lv_obj_center(s_ui.speed_label);
+    // 语速三档：0.8x / 1.0x / 1.2x，点哪个就是哪个，不再循环切换。
+    for (size_t i = 0; i < kSpeedOptionCount; ++i) {
+        char text[16] = {};
+        std::snprintf(text, sizeof(text), "%.1fx",
+                      static_cast<double>(kSpeedOptions[i]));
+        lv_obj_t* button = CreateActionButton(
+            screen, 24 + static_cast<int32_t>(i) * 82, 648, 76, 48, text,
+            OnSpeedClicked,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
+        s_ui.speed_btn[i] = button;
+        s_ui.speed_label[i] = lv_obj_get_child(button, 0);
+    }
+    ApplySpeedUi();
 
     s_ui.progress_timer = lv_timer_create(OnProgressTimer, 500, nullptr);
 
     s_ui.pause_label = nullptr;
-    s_ui.pause_btn =
-        CreateActionButton(screen, 180, I18n::T("暂停"), OnPauseClicked);
+    s_ui.pause_btn = CreateActionButton(screen, 320, 648, 168, 48,
+                                        I18n::T("暂停"), OnPauseClicked);
     s_ui.pause_label =
         lv_obj_get_child(s_ui.pause_btn, 0);
-    s_ui.stop_btn =
-        CreateActionButton(screen, 390, I18n::T("停止"), OnStopClicked);
+    s_ui.stop_btn = CreateActionButton(screen, 504, 648, 168, 48,
+                                       I18n::T("停止"), OnStopClicked);
     UpdateControls(false, false);
 
     LoadListCache();
