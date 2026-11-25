@@ -20,9 +20,20 @@ E:\09-Soft_DEV\wt-podcast        播客窗口   feat/podcast
 
 ## 新开一个模块（三步）
 
+一键脚本（推荐）：
+
 ```powershell
 cd E:\09-Soft_DEV\metalio-claw4
-git worktree add ..\wt-<模块名> -b feat/<模块名> HEAD
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\new-module.ps1 -Name <模块名>
+```
+
+它会建好 `E:\09-Soft_DEV\wt-<模块名>` + 分支 `feat/<模块名>`，并从 main 同步最新代码；
+删除窗口时加 `-Remove`。
+
+等价的手工命令：
+
+```powershell
+git worktree add ..\wt-<模块名> -b feat/<模块名> main
 ```
 
 然后**新开一个对话窗口，打开 `E:\09-Soft_DEV\wt-<模块名>`**，直接说需求即可。
