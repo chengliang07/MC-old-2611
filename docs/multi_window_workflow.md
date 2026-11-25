@@ -1,4 +1,4 @@
-# 多窗口并行开发手册
+﻿# 多窗口并行开发手册
 
 一台电脑、一个仓库、一台设备，同时改多个模块。核心规则只有三条：
 
@@ -39,9 +39,9 @@ idf.py -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON build
 
 ```powershell
 # 在任意 worktree 里执行都可以，锁是全局的（E:\09-Soft_DEV\.flash.lock）
-pwsh -File scripts/flash-device.ps1            # 增量编译 + 烧录
-pwsh -File scripts/flash-device.ps1 -SkipBuild # 已编译，直接烧
-pwsh -File scripts/flash-device.ps1 -Force     # 确认没人占用时强抢
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/flash-device.ps1            # 增量编译 + 烧录
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/flash-device.ps1 -SkipBuild # 已编译，直接烧
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/flash-device.ps1 -Force     # 确认没人占用时强抢
 ```
 
 被别人占用时会明确报错：

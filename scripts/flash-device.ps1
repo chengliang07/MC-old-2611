@@ -1,4 +1,4 @@
-# 唯一允许烧录的入口：抢锁 → 编译 → 烧录 → 解锁。
+﻿# 唯一允许烧录的入口：抢锁 → 编译 → 烧录 → 解锁。
 #
 # 为什么要锁：一台设备只有一个串口，两个窗口同时烧会互相把对方"踢下线"，
 # 表现为 "Could not open COMxx: PermissionError" 或烧到一半失败。
@@ -56,7 +56,13 @@ try {
     if (Test-Path $lockPath) {
         try { $holder = Get-Content $lockPath -Raw } catch { }
     }
-    throw "设备正在被另一个窗口使用（锁文件：$lockPath）。`n占用信息：$holder`n如果确认没有别的窗口在烧录，加 -Force 重试。"
+    Write-Host ''
+    Write-Host '设备正在被另一个窗口使用。' -ForegroundColor Red
+    Write-Host "  锁文件：$lockPath"
+    Write-Host "  占用者：$holder"
+    Write-Host '  确认没有别的窗口在烧录时，加 -Force 重试。'
+    Write-Host ''
+    exit 2
 }
 
 try {
@@ -83,14 +89,14 @@ try {
             & $python -u "$idfPath\tools\idf.py" -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON build 2>&1 |
                 Tee-Object -FilePath (Join-Path $repoRoot 'flash_build.log') | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                throw "编译失败，日志：$(Join-Path $repoRoot 'flash_build.log')"
+                Write-Host '[flash] 编译失败，日志：flash_build.log' -ForegroundColor Red; exit 1
             }
             Write-Step '编译完成'
         }
 
         $binDir = Join-Path $repoRoot 'build'
         if (-not (Test-Path (Join-Path $binDir 'flash_args'))) {
-            throw "找不到 $binDir\flash_args，请先完整编译一次"
+            Write-Host '[flash] 找不到 build\flash_args，请先完整编译一次' -ForegroundColor Red; exit 1
         }
 
         Write-Step "烧录到 $Port ..."
@@ -105,7 +111,7 @@ try {
 
         $verified = (Select-String -Path (Join-Path $repoRoot 'flash_device.log') -Pattern 'Hash of data verified' -ErrorAction SilentlyContinue).Count
         if ($code -ne 0) {
-            throw "烧录失败（退出码 $code），日志：$(Join-Path $repoRoot 'flash_device.log')"
+            Write-Host ("[flash] 烧录失败（退出码 " + $code + "），日志：flash_device.log") -ForegroundColor Red; exit 1
         }
         Write-Step "烧录完成，校验 $verified/7 个分区"
     } finally {
