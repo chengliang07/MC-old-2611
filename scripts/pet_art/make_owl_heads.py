@@ -19,7 +19,7 @@ sys.path.insert(0, HERE)
 from generate_owl import PixelCanvas, draw_beak, draw_eyes  # noqa: E402
 
 ASSETS = os.path.normpath(os.path.join(HERE, "..", "..", "main", "xingzhi-assets"))
-LOGICAL_SCALE = 2
+LOGICAL_SCALE = 1
 
 # 文件名 -> (主色, 中文名用途)
 HEADS = {
