@@ -108,6 +108,9 @@ std::string s_current_podcast_id;
 size_t s_current_index = 0;
 bool s_url_retried = false;
 int64_t s_click_us = 0;
+// 点击看门狗：超过 8 秒没出声就重试一次，避免用户对着"正在准备播放..."干等。
+lv_timer_t* s_click_watchdog = nullptr;
+bool s_click_retry_used = false;
 
 constexpr const char* kListCachePath = "/sdcard/system/podcast_list.txt";
 constexpr const char* kAudioCacheDir = "/sdcard/system/podcast";
@@ -282,6 +285,7 @@ bool s_paused = false;
 void SetStatusDirect(const char* text);
 void StartLoadWorker(bool manual_refresh = false);
 void OnRefreshClicked(lv_event_t* event);
+void ArmClickWatchdog();
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -814,12 +818,49 @@ void BeginPlayAt(size_t index) {
         delete context;
         SetStatusDirect(I18n::T("创建播放请求失败"));
     }
+    ArmClickWatchdog();
+}
+
+// 点击看门狗：8 秒还没有出声迹象就失效缓存重试一次。
+// 目的不是修网络，而是保证任何慢链路都有出口，不会停在无声的“正在准备播放...”。
+void CancelClickWatchdog() {
+    if (s_click_watchdog != nullptr) {
+        lv_timer_delete(s_click_watchdog);
+        s_click_watchdog = nullptr;
+    }
+}
+
+void ClickWatchdogCb(lv_timer_t* timer) {
+    lv_timer_delete(timer);
+    s_click_watchdog = nullptr;
+    if (!s_screen_active.load(std::memory_order_acquire) ||
+        s_playback_active.load(std::memory_order_acquire) || s_playing) {
+        return;
+    }
+    if (s_click_retry_used) {
+        s_preparing_play.store(false, std::memory_order_release);
+        SetStatusDirect(I18n::T("播放失败"));
+        return;
+    }
+    s_click_retry_used = true;
+    ESP_LOGW(TAG, "click watchdog: retry once id=%s",
+             s_current_podcast_id.c_str());
+    PodcastClient::InvalidatePlayUrl(s_current_podcast_id);
+    SetStatusDirect(I18n::T("正在刷新播放地址..."));
+    BeginPlayAt(s_current_index);
+}
+
+void ArmClickWatchdog() {
+    CancelClickWatchdog();
+    s_click_watchdog = lv_timer_create(ClickWatchdogCb, 8000, nullptr);
 }
 
 void OnPodcastClicked(lv_event_t* event) {
     const auto index = static_cast<size_t>(reinterpret_cast<uintptr_t>(
         lv_event_get_user_data(event)));
     s_url_retried = false;
+    s_click_retry_used = false;
+    CancelClickWatchdog();
     BeginPlayAt(index);
 }
 
@@ -864,7 +905,7 @@ void PrefetchFirstPlayUrlWorker(void* data) {
         // 也不能把别的模块挤到 CreateHttp 失败。
         const size_t largest_internal = heap_caps_get_largest_free_block(
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (largest_internal < 120 * 1024) {
+        if (largest_internal < 96 * 1024) {
             ESP_LOGW(TAG, "skip prepare, internal largest=%u",
                      static_cast<unsigned>(largest_internal));
             continue;
@@ -1221,6 +1262,8 @@ void ApplyPlayerEvent(void* data) {
     if (!IsCurrentSession(event->session)) {
         return;
     }
+    // 已经有播放器状态回来，说明这条请求有结果了，看门狗不用再兜底。
+    CancelClickWatchdog();
     switch (event->event) {
         case PodcastPlayerEvent::Playing:
             s_preparing_play.store(false, std::memory_order_release);
@@ -1312,6 +1355,7 @@ void OnPauseClicked(lv_event_t* /*event*/) {
 }
 
 void OnStopClicked(lv_event_t* /*event*/) {
+    CancelClickWatchdog();
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     s_preparing_play.store(false, std::memory_order_release);
     s_playback_active.store(false, std::memory_order_release);
@@ -1360,6 +1404,7 @@ void ReturnHome() {
 
 // 播放中先停回节目列表，列表页再点才离开播客页。
 void HandleBack() {
+    CancelClickWatchdog();
     if (s_playing || s_paused) {
         s_preparing_play.store(false, std::memory_order_release);
         s_playback_active.store(false, std::memory_order_release);
@@ -1384,6 +1429,7 @@ void OnSwipeBack() {
 }
 
 void OnRefreshClicked(lv_event_t* /*event*/) {
+    CancelClickWatchdog();
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
     s_download_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -1409,6 +1455,7 @@ void OnScreenUnloaded(lv_event_t* event) {
     }
     s_bound_screen = nullptr;
     s_screen_active.store(false, std::memory_order_release);
+    CancelClickWatchdog();
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);

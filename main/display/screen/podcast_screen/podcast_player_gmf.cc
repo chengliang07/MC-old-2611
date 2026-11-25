@@ -407,7 +407,7 @@ bool WaitForPendingStop(esp_asp_handle_t player) {
             return true;
         }
     }
-    for (int i = 0; i < 1500; ++i) {
+    for (int i = 0; i < 500; ++i) {
         {
             std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
             if (s_pending_stop_player != player) {
@@ -672,8 +672,9 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
             s_consumed_live.exchange(0, std::memory_order_acq_rel),
             std::memory_order_acq_rel);
         // 限制阻塞读时长，停止/切节目时不会被默认 30s 读超时拖住。
+        // 缓冲有 64KB（约十几秒音频），4 秒读超时足够抗抖动，又能让 stop 尽快返回。
         esp_http_client_set_timeout_ms(
-            client, s_quick_url.load(std::memory_order_relaxed) ? 5000 : 8000);
+            client, s_quick_url.load(std::memory_order_relaxed) ? 3000 : 4000);
         if (s_quick_url.load(std::memory_order_relaxed)) {
             esp_http_client_set_header(
                 client, "User-Agent",
@@ -1020,6 +1021,32 @@ void PodcastPlayTask(void* arg) {
     s_reported_playing.store(false, std::memory_order_relaxed);
     s_start_gate_done.store(false, std::memory_order_relaxed);
 
+    // 内存护栏：旧播放器可能还在后台 stop（它的缓冲还没还回来）。最多等 3 秒，
+    // 只要内部最大空闲块够建一条新管线就立刻继续——切换的体感延迟不能取决于
+    // 一次 HTTP 读超时。
+    for (int i = 0; i < 300; ++i) {
+        if (generation != s_generation.load(std::memory_order_acquire)) {
+            abandon(nullptr);
+            return;
+        }
+        const size_t largest_internal = heap_caps_get_largest_free_block(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        bool stop_done = false;
+        {
+            std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
+            stop_done = (s_pending_stop_player == nullptr);
+        }
+        if (stop_done || largest_internal >= 96 * 1024) {
+            if (!stop_done) {
+                ESP_LOGW(TAG, "start with old stop pending, largest=%u",
+                         static_cast<unsigned>(largest_internal));
+            }
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    HeapLog("before_player_new");
+
     auto* player_ctx = new PlayerContext{codec, nullptr, generation};
     esp_asp_cfg_t cfg = {
         .in = {.cb = nullptr, .user_ctx = nullptr},
@@ -1136,7 +1163,7 @@ void PodcastPlayTask(void* arg) {
         std::unique_lock<std::mutex> life_lock(s_lifecycle_mutex);
         if (s_pending_stop_player == player) {
             const bool stopped = s_stop_cv.wait_for(
-                life_lock, std::chrono::seconds(15),
+                life_lock, std::chrono::seconds(4),
                 [&player]() { return s_pending_stop_player != player; });
             if (!stopped) {
                 ESP_LOGE(TAG, "stop timeout, defer destroy player=%p", player);
@@ -1181,10 +1208,9 @@ void PodcastStartTask(void* arg) {
     const uint32_t generation = play_arg->generation;
     bool ready = false;
     TimingLog(generation, "start_task_wait");
-    // 旧管线退出最长要等 HTTP 读超时，给足 10 秒；轮询 5ms，切换时不会白等。
-    // 判据必须是"旧播放器已经彻底 stop 完"（pending 清空）：只判断 s_player
-    // 为空会在旧播放器还在 stop 时就建新管线，两块缓冲 + 两条 TLS 同时占内部
-    // RAM，实测正是切几次后 CreateHttp 失败、整机断网的根因。
+    // 判据是"旧播放器已从全局摘除"（Detach 已把 s_player 置空），不在这里等
+    // 后台 stop 收尾：stop 最坏会卡到一次 HTTP 读超时，等它就是"点一下十几秒"。
+    // 内存重叠由下面建流前的内存护栏兜底。
     for (int i = 0; i < 2000; ++i) {
         if (generation != s_generation.load(std::memory_order_acquire)) {
             delete play_arg;
@@ -1192,9 +1218,8 @@ void PodcastStartTask(void* arg) {
             return;
         }
         {
-            std::lock_guard<std::mutex> life_lock(s_lifecycle_mutex);
             std::lock_guard<std::mutex> lock(s_player_mutex);
-            if (s_player == nullptr && s_pending_stop_player == nullptr) {
+            if (s_player == nullptr) {
                 ready = true;
                 break;
             }
@@ -1337,8 +1362,9 @@ bool PodcastPlayer::Prepare(const std::string& url, std::string& error) {
 }
 
 bool PodcastPlayer::IsPreparedFor(const std::string& url) {
-    if (!s_prepare_mode.load(std::memory_order_acquire) ||
-        !s_prepare_ready.load(std::memory_order_acquire)) {
+    // 只要预播管线还在（哪怕首帧没解出来），就直接复用它：
+    // 拆掉再重建要等 stop + 重新 TLS，实测正是"点一下等十几秒"的来源。
+    if (!s_prepare_mode.load(std::memory_order_acquire)) {
         return false;
     }
     std::lock_guard<std::mutex> lock(s_player_mutex);
@@ -1353,8 +1379,7 @@ bool PodcastPlayer::PlayPrepared(const std::string& url, std::string& error,
     }
     std::lock_guard<std::mutex> lock(s_player_mutex);
     if (s_player == nullptr || s_current_url != url ||
-        !s_prepare_mode.load(std::memory_order_acquire) ||
-        !s_prepare_ready.load(std::memory_order_acquire)) {
+        !s_prepare_mode.load(std::memory_order_acquire)) {
         return false;
     }
     const uint32_t generation =

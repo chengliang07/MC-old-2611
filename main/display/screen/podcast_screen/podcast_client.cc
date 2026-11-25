@@ -482,6 +482,8 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
                             UrlEncode(podcast_id) + "/play";
 
     // 并发去重：如果别的线程正在解析同一集，就等它的结果。
+    // 最多等 2 秒：预取线程若卡在慢请求上，点击不能跟着一起等（实测能等出十几秒），
+    // 超时就自己发一次请求，宁可多一次请求也不能让用户干等。
     struct InflightClaim {
         std::string id;
         bool held = false;
@@ -499,7 +501,7 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     {
         std::unique_lock<std::mutex> lk(s_inflight_mutex);
         if (s_inflight.count(podcast_id) != 0) {
-            s_inflight_cv.wait_for(lk, std::chrono::seconds(20), [&]() {
+            s_inflight_cv.wait_for(lk, std::chrono::seconds(2), [&]() {
                 return s_inflight.count(podcast_id) == 0;
             });
             if (TryCachedPlayUrl(podcast_id, result)) {
