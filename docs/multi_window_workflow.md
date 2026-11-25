@@ -41,10 +41,15 @@ git worktree add ..\wt-<模块名> -b feat/<模块名> main
 编译：
 
 ```powershell
-cd E:\09-Soft_DEV\wt-<模块名>
-# 编译器环境与主目录一致（IDF_PATH 等见 AGENTS.md）
-idf.py -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON build
+# 推荐：一条命令搞定（自动设置 IDF 环境 + 启用 ccache）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
+
+# 需要彻底重编时
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1 -Clean
 ```
+
+ccache 缓存放在 `D:\Espressif\ccache-cache`，四个目录共用：新目录第一次全量编译
+会把结果写进缓存，之后其它目录的全量编译大多直接命中（快 3~5 倍）。
 
 ## 烧录（唯一入口，自带锁）
 

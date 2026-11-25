@@ -68,15 +68,8 @@ try {
 try {
     Write-Step "已获得烧录锁：$lockPath"
 
-    $env:PATH = "D:\Espressif\tools\cmake\3.30.2\bin;D:\Espressif\tools\ninja\1.12.1;D:\Espressif\tools\riscv32-esp-elf\esp-14.2.0_20260121\riscv32-esp-elf\bin;$($env:PATH)"
-    $env:IDF_PATH = $idfPath
-    $env:IDF_TOOLS_PATH = $idfTools
-    $env:IDF_PYTHON_ENV_PATH = 'D:\Espressif\tools\python\v5.5.6\venv'
-    $env:ESP_IDF_VERSION = '5.5'
-    $env:ESP_ROM_ELF_DIR = 'D:\Espressif\tools\esp-rom-elfs\20260528\'
-    $env:IDF_PYTHON_CHECK_CONSTRAINTS = '0'
-    $env:PYTHONUTF8 = '1'
-    $env:PYTHONIOENCODING = 'utf-8'
+    # 统一从 idf-env.ps1 取环境（含 ccache 配置）
+    . (Join-Path $PSScriptRoot 'idf-env.ps1')
 
     Push-Location $repoRoot
     try {
@@ -86,7 +79,7 @@ try {
 
         if (-not $SkipBuild) {
             Write-Step '增量编译中...'
-            & $python -u "$idfPath\tools\idf.py" -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON build 2>&1 |
+            & $python -u "$idfPath\tools\idf.py" -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCCACHE_ENABLE=ON build 2>&1 |
                 Tee-Object -FilePath (Join-Path $repoRoot 'flash_build.log') | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host '[flash] 编译失败，日志：flash_build.log' -ForegroundColor Red; exit 1
