@@ -28,20 +28,10 @@ constexpr const char* TAG = "PetScreen";
 constexpr int32_t kPanelSize = 720;
 constexpr uint32_t kColorBg = 0x0B1020;
 constexpr uint32_t kColorPanel = 0x111827;
-constexpr uint32_t kColorCard = 0x182033;
-constexpr uint32_t kColorCardPressed = 0x24314D;
-constexpr uint32_t kColorAccent = 0x60A5FA;
-constexpr uint32_t kColorSuccess = 0x34D399;
-constexpr uint32_t kColorWarning = 0xFBBF24;
 constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
-constexpr uint32_t kColorDisabled = 0x475569;
 
-enum class RequestKind : uint8_t {
-    Load,
-    Feed,
-    Hatch,
-};
+enum class RequestKind : uint8_t { Load };
 
 struct PetUi {
     lv_obj_t* screen = nullptr;
@@ -57,14 +47,9 @@ struct PetUi {
     lv_obj_t* mark = nullptr;
     lv_obj_t* bubble = nullptr;
     lv_obj_t* bubble_card = nullptr;
-    lv_obj_t* stats = nullptr;
-    lv_obj_t* stats_toggle_label = nullptr;
-    lv_obj_t* food_value = nullptr;
-    lv_obj_t* satiety_value = nullptr;
-    lv_obj_t* level_value = nullptr;
-    lv_obj_t* action_btn = nullptr;
-    lv_obj_t* action_label = nullptr;
-    lv_obj_t* status = nullptr;
+    lv_obj_t* menu = nullptr;
+    lv_obj_t* back_btn = nullptr;
+    lv_obj_t* egg_btn = nullptr;
     lv_timer_t* idle_timer = nullptr;
     lv_timer_t* blink_timer = nullptr;
     lv_timer_t* wander_timer = nullptr;
@@ -161,6 +146,11 @@ uint32_t s_transient_until_ms = 0;
 bool s_has_pending_reaction = false;  // 本轮回答结束后要播的表情
 PetMood s_pending_reaction = PetMood::Idle;
 
+// 对话框文案：AI 回复优先，其次临时状态，最后提示语。
+std::string s_status_text;
+bool s_bubble_reply = false;
+uint32_t s_reply_until_ms = 0;
+
 // 语音对话：与聊天页/数字人页共用 Application 的唤醒词、协议与 TTS 播放链路，
 // 宠物页只负责字幕和表情。状态由 LVGL 定时器轮询，跨线程不碰 LVGL。
 DeviceState s_voice_state = kDeviceStateUnknown;
@@ -174,6 +164,7 @@ void StopSpeakFrames();
 void MaybeExpireTransient();
 void ApplyTransientFace(PetMood mood, uint32_t duration_ms);
 void NoteAssistantText(const char* text);
+void UpdateBubble();
 
 uint32_t CurrentSession() {
     return s_session.load(std::memory_order_relaxed);
@@ -526,14 +517,13 @@ void BuildPetArt(const char* stage) {
         lv_image_set_src(group, PetImagePath(s_base_mood, egg));
         lv_obj_set_size(group, 360, 360);
         s_body_base_x = 150;
-        // 蛋图不缩放，视觉中心已接近舞台中心；孵化后的幼体/成体按 0.75
-        // 左右缩放后整体偏上，这里单独下移 38px，让本体落在舞台垂直中线。
-        s_body_base_y = egg ? -40 : -2;
+        // 舞台扩大到 660x370 后本体整体放大、居中；蛋和孵化后共用同一个基线。
+        s_body_base_y = 4;
         lv_obj_set_pos(group, s_body_base_x + s_walk_offset, s_body_base_y);
         if (!egg) {
             const int scale = std::strcmp(stage, "adult") == 0
-                                  ? 216
-                                  : std::strcmp(stage, "teen") == 0 ? 204 : 192;
+                                  ? 268
+                                  : std::strcmp(stage, "teen") == 0 ? 252 : 236;
             lv_obj_set_style_transform_pivot_x(group, 180, LV_PART_MAIN);
             lv_obj_set_style_transform_pivot_y(group, 180, LV_PART_MAIN);
             lv_obj_set_style_transform_scale(group, scale, LV_PART_MAIN);
@@ -573,10 +563,10 @@ void BuildPetArt(const char* stage) {
     }
 }
 
+// 临时状态文案：只存起来，由 UpdateBubble 决定它和 AI 回复谁上屏。
 void SetStatus(const char* text) {
-    if (s_ui.status != nullptr) {
-        lv_label_set_text(s_ui.status, text != nullptr ? text : "");
-    }
+    s_status_text = text != nullptr ? text : "";
+    UpdateBubble();
 }
 
 // ---------------------------------------------------------------------------
@@ -604,19 +594,6 @@ PetMood VoiceMood() {
             return PetMood::Speak;
         default:
             return s_base_mood;
-    }
-}
-
-const char* VoiceHint() {
-    switch (s_voice_state) {
-        case kDeviceStateConnecting:
-            return I18n::T("连接中...");
-        case kDeviceStateListening:
-            return I18n::T("我在听，请说");
-        case kDeviceStateSpeaking:
-            return "";
-        default:
-            return I18n::T("说「你好一丢」唤醒我");
     }
 }
 
@@ -716,6 +693,7 @@ void RefreshVoiceUi() {
     const DeviceState state = app.GetDeviceState();
     if (state == s_voice_state) {
         MaybeExpireTransient();
+        UpdateBubble();
         return;
     }
     const DeviceState prev = s_voice_state;
@@ -727,10 +705,6 @@ void RefreshVoiceUi() {
     if (state == kDeviceStateSpeaking) {
         s_has_transient = false;
     }
-    if (state == kDeviceStateConnecting || state == kDeviceStateListening) {
-        // 新一轮对话开始，清掉上一轮字幕。
-        SetSubtitle("", 0);
-    }
     ApplyFace(VoiceMood());
     if (prev == kDeviceStateSpeaking && state != kDeviceStateSpeaking &&
         s_has_pending_reaction) {
@@ -738,7 +712,7 @@ void RefreshVoiceUi() {
         ApplyTransientFace(s_pending_reaction, 3200);
         s_has_pending_reaction = false;
     }
-    SetStatus(VoiceHint());
+    UpdateBubble();
     ESP_LOGI(TAG, "voice state -> %d", static_cast<int>(state));
 }
 
@@ -769,72 +743,6 @@ void StopVoiceUi() {
     s_voice_state = kDeviceStateUnknown;
 }
 
-void SetButtonColor(lv_obj_t* button, uint32_t color) {
-    if (button == nullptr) {
-        return;
-    }
-    lv_obj_set_style_bg_color(button, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(button, lv_color_hex(color),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-}
-
-void UpdateActionButton() {
-    if (s_ui.action_btn == nullptr || s_ui.action_label == nullptr) {
-        return;
-    }
-
-    lv_obj_t* button = s_ui.action_btn;
-    lv_obj_t* label = s_ui.action_label;
-    bool enabled = false;
-    bool hidden = false;
-    uint32_t color = kColorDisabled;
-    uint32_t label_color = kColorSubtle;
-    char text[48];
-
-    if (s_busy.load(std::memory_order_relaxed)) {
-        std::snprintf(text, sizeof(text), "%s", I18n::T("请稍候..."));
-    } else if (!s_has_state) {
-        std::snprintf(text, sizeof(text), "%s", I18n::T("重试加载"));
-        enabled = true;
-        color = kColorAccent;
-        label_color = kColorBg;
-    } else if (!s_state.hatched) {
-        std::snprintf(text, sizeof(text), "%s (%d/%d)",
-                      I18n::T("孵化"), s_state.food_balance,
-                      s_state.hatch_food_required);
-        enabled = s_state.food_balance >= s_state.hatch_food_required;
-        color = enabled ? kColorSuccess : kColorDisabled;
-        label_color = enabled ? kColorBg : kColorSubtle;
-    } else if (s_state.food_balance < 1) {
-        std::snprintf(text, sizeof(text), "%s", I18n::T("粮食不足"));
-    } else if (s_state.satiety >= 90) {
-        // 吃饱了：不摆一个“已经吃饱”的灰按钮，直接隐藏。
-        hidden = true;
-    } else {
-        std::snprintf(text, sizeof(text), "%s %s",
-                      s_state.dormant ? I18n::T("唤醒") : I18n::T("喂食"),
-                      I18n::T("-1 粮"));
-        enabled = true;
-        color = kColorSuccess;
-        label_color = kColorBg;
-    }
-
-    if (hidden) {
-        lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-    lv_obj_remove_flag(button, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(label, text);
-    lv_obj_set_style_text_color(label, lv_color_hex(label_color),
-                                LV_PART_MAIN);
-    SetButtonColor(button, color);
-    if (enabled) {
-        lv_obj_remove_state(button, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(button, LV_STATE_DISABLED);
-    }
-}
-
 const char* MoodText(const PetState& state) {
     if (!state.hatched) {
         return I18n::T("复习英语，攒够 3 粮就能孵化");
@@ -848,39 +756,42 @@ const char* MoodText(const PetState& state) {
     return nullptr;
 }
 
+// 对话框唯一的文案出口：AI 回复 > 临时状态 > 宠物心情 > 唤醒提示。
+void UpdateBubble() {
+    if (s_ui.bubble_card == nullptr || s_ui.bubble == nullptr) {
+        return;
+    }
+    if (s_voice_state == kDeviceStateConnecting) {
+        SetSubtitle(I18n::T("连接中..."), kColorSubtle);
+        return;
+    }
+    if (s_voice_state == kDeviceStateListening) {
+        SetSubtitle(I18n::T("我在听，请说"), kColorSubtle);
+        return;
+    }
+    if (s_bubble_reply) {
+        if (static_cast<int32_t>(lv_tick_get() - s_reply_until_ms) < 0) {
+            return;  // 回答还在展示期，别覆盖
+        }
+        s_bubble_reply = false;
+    }
+    if (!s_status_text.empty()) {
+        SetSubtitle(s_status_text.c_str(), kColorText);
+        return;
+    }
+    if (s_has_state) {
+        const char* mood = MoodText(s_state);
+        if (mood != nullptr && mood[0] != '\0') {
+            SetSubtitle(mood, kColorText);
+            return;
+        }
+    }
+    SetSubtitle(I18n::T("说「你好一丢」唤醒我"), kColorSubtle);
+}
+
 void SetState(const PetState& state) {
     s_state = state;
     s_has_state = true;
-
-    if (s_ui.food_value != nullptr) {
-        char text[32];
-        std::snprintf(text, sizeof(text), "%d/%d", state.food_balance,
-                      state.max_food);
-        lv_label_set_text(s_ui.food_value, text);
-    }
-    if (s_ui.satiety_value != nullptr) {
-        char text[32];
-        std::snprintf(text, sizeof(text), "%d%%", state.satiety);
-        lv_label_set_text(s_ui.satiety_value, text);
-    }
-    if (s_ui.level_value != nullptr) {
-        char text[32];
-        if (state.hatched) {
-            std::snprintf(text, sizeof(text), "Lv.%d", state.level);
-        } else {
-            std::snprintf(text, sizeof(text), "%s", I18n::T("蛋"));
-        }
-        lv_label_set_text(s_ui.level_value, text);
-    }
-    if (s_ui.bubble != nullptr && s_ui.bubble_card != nullptr &&
-        !VoiceOverrideActive()) {
-        const char* mood = MoodText(state);
-        if (mood != nullptr && mood[0] != '\0') {
-            SetSubtitle(mood, kColorText);
-        } else {
-            SetSubtitle("", 0);
-        }
-    }
 
     const PetMood mood = state.dormant
                              ? PetMood::Sleep
@@ -900,7 +811,7 @@ void SetState(const PetState& state) {
     if (mood_changed && s_screen_active.load(std::memory_order_relaxed)) {
         StartIdleMotion();
     }
-    UpdateActionButton();
+    UpdateBubble();
 }
 
 void StopIdleTimer() {
@@ -1157,44 +1068,16 @@ void StartIdleTimer() {
 }
 
 void OnBackClicked(lv_event_t* /*event*/);
-void OnActionClicked(lv_event_t* /*event*/);
 void OnPetClicked(lv_event_t* /*event*/);
-void OnStatsClicked(lv_event_t* /*event*/);
+void OnEggClicked(lv_event_t* /*event*/);
 void OnSwipeBack();
 void OnScreenUnloaded(lv_event_t* event);
 void OnScreenDeleted(lv_event_t* event);
-void StartWorker(RequestKind kind, bool silent = false);
-
-lv_obj_t* CreateButton(lv_obj_t* parent, int32_t x, int32_t y,
-                       int32_t width, int32_t height, const char* text,
-                       uint32_t color, lv_event_cb_t callback,
-                       lv_obj_t** label_out) {
-    lv_obj_t* button = lv_button_create(parent);
-    lv_obj_set_pos(button, x, y);
-    lv_obj_set_size(button, width, height);
-    lv_obj_set_style_radius(button, 18, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
-    SetButtonColor(button, color);
-    screen_swipe_back_ignore(button, true);
-    if (callback != nullptr) {
-        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
-    }
-
-    lv_obj_t* label = lv_label_create(button);
-    lv_label_set_text(label, text != nullptr ? text : "");
-    lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, lv_color_hex(kColorBg),
-                                LV_PART_MAIN);
-    lv_obj_center(label);
-    if (label_out != nullptr) {
-        *label_out = label;
-    }
-    return button;
-}
+void StartWorker(RequestKind kind);
 
 void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* back = lv_button_create(screen);
+    s_ui.back_btn = back;
     lv_obj_remove_style_all(back);
     lv_obj_set_size(back, 72, 72);
     lv_obj_set_pos(back, 16, 22);
@@ -1218,139 +1101,167 @@ void BuildHeader(lv_obj_t* screen) {
                                 LV_PART_MAIN);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
     screen_make_input_passive(title);
+
+    // 右上角：蛋形应用入口，点开 6 个猫头鹰应用格。
+    lv_obj_t* egg = lv_button_create(screen);
+    s_ui.egg_btn = egg;
+    lv_obj_remove_style_all(egg);
+    lv_obj_set_size(egg, 84, 84);
+    lv_obj_set_pos(egg, 616, 16);
+    lv_obj_set_style_bg_opa(egg, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFFFFF),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(egg, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(egg, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    screen_swipe_back_ignore(egg, true);
+    lv_obj_add_event_cb(egg, OnEggClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* egg_icon = lv_image_create(egg);
+    lv_image_set_src(egg_icon, "A:ic_pet_egg_icon.spng");
+    lv_obj_remove_flag(egg_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(egg_icon);
 }
 
-void BuildStatRow(lv_obj_t* parent, int32_t y, const char* caption,
-                  lv_obj_t** value_out) {
-    lv_obj_t* caption_label = lv_label_create(parent);
-    lv_label_set_text(caption_label, caption);
-    lv_obj_set_style_text_font(caption_label, &font_puhui_20_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(caption_label,
-                                lv_color_hex(kColorSubtle), LV_PART_MAIN);
-    lv_obj_align(caption_label, LV_ALIGN_TOP_LEFT, 18, y + 8);
+// ---------------------------------------------------------------------------
+// 应用弹窗：6 个彩色猫头鹰头像，各自对应一个应用入口。
+// ---------------------------------------------------------------------------
+enum class MenuAction : uint8_t {
+    None,
+    English,
+    Oral,
+    Podcast,
+};
 
-    lv_obj_t* value = lv_label_create(parent);
-    lv_label_set_text(value, "-");
-    lv_obj_set_style_text_font(value, &font_puhui_30_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(value, lv_color_hex(kColorText),
-                                LV_PART_MAIN);
-    lv_obj_align(value, LV_ALIGN_TOP_RIGHT, -18, y);
-    if (value_out != nullptr) {
-        *value_out = value;
+struct MenuEntry {
+    const char* icon;
+    const char* label;
+    MenuAction action;
+};
+
+const MenuEntry kMenuEntries[] = {
+    {"A:ic_pet_head_word.spng", "单词丢", MenuAction::English},
+    {"A:ic_pet_head_oral.spng", "口语丢", MenuAction::Oral},
+    {"A:ic_pet_head_math.spng", "数学丢", MenuAction::None},
+    {"A:ic_pet_head_podcast.spng", "播客丢", MenuAction::Podcast},
+    {"A:ic_pet_head_plan.spng", "计划丢", MenuAction::None},
+    {"A:ic_pet_head_task.spng", "任务丢", MenuAction::None},
+};
+
+void CloseMenu() {
+    if (s_ui.menu != nullptr) {
+        lv_obj_delete(s_ui.menu);
+        s_ui.menu = nullptr;
     }
-    lv_obj_remove_flag(caption_label, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(value, LV_OBJ_FLAG_CLICKABLE);
 }
 
-void BuildStatsPanel(lv_obj_t* screen) {
-    lv_obj_t* panel = lv_obj_create(screen);
+// 弹窗是在自己的事件回调里关掉的，直接删父对象不安全，统一延后一拍。
+void CloseMenuAsync(void* /*arg*/) {
+    CloseMenu();
+}
+
+void OnMenuEntryClicked(lv_event_t* event) {
+    const auto action = static_cast<MenuAction>(reinterpret_cast<uintptr_t>(
+        lv_event_get_user_data(event)));
+    lv_async_call(CloseMenuAsync, nullptr);
+    switch (action) {
+        case MenuAction::English:
+            HomeScreen::RequestOpenEnglishFromCurrentScreen();
+            break;
+        case MenuAction::Oral:
+            HomeScreen::RequestOpenOralFromCurrentScreen();
+            break;
+        case MenuAction::Podcast:
+            HomeScreen::RequestOpenPodcastFromCurrentScreen();
+            break;
+        default:
+            break;  // 数学 / 计划 / 任务 还没开发
+    }
+}
+
+void OnMenuBackdropClicked(lv_event_t* /*event*/) {
+    lv_async_call(CloseMenuAsync, nullptr);
+}
+
+void BuildMenu() {
+    if (s_ui.menu != nullptr || s_ui.screen == nullptr) {
+        return;
+    }
+
+    // 半透明遮罩：点空白处关闭弹窗。
+    lv_obj_t* overlay = lv_obj_create(s_ui.screen);
+    s_ui.menu = overlay;
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_set_size(overlay, kPanelSize, kPanelSize);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(overlay, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(overlay, OnMenuBackdropClicked, LV_EVENT_CLICKED,
+                        nullptr);
+
+    lv_obj_t* panel = lv_obj_create(overlay);
     lv_obj_remove_style_all(panel);
-    lv_obj_set_pos(panel, 470, 84);
-    lv_obj_set_size(panel, 230, 272);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(kColorCard), LV_PART_MAIN);
+    lv_obj_set_size(panel, 620, 440);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x141C2E), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(panel, 22, LV_PART_MAIN);
+    lv_obj_set_style_radius(panel, 28, LV_PART_MAIN);
     lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x2A3A5A),
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x26324A),
                                   LV_PART_MAIN);
     lv_obj_set_style_pad_all(panel, 0, LV_PART_MAIN);
-    lv_obj_remove_flag(panel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
 
-    BuildStatRow(panel, 12, I18n::T("粮食"), &s_ui.food_value);
-    BuildStatRow(panel, 70, I18n::T("饱腹"), &s_ui.satiety_value);
-    BuildStatRow(panel, 128, I18n::T("等级"), &s_ui.level_value);
-
-    // 先把面板本身设成不接收触摸，再挂按钮：screen_make_input_passive 会递归
-    // 清掉子对象的 CLICKABLE，先设后挂才能让喂食按钮保留点击。
-    s_ui.stats = panel;
-    screen_make_input_passive(panel);
-
-    // 喂食 / 孵化收进属性面板：底部空间留给应用入口。
-    s_ui.action_btn =
-        CreateButton(panel, 16, 196, 198, 60, I18n::T("孵化"),
-                     kColorSuccess, OnActionClicked, &s_ui.action_label);
-}
-
-// 底部应用入口：四个圆形小按钮，打开 launcher 里对应的应用。
-void OnEnglishClicked(lv_event_t* /*event*/) {
-    HomeScreen::RequestOpenEnglishFromCurrentScreen();
-}
-
-void OnOralClicked(lv_event_t* /*event*/) {
-    HomeScreen::RequestOpenOralFromCurrentScreen();
-}
-
-void OnPodcastClicked(lv_event_t* /*event*/) {
-    HomeScreen::RequestOpenPodcastFromCurrentScreen();
-}
-
-void OnMathClicked(lv_event_t* /*event*/) {
-    // 一丢数学还没开发，先占位不响应。
-}
-
-void BuildAppDock(lv_obj_t* screen) {
-    struct DockItem {
-        const char* icon;
-        lv_event_cb_t callback;
-    };
-    // 图标本身就是带底色的应用徽标，按钮不再叠一层圆底，直接用图的形状。
-    const DockItem items[] = {
-        {"A:ic_pet_dock_english.spng", OnEnglishClicked},
-        {"A:ic_pet_dock_oral.spng", OnOralClicked},
-        {"A:ic_pet_dock_podcast.spng", OnPodcastClicked},
-        {"A:ic_pet_dock_math.spng", OnMathClicked},
-    };
-
-    // 底部 dock 条：把四个入口收进一条胶囊里，比四个孤立圆点整齐。
-    lv_obj_t* bar = lv_obj_create(screen);
-    lv_obj_remove_style_all(bar);
-    lv_obj_set_pos(bar, 60, 556);
-    lv_obj_set_size(bar, 600, 104);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E1526), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, 30, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bar, lv_color_hex(0x1E293B), LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    constexpr int32_t kSlot = 150;   // 每个入口占的宽度
-    constexpr int32_t kTouch = 72;   // 触摸区
-    for (int i = 0; i < 4; ++i) {
-        lv_obj_t* button = lv_button_create(bar);
-        lv_obj_remove_style_all(button);
-        lv_obj_set_pos(button, i * kSlot + (kSlot - kTouch) / 2, 16);
-        lv_obj_set_size(button, kTouch, kTouch);
-        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(button, lv_color_hex(0xFFFFFF),
+    constexpr int32_t kCellW = 200;
+    constexpr int32_t kCellH = 200;
+    constexpr int32_t kLeft = 10;
+    constexpr int32_t kTop = 20;
+    for (int i = 0; i < 6; ++i) {
+        const int col = i % 3;
+        const int row = i / 3;
+        lv_obj_t* cell = lv_button_create(panel);
+        lv_obj_remove_style_all(cell);
+        lv_obj_set_pos(cell, kLeft + col * kCellW, kTop + row * kCellH);
+        lv_obj_set_size(cell, kCellW, kCellH - 10);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(cell, lv_color_hex(0xFFFFFF),
                                   LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(button, LV_OPA_10,
+        lv_obj_set_style_bg_opa(cell, LV_OPA_10,
                                 LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_radius(button, 22, LV_PART_MAIN);
-        screen_swipe_back_ignore(button, true);
-        lv_obj_add_event_cb(button, items[i].callback, LV_EVENT_CLICKED,
-                            nullptr);
+        lv_obj_set_style_radius(cell, 20, LV_PART_MAIN);
+        screen_swipe_back_ignore(cell, true);
+        lv_obj_add_event_cb(cell, OnMenuEntryClicked, LV_EVENT_CLICKED,
+                            reinterpret_cast<void*>(static_cast<uintptr_t>(
+                                kMenuEntries[i].action)));
 
-        lv_obj_t* icon = lv_image_create(button);
-        lv_image_set_src(icon, items[i].icon);
-        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_center(icon);
+        lv_obj_t* icon = lv_image_create(cell);
+        lv_image_set_src(icon, kMenuEntries[i].icon);
+        lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 4);
+        screen_make_input_passive(icon);
+
+        lv_obj_t* label = lv_label_create(cell);
+        lv_label_set_text(label, I18n::T(kMenuEntries[i].label));
+        lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xCBD5E1),
+                                    LV_PART_MAIN);
+        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -14);
+        screen_make_input_passive(label);
     }
+}
+
+void OnEggClicked(lv_event_t* /*event*/) {
+    BuildMenu();
 }
 
 void BuildContent(lv_obj_t* screen) {
     lv_obj_t* stage = lv_obj_create(screen);
     lv_obj_remove_style_all(stage);
     lv_obj_set_pos(stage, 20, 80);
-    lv_obj_set_size(stage, 680, 440);
+    lv_obj_set_size(stage, 680, 480);
     lv_obj_set_style_bg_color(stage, lv_color_hex(kColorPanel),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(stage, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(stage, 28, LV_PART_MAIN);
+    lv_obj_set_style_radius(stage, 32, LV_PART_MAIN);
     lv_obj_set_style_border_width(stage, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(stage, 0, LV_PART_MAIN);
     lv_obj_add_flag(stage, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
@@ -1359,8 +1270,8 @@ void BuildContent(lv_obj_t* screen) {
 
     s_ui.art = lv_obj_create(stage);
     lv_obj_remove_style_all(s_ui.art);
-    lv_obj_set_pos(s_ui.art, 10, 4);
-    lv_obj_set_size(s_ui.art, 660, 332);
+    lv_obj_set_pos(s_ui.art, 10, 10);
+    lv_obj_set_size(s_ui.art, 660, 370);
     lv_obj_set_style_bg_opa(s_ui.art, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_ui.art, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_ui.art, 0, LV_PART_MAIN);
@@ -1370,25 +1281,25 @@ void BuildContent(lv_obj_t* screen) {
 
     lv_obj_t* hit = lv_obj_create(stage);
     lv_obj_remove_style_all(hit);
-    lv_obj_set_pos(hit, 70, 4);
-    lv_obj_set_size(hit, 540, 336);
+    lv_obj_set_pos(hit, 70, 10);
+    lv_obj_set_size(hit, 540, 370);
     lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
     lv_obj_remove_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(hit, OnPetClicked, LV_EVENT_CLICKED, nullptr);
 
-    // 字幕框放进舞台内部：宠物和对话框是同一块视觉区域。
+    // 对话框属于舞台的一部分：宠物和回答在同一块面板里。
     s_ui.bubble_card = lv_obj_create(stage);
     lv_obj_t* bubble_card = s_ui.bubble_card;
     lv_obj_remove_style_all(bubble_card);
-    lv_obj_set_pos(bubble_card, 30, 344);
-    lv_obj_set_size(bubble_card, 620, 88);
+    lv_obj_set_pos(bubble_card, 30, 384);
+    lv_obj_set_size(bubble_card, 620, 84);
     lv_obj_set_style_bg_color(bubble_card, lv_color_hex(0x1B2740),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bubble_card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(bubble_card, 20, LV_PART_MAIN);
     lv_obj_set_style_border_width(bubble_card, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bubble_card, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bubble_card, 10, LV_PART_MAIN);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(bubble_card, LV_OBJ_FLAG_HIDDEN);
@@ -1396,7 +1307,7 @@ void BuildContent(lv_obj_t* screen) {
     s_ui.bubble = lv_label_create(bubble_card);
     lv_label_set_text(s_ui.bubble, "");
     lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_size(s_ui.bubble, 596, 64);
+    lv_obj_set_size(s_ui.bubble, 600, 64);
     lv_obj_set_style_text_font(s_ui.bubble, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.bubble, lv_color_hex(kColorText),
@@ -1405,26 +1316,6 @@ void BuildContent(lv_obj_t* screen) {
                                 LV_PART_MAIN);
     lv_obj_align(s_ui.bubble, LV_ALIGN_TOP_MID, 0, 0);
     screen_make_input_passive(s_ui.bubble);
-
-    BuildStatsPanel(screen);
-    CreateButton(screen, 590, 16, 108, 56, I18n::T("属性"), kColorAccent,
-                 OnStatsClicked, &s_ui.stats_toggle_label);
-
-    BuildAppDock(screen);
-
-    // 唤醒提示贴在 dock 上方，单行不换行，避免和图标挤在一起。
-    s_ui.status = lv_label_create(screen);
-    lv_label_set_text(s_ui.status, "");
-    lv_obj_set_width(s_ui.status, 660);
-    lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
-                               LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_ui.status, lv_color_hex(kColorSubtle),
-                                LV_PART_MAIN);
-    lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
-                                LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 524);
-    screen_make_input_passive(s_ui.status);
 }
 
 bool BeginRequest(RequestResult*& context) {
@@ -1500,22 +1391,10 @@ void PostRequestResult(RequestResult* result) {
                 s_busy.store(false, std::memory_order_release);
                 if (!resolved->success) {
                     SetStatus(ErrorText(*resolved));
-                    UpdateActionButton();
                     return;
                 }
-
+                SetStatus("");
                 SetState(resolved->state);
-                if (resolved->kind == RequestKind::Hatch) {
-                    SetStatus(I18n::T("破壳啦！"));
-                    ApplyFace(PetMood::Celebrate);
-                    PlayPetRoll();
-                } else if (resolved->kind == RequestKind::Feed) {
-                    SetStatus(I18n::T("好吃！饱腹 +25"));
-                    ApplyFace(PetMood::Happy);
-                    PlayPetRoll();
-                } else {
-                    SetStatus("");
-                }
             },
             result) != LV_RESULT_OK) {
         s_busy.store(false, std::memory_order_release);
@@ -1523,38 +1402,23 @@ void PostRequestResult(RequestResult* result) {
     }
 }
 
-void StartWorker(RequestKind kind, bool silent) {
+void StartWorker(RequestKind kind) {
     auto* context = new RequestResult{};
     context->kind = kind;
     if (!BeginRequest(context)) {
         return;
     }
 
-    if (kind == RequestKind::Load) {
-        // 有缓存时静默刷新，避免重新进入页面先闪一下“加载中”。
-        if (!s_has_state) {
-            SetStatus(I18n::T("加载中..."));
-        }
-    } else if (kind == RequestKind::Feed && !silent) {
-        SetStatus(I18n::T("正在喂食..."));
-    } else {
-        SetStatus(I18n::T("正在孵化..."));
+    // 有缓存时静默刷新，避免重新进入页面先闪一下“加载中”。
+    if (!s_has_state) {
+        SetStatus(I18n::T("加载中..."));
     }
-    UpdateActionButton();
 
     if (CreateWorkerTask(
             [](void* arg) {
                 auto* result = static_cast<RequestResult*>(arg);
-                if (result->kind == RequestKind::Load) {
-                    result->success =
-                        PetClient::Fetch(result->state, result->error);
-                } else if (result->kind == RequestKind::Feed) {
-                    result->success = PetClient::Feed(
-                        result->state, result->error, result->code);
-                } else {
-                    result->success = PetClient::Hatch(
-                        result->state, result->error, result->code);
-                }
+                result->success =
+                    PetClient::Fetch(result->state, result->error);
                 PostRequestResult(result);
                 FinishWorkerTask();
             },
@@ -1562,36 +1426,6 @@ void StartWorker(RequestKind kind, bool silent) {
         s_busy.store(false, std::memory_order_release);
         delete context;
         SetStatus(I18n::T("宠物请求启动失败"));
-        UpdateActionButton();
-    }
-}
-
-void OnActionClicked(lv_event_t* /*event*/) {
-    if (s_busy.load(std::memory_order_relaxed)) {
-        return;
-    }
-    if (!s_has_state) {
-        StartWorker(RequestKind::Load);
-        return;
-    }
-    if (!s_state.hatched) {
-        if (s_state.food_balance >= s_state.hatch_food_required) {
-            StartWorker(RequestKind::Hatch);
-        }
-        return;
-    }
-    if (s_state.food_balance >= 1 && s_state.satiety < 90) {
-        // 先本地结算并给出反馈，网络请求放到后台，避免点按后干等。
-        PetState optimistic = s_state;
-        optimistic.food_balance -= 1;
-        const int fed_satiety = optimistic.satiety + 25;
-        optimistic.satiety = fed_satiety > 100 ? 100 : fed_satiety;
-        SetState(optimistic);
-        SetStatus(I18n::T("好吃！饱腹 +25"));
-        ApplyFace(PetMood::Happy);
-        PlayPetRoll();
-        Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-        StartWorker(RequestKind::Feed, true);
     }
 }
 
@@ -1606,22 +1440,6 @@ void OnPetClicked(lv_event_t* /*event*/) {
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
     // 点宠物只做随机互动（走动 / 弹跳 / 开心 / 好奇），不再开语音会话。
     PlayRandomReaction();
-}
-
-void OnStatsClicked(lv_event_t* /*event*/) {
-    if (s_ui.stats == nullptr) {
-        return;
-    }
-    const bool show = lv_obj_has_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
-    if (show) {
-        lv_obj_remove_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_ui.stats, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (s_ui.stats_toggle_label != nullptr) {
-        lv_label_set_text(s_ui.stats_toggle_label,
-                          show ? I18n::T("收起") : I18n::T("属性"));
-    }
 }
 
 void ReturnHome() {
@@ -1664,6 +1482,7 @@ void OnScreenUnloaded(lv_event_t* event) {
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
     StopVoiceUi();
     StopIdleTimer();
+    CloseMenu();
 }
 
 void OnScreenDeleted(lv_event_t* event) {
@@ -1703,7 +1522,14 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
     BuildHeader(screen);
     BuildContent(screen);
     BuildPetArt(s_stage.empty() ? "egg" : s_stage.c_str());
-    UpdateActionButton();
+    // 舞台是后建的，盖住了顶栏两个按钮的下沿，这里把它们提到最上层。
+    if (s_ui.back_btn != nullptr) {
+        lv_obj_move_foreground(s_ui.back_btn);
+    }
+    if (s_ui.egg_btn != nullptr) {
+        lv_obj_move_foreground(s_ui.egg_btn);
+    }
+    UpdateBubble();
 
     s_bound_screen = screen;
     lv_obj_add_event_cb(screen, OnScreenUnloaded,
@@ -1760,6 +1586,9 @@ void PetScreen::ShowAssistantText(const char* text) {
         return;
     }
     SetSubtitle(text, kColorText);
+    s_status_text.clear();
+    s_bubble_reply = true;
+    s_reply_until_ms = lv_tick_get() + 9000;
     // 回答内容决定说话结束后播哪个表情（开心 / 好奇 / 思考 / 庆祝 / 犯困）。
     NoteAssistantText(text);
 }
