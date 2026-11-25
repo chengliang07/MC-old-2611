@@ -111,9 +111,15 @@ void WifiBoard::StartNetwork() {
 
     // Try to connect to WiFi, if failed, launch the WiFi configuration AP
     if (!wifi_station.WaitForConnected(60 * 1000)) {
-        wifi_station.Stop();
-        // wifi_config_mode_ = true;
-        // EnterWifiConfigMode();
+        // 这里绝对不能 Stop()：WifiStation::Stop() 会 esp_wifi_stop()+esp_wifi_deinit()，
+        // 而 lwIP 里可能还有待处理的 netif 消息，实测会 panic 在
+        // esp_netif_stop_api（Load access fault）→ 设备陷入"约 3 分钟重启一次"。
+        // 连不上就让它继续扫，用户可以去设置页重新配网。
+        ESP_LOGW(TAG, "wifi connect timeout, keep station alive for re-config");
+        auto display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            display->ShowNotification("网络未连接，请到设置里重新配置 WiFi", 30000);
+        }
         return;
     }
 }
