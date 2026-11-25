@@ -7,6 +7,7 @@
 #include "system_info.h"
 
 #include <esp_log.h>
+#include <esp_wifi.h>
 #include <esp_network.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -114,11 +115,30 @@ void WifiBoard::StartNetwork() {
         // 这里绝对不能 Stop()：WifiStation::Stop() 会 esp_wifi_stop()+esp_wifi_deinit()，
         // 而 lwIP 里可能还有待处理的 netif 消息，实测会 panic 在
         // esp_netif_stop_api（Load access fault）→ 设备陷入"约 3 分钟重启一次"。
-        // 连不上就让它继续扫，用户可以去设置页重新配网。
-        ESP_LOGW(TAG, "wifi connect timeout, keep station alive for re-config");
+        ESP_LOGW(TAG, "wifi connect timeout, entering persistent retry");
         auto display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
             display->ShowNotification("网络未连接，请到设置里重新配置 WiFi", 30000);
+        }
+        // 底层 WifiStation 的 MAX_RECONNECT_COUNT = 5，用完就彻底放弃，
+        // 表现就是"用一会儿断网，之后再也不回来"。这里起一个常驻任务补 connect，
+        // 只要还没连上就每 15 秒重试一次，永不放弃。
+        static bool retry_task_started = false;
+        if (!retry_task_started) {
+            retry_task_started = true;
+            xTaskCreate(
+                [](void*) {
+                    for (;;) {
+                        vTaskDelay(pdMS_TO_TICKS(15000));
+                        if (WifiStation::GetInstance().IsConnected()) {
+                            continue;
+                        }
+                        const esp_err_t err = esp_wifi_connect();
+                        ESP_LOGI("WifiBoard", "persistent retry connect -> %s",
+                                 esp_err_to_name(err));
+                    }
+                },
+                "wifi_retry", 3072, nullptr, 3, nullptr);
         }
         return;
     }
