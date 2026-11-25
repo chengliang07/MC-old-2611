@@ -156,6 +156,7 @@ std::atomic<uint32_t> s_request_generation{0};
 int32_t s_walk_offset = 0;        // 相对 s_body_base_x 的横向偏移
 uint32_t s_last_active_ms = 0;    // 最近一次交互（点按 / 语音）时刻
 bool s_has_transient = false;     // 瞬时表情是否生效
+PetMood s_transient_face = PetMood::Idle;
 uint32_t s_transient_until_ms = 0;
 bool s_has_pending_reaction = false;  // 本轮回答结束后要播的表情
 PetMood s_pending_reaction = PetMood::Idle;
@@ -615,7 +616,7 @@ const char* VoiceHint() {
         case kDeviceStateSpeaking:
             return "";
         default:
-            return I18n::T("说「你好一丢」或点我说话");
+            return I18n::T("说「你好一丢」唤醒我");
     }
 }
 
@@ -659,6 +660,7 @@ void ApplyTransientFace(PetMood mood, uint32_t duration_ms) {
     }
     ApplyFace(mood);
     s_has_transient = true;
+    s_transient_face = mood;
     s_transient_until_ms = lv_tick_get() + duration_ms;
 }
 
@@ -999,7 +1001,10 @@ void PlayPetRoll() {
         lv_obj_set_y(pet, s_body_base_y);
         if (pet == s_ui.body &&
             s_screen_active.load(std::memory_order_relaxed)) {
-            ApplyFace(VoiceOverrideActive() ? VoiceMood() : s_base_mood);
+            // 跳跃结束回到当前该显示的表情：瞬时表情（点按开心等）不被盖掉。
+            ApplyFace(VoiceOverrideActive()
+                          ? VoiceMood()
+                          : (s_has_transient ? s_transient_face : s_base_mood));
             lv_async_call(RestartIdleAsync, pet);
         }
     });
@@ -1045,8 +1050,26 @@ void WalkToRandom() {
     lv_anim_start(&anim);
 }
 
-void OnWanderTick(lv_timer_t* /*timer*/) {
-    if (!s_screen_active.load(std::memory_order_relaxed) ||
+// 点按：随机做一个小动作，不再顺手打开语音会话（语音只靠唤醒词）。
+void PlayRandomReaction() {
+    const uint32_t roll = esp_random() % 100;
+    if (roll < 35) {
+        WalkToRandom();
+        return;
+    }
+    if (roll < 60) {
+        PlayPetRoll();  // 原地弹一下
+        return;
+    }
+    if (roll < 82) {
+        ApplyTransientFace(PetMood::Happy, 1600);
+        PlayPetRoll();
+        return;
+    }
+    ApplyTransientFace(PetMood::Curious, 2400);
+}
+
+void OnWanderTick(lv_timer_t* /*timer*/) {    if (!s_screen_active.load(std::memory_order_relaxed) ||
         s_ui.body == nullptr || IsEggStage()) {
         return;
     }
@@ -1270,46 +1293,60 @@ void OnMathClicked(lv_event_t* /*event*/) {
 
 void BuildAppDock(lv_obj_t* screen) {
     struct DockItem {
-        const char* text;
-        uint32_t color;
+        const char* icon;
         lv_event_cb_t callback;
     };
+    // 图标本身就是带底色的应用徽标，按钮不再叠一层圆底，直接用图的形状。
     const DockItem items[] = {
-        {I18n::T("英"), 0x3B82F6, OnEnglishClicked},
-        {I18n::T("口"), 0x8B5CF6, OnOralClicked},
-        {I18n::T("播"), 0x10B981, OnPodcastClicked},
-        {I18n::T("数"), 0x64748B, OnMathClicked},
+        {"A:ic_pet_dock_english.spng", OnEnglishClicked},
+        {"A:ic_pet_dock_oral.spng", OnOralClicked},
+        {"A:ic_pet_dock_podcast.spng", OnPodcastClicked},
+        {"A:ic_pet_dock_math.spng", OnMathClicked},
     };
 
-    constexpr int32_t kDial = 88;
-    constexpr int32_t kGap = 74;
-    constexpr int32_t kLeft = 72;
+    // 底部 dock 条：把四个入口收进一条胶囊里，比四个孤立圆点整齐。
+    lv_obj_t* bar = lv_obj_create(screen);
+    lv_obj_remove_style_all(bar);
+    lv_obj_set_pos(bar, 60, 556);
+    lv_obj_set_size(bar, 600, 104);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E1526), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_hex(0x1E293B), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    constexpr int32_t kSlot = 150;   // 每个入口占的宽度
+    constexpr int32_t kTouch = 72;   // 触摸区
     for (int i = 0; i < 4; ++i) {
-        lv_obj_t* button = lv_button_create(screen);
-        lv_obj_set_pos(button, kLeft + i * (kDial + kGap), 536);
-        lv_obj_set_size(button, kDial, kDial);
-        lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
-        lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
-        SetButtonColor(button, items[i].color);
+        lv_obj_t* button = lv_button_create(bar);
+        lv_obj_remove_style_all(button);
+        lv_obj_set_pos(button, i * kSlot + (kSlot - kTouch) / 2, 16);
+        lv_obj_set_size(button, kTouch, kTouch);
+        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0xFFFFFF),
+                                  LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(button, LV_OPA_10,
+                                LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(button, 22, LV_PART_MAIN);
         screen_swipe_back_ignore(button, true);
         lv_obj_add_event_cb(button, items[i].callback, LV_EVENT_CLICKED,
                             nullptr);
 
-        lv_obj_t* label = lv_label_create(button);
-        lv_label_set_text(label, items[i].text);
-        lv_obj_set_style_text_font(label, &font_puhui_30_4, LV_PART_MAIN);
-        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF),
-                                    LV_PART_MAIN);
-        lv_obj_center(label);
+        lv_obj_t* icon = lv_image_create(button);
+        lv_image_set_src(icon, items[i].icon);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(icon);
     }
 }
 
 void BuildContent(lv_obj_t* screen) {
     lv_obj_t* stage = lv_obj_create(screen);
     lv_obj_remove_style_all(stage);
-    lv_obj_set_pos(stage, 20, 84);
-    lv_obj_set_size(stage, 680, 372);
+    lv_obj_set_pos(stage, 20, 80);
+    lv_obj_set_size(stage, 680, 440);
     lv_obj_set_style_bg_color(stage, lv_color_hex(kColorPanel),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(stage, LV_OPA_COVER, LV_PART_MAIN);
@@ -1322,8 +1359,8 @@ void BuildContent(lv_obj_t* screen) {
 
     s_ui.art = lv_obj_create(stage);
     lv_obj_remove_style_all(s_ui.art);
-    lv_obj_set_pos(s_ui.art, 10, 8);
-    lv_obj_set_size(s_ui.art, 660, 352);
+    lv_obj_set_pos(s_ui.art, 10, 4);
+    lv_obj_set_size(s_ui.art, 660, 332);
     lv_obj_set_style_bg_opa(s_ui.art, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_ui.art, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_ui.art, 0, LV_PART_MAIN);
@@ -1333,19 +1370,19 @@ void BuildContent(lv_obj_t* screen) {
 
     lv_obj_t* hit = lv_obj_create(stage);
     lv_obj_remove_style_all(hit);
-    lv_obj_set_pos(hit, 70, 8);
-    lv_obj_set_size(hit, 540, 356);
+    lv_obj_set_pos(hit, 70, 4);
+    lv_obj_set_size(hit, 540, 336);
     lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
     lv_obj_remove_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(hit, OnPetClicked, LV_EVENT_CLICKED, nullptr);
 
-    s_ui.bubble_card = lv_obj_create(screen);
+    // 字幕框放进舞台内部：宠物和对话框是同一块视觉区域。
+    s_ui.bubble_card = lv_obj_create(stage);
     lv_obj_t* bubble_card = s_ui.bubble_card;
     lv_obj_remove_style_all(bubble_card);
-    // 字幕区：固定两行高度，底边贴近按钮上沿（y=522），超长自动省略。
-    lv_obj_set_size(bubble_card, 620, 80);
-    lv_obj_align(bubble_card, LV_ALIGN_BOTTOM_MID, 0, -198);
+    lv_obj_set_pos(bubble_card, 30, 344);
+    lv_obj_set_size(bubble_card, 620, 88);
     lv_obj_set_style_bg_color(bubble_card, lv_color_hex(0x1B2740),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bubble_card, LV_OPA_COVER, LV_PART_MAIN);
@@ -1359,7 +1396,7 @@ void BuildContent(lv_obj_t* screen) {
     s_ui.bubble = lv_label_create(bubble_card);
     lv_label_set_text(s_ui.bubble, "");
     lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_size(s_ui.bubble, 596, 56);
+    lv_obj_set_size(s_ui.bubble, 596, 64);
     lv_obj_set_style_text_font(s_ui.bubble, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.bubble, lv_color_hex(kColorText),
@@ -1375,17 +1412,18 @@ void BuildContent(lv_obj_t* screen) {
 
     BuildAppDock(screen);
 
+    // 唤醒提示贴在 dock 上方，单行不换行，避免和图标挤在一起。
     s_ui.status = lv_label_create(screen);
     lv_label_set_text(s_ui.status, "");
-    lv_obj_set_width(s_ui.status, 640);
-    lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_ui.status, 660);
+    lv_label_set_long_mode(s_ui.status, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_set_style_text_font(s_ui.status, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.status, lv_color_hex(kColorSubtle),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.status, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 644);
+    lv_obj_align(s_ui.status, LV_ALIGN_TOP_MID, 0, 524);
     screen_make_input_passive(s_ui.status);
 }
 
@@ -1566,15 +1604,8 @@ void OnPetClicked(lv_event_t* /*event*/) {
     s_last_active_ms = now;
     s_has_transient = false;
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-    ApplyFace(PetMood::Happy);
-    PlayPetRoll();
-
-    // 点宠物＝说话：待机时开一轮对话，讲话时打断，聆听时结束本轮。
-    // 与电源键、唤醒词走同一个 Application 入口，不另建会话。
-    auto& app = Application::GetInstance();
-    if (app.IsVoiceUiActive()) {
-        app.ToggleChatState();
-    }
+    // 点宠物只做随机互动（走动 / 弹跳 / 开心 / 好奇），不再开语音会话。
+    PlayRandomReaction();
 }
 
 void OnStatsClicked(lv_event_t* /*event*/) {
@@ -1720,11 +1751,8 @@ bool PetScreen::IsActive() {
 }
 
 void PetScreen::ShowUserText(const char* text) {
-    if (!IsActive() || text == nullptr || text[0] == '\0') {
-        return;
-    }
-    std::string line = std::string(I18n::T("你：")) + text;
-    SetSubtitle(line.c_str(), 0x93C5FD);
+    // 对话框只显示 AI 的回答，用户说的话不上屏。
+    (void)text;
 }
 
 void PetScreen::ShowAssistantText(const char* text) {
