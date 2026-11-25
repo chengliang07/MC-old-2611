@@ -144,6 +144,12 @@ std::atomic<bool> s_busy{false};
 std::atomic<uint32_t> s_session{0};
 std::atomic<uint32_t> s_request_generation{0};
 
+// 语音对话：与聊天页/数字人页共用 Application 的唤醒词、协议与 TTS 播放链路，
+// 宠物页只负责字幕和表情。状态由 LVGL 定时器轮询，跨线程不碰 LVGL。
+DeviceState s_voice_state = kDeviceStateUnknown;
+bool s_voice_enabled = false;
+lv_timer_t* s_voice_timer = nullptr;
+
 void StartIdleMotion();
 bool IsEggStage();
 
@@ -486,8 +492,9 @@ void BuildPetArt(const char* stage) {
         lv_image_set_src(group, PetImagePath(s_base_mood, egg));
         lv_obj_set_size(group, 360, 360);
         s_body_base_x = 150;
-        // 只上移宠物本体，保持上一版的面板尺寸和缩放不变。
-        s_body_base_y = -40;
+        // 蛋图不缩放，视觉中心已接近舞台中心；孵化后的幼体/成体按 0.75
+        // 左右缩放后整体偏上，这里单独下移 38px，让本体落在舞台垂直中线。
+        s_body_base_y = egg ? -40 : -2;
         lv_obj_set_pos(group, s_body_base_x, s_body_base_y);
         if (!egg) {
             const int scale = std::strcmp(stage, "adult") == 0
@@ -536,6 +543,111 @@ void SetStatus(const char* text) {
     if (s_ui.status != nullptr) {
         lv_label_set_text(s_ui.status, text != nullptr ? text : "");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 语音对话
+// 会话本身（唤醒词、WebSocket、打断、TTS）全部复用 Application，与 ChatScreen /
+// DigitalPeopleScreen 同一条链路；本页只做三件事：
+//   1) LOAD 时 SetVoiceUiDesired(true)，UNLOAD 时 false；
+//   2) 轮询 DeviceState，把聆听/思考/说话映射成宠物表情；
+//   3) 把 user/assistant 文本显示成字幕。
+// ---------------------------------------------------------------------------
+bool VoiceOverrideActive() {
+    return s_voice_state == kDeviceStateListening ||
+           s_voice_state == kDeviceStateSpeaking ||
+           s_voice_state == kDeviceStateConnecting;
+}
+
+PetMood VoiceMood() {
+    switch (s_voice_state) {
+        case kDeviceStateListening:
+            return PetMood::Listen;
+        case kDeviceStateConnecting:
+            return PetMood::Think;
+        case kDeviceStateSpeaking:
+            // 目前没有说话帧，先用开心脸表达“正在回应”，口型后续再补。
+            return PetMood::Happy;
+        default:
+            return s_base_mood;
+    }
+}
+
+const char* VoiceHint() {
+    switch (s_voice_state) {
+        case kDeviceStateConnecting:
+            return I18n::T("连接中...");
+        case kDeviceStateListening:
+            return I18n::T("我在听，请说");
+        case kDeviceStateSpeaking:
+            return "";
+        default:
+            return I18n::T("说「你好一丢」或点我说话");
+    }
+}
+
+// 字幕：固定三行高度（96px），底边贴按钮上沿，超长自动省略。
+void SetSubtitle(const char* text, uint32_t color) {
+    if (s_ui.bubble_card == nullptr || s_ui.bubble == nullptr) {
+        return;
+    }
+    if (text == nullptr || text[0] == '\0') {
+        lv_label_set_text(s_ui.bubble, "");
+        lv_obj_add_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(s_ui.bubble, text);
+    lv_obj_set_style_text_color(s_ui.bubble, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_remove_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+}
+
+void RefreshVoiceUi() {
+    auto& app = Application::GetInstance();
+    if (!s_voice_enabled && app.IsDeviceActivated()) {
+        app.SetVoiceUiDesired(true);
+        s_voice_enabled = true;
+        ESP_LOGI(TAG, "voice ui enabled on pet screen");
+    }
+
+    const DeviceState state = app.GetDeviceState();
+    if (state == s_voice_state) {
+        return;
+    }
+    s_voice_state = state;
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening) {
+        // 新一轮对话开始，清掉上一轮字幕。
+        SetSubtitle("", 0);
+    }
+    ApplyFace(VoiceMood());
+    SetStatus(VoiceHint());
+    ESP_LOGI(TAG, "voice state -> %d", static_cast<int>(state));
+}
+
+void OnVoiceTick(lv_timer_t* /*timer*/) {
+    if (!s_screen_active.load(std::memory_order_relaxed)) {
+        return;
+    }
+    RefreshVoiceUi();
+}
+
+void StartVoiceUi() {
+    s_voice_state = kDeviceStateUnknown;
+    RefreshVoiceUi();
+    if (s_voice_timer == nullptr) {
+        s_voice_timer = lv_timer_create(OnVoiceTick, 300, nullptr);
+    }
+}
+
+void StopVoiceUi() {
+    if (s_voice_timer != nullptr) {
+        lv_timer_delete(s_voice_timer);
+        s_voice_timer = nullptr;
+    }
+    if (s_voice_enabled) {
+        Application::GetInstance().SetVoiceUiDesired(false);
+        s_voice_enabled = false;
+    }
+    s_voice_state = kDeviceStateUnknown;
 }
 
 void SetButtonColor(lv_obj_t* button, uint32_t color) {
@@ -634,13 +746,13 @@ void SetState(const PetState& state) {
         }
         lv_label_set_text(s_ui.level_value, text);
     }
-    if (s_ui.bubble != nullptr && s_ui.bubble_card != nullptr) {
+    if (s_ui.bubble != nullptr && s_ui.bubble_card != nullptr &&
+        !VoiceOverrideActive()) {
         const char* mood = MoodText(state);
         if (mood != nullptr && mood[0] != '\0') {
-            lv_label_set_text(s_ui.bubble, mood);
-            lv_obj_remove_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+            SetSubtitle(mood, kColorText);
         } else {
-            lv_obj_add_flag(s_ui.bubble_card, LV_OBJ_FLAG_HIDDEN);
+            SetSubtitle("", 0);
         }
     }
 
@@ -653,8 +765,11 @@ void SetState(const PetState& state) {
     if (state.stage != s_stage) {
         s_stage = state.stage;
         BuildPetArt(s_stage.c_str());
+        if (VoiceOverrideActive()) {
+            ApplyFace(VoiceMood());
+        }
     } else {
-        ApplyFace(mood);
+        ApplyFace(VoiceOverrideActive() ? VoiceMood() : mood);
     }
     if (mood_changed && s_screen_active.load(std::memory_order_relaxed)) {
         StartIdleMotion();
@@ -750,7 +865,7 @@ void PlayPetRoll() {
         lv_obj_set_y(pet, s_body_base_y);
         if (pet == s_ui.body &&
             s_screen_active.load(std::memory_order_relaxed)) {
-            ApplyFace(s_base_mood);
+            ApplyFace(VoiceOverrideActive() ? VoiceMood() : s_base_mood);
             lv_async_call(RestartIdleAsync, pet);
         }
     });
@@ -963,29 +1078,30 @@ void BuildContent(lv_obj_t* screen) {
     s_ui.bubble_card = lv_obj_create(screen);
     lv_obj_t* bubble_card = s_ui.bubble_card;
     lv_obj_remove_style_all(bubble_card);
-    lv_obj_set_pos(bubble_card, 60, 464);
-    lv_obj_set_size(bubble_card, 600, 54);
+    // 字幕区：固定两行高度，底边贴近按钮上沿（y=522），超长自动省略。
+    lv_obj_set_size(bubble_card, 620, 80);
+    lv_obj_align(bubble_card, LV_ALIGN_BOTTOM_MID, 0, -198);
     lv_obj_set_style_bg_color(bubble_card, lv_color_hex(0x1B2740),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bubble_card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(bubble_card, 20, LV_PART_MAIN);
     lv_obj_set_style_border_width(bubble_card, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bubble_card, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bubble_card, 12, LV_PART_MAIN);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(bubble_card, LV_OBJ_FLAG_HIDDEN);
 
     s_ui.bubble = lv_label_create(bubble_card);
     lv_label_set_text(s_ui.bubble, "");
-    lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_ui.bubble, 560);
+    lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_size(s_ui.bubble, 596, 56);
     lv_obj_set_style_text_font(s_ui.bubble, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.bubble, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_align(s_ui.bubble, LV_TEXT_ALIGN_CENTER,
                                 LV_PART_MAIN);
-    lv_obj_center(s_ui.bubble);
+    lv_obj_align(s_ui.bubble, LV_ALIGN_TOP_MID, 0, 0);
     screen_make_input_passive(s_ui.bubble);
 
     BuildStatsPanel(screen);
@@ -1193,6 +1309,13 @@ void OnPetClicked(lv_event_t* /*event*/) {
     }
     ApplyFace(PetMood::Happy);
     PlayPetRoll();
+
+    // 点宠物＝说话：待机时开一轮对话，讲话时打断，聆听时结束本轮。
+    // 与电源键、唤醒词走同一个 Application 入口，不另建会话。
+    auto& app = Application::GetInstance();
+    if (app.IsVoiceUiActive()) {
+        app.ToggleChatState();
+    }
 }
 
 void OnStatsClicked(lv_event_t* /*event*/) {
@@ -1254,6 +1377,7 @@ void OnScreenUnloaded(lv_event_t* event) {
     s_busy.store(false, std::memory_order_release);
     s_session.fetch_add(1, std::memory_order_acq_rel);
     s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+    StopVoiceUi();
     StopIdleTimer();
 }
 
@@ -1262,6 +1386,7 @@ void OnScreenDeleted(lv_event_t* event) {
     if (target != s_ui.screen) {
         return;
     }
+    StopVoiceUi();
     StopIdleTimer();
     s_ui = PetUi{};
     s_bound_screen = nullptr;
@@ -1304,7 +1429,6 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
 void PetScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     if (event == SCREEN_LIFECYCLE_LOAD) {
         ESP_LOGI(TAG, "load: pet_screen");
-        Application::GetInstance().SetVoiceUiDesired(false);
         s_screen_active.store(true, std::memory_order_release);
         s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
@@ -1312,16 +1436,48 @@ void PetScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         StartIdleTimer();
         if (s_has_state) {
             SetState(s_state);
-            SetStatus("");
         } else {
             StartWorker(RequestKind::Load);
         }
+        // 放在 SetState 之后：语音提示会覆盖掉“加载中”等旧状态文案。
+        StartVoiceUi();
     } else {
         ESP_LOGI(TAG, "unload: pet_screen");
         s_screen_active.store(false, std::memory_order_release);
         s_busy.store(false, std::memory_order_release);
         s_session.fetch_add(1, std::memory_order_acq_rel);
         s_request_generation.fetch_add(1, std::memory_order_acq_rel);
+        StopVoiceUi();
         StopIdleTimer();
     }
+}
+
+// ---------------------------------------------------------------------------
+// 语音字幕入口：由 LVAdapterDisplay 在持有 esp_lv_adapter 锁后调用。
+// ---------------------------------------------------------------------------
+bool PetScreen::IsActive() {
+    return s_bound_screen != nullptr &&
+           s_screen_active.load(std::memory_order_relaxed);
+}
+
+void PetScreen::ShowUserText(const char* text) {
+    if (!IsActive() || text == nullptr || text[0] == '\0') {
+        return;
+    }
+    std::string line = std::string(I18n::T("你：")) + text;
+    SetSubtitle(line.c_str(), 0x93C5FD);
+}
+
+void PetScreen::ShowAssistantText(const char* text) {
+    if (!IsActive() || text == nullptr || text[0] == '\0') {
+        return;
+    }
+    SetSubtitle(text, kColorText);
+}
+
+void PetScreen::ClearText() {
+    if (!IsActive()) {
+        return;
+    }
+    SetSubtitle("", 0);
 }

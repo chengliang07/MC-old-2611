@@ -29,6 +29,7 @@ void (*s_oral_short_press)() = nullptr;
 
 bool IsChatToggleScreen(const char* name) {
     return std::strcmp(name, "chat") == 0 ||
+           std::strcmp(name, "pet") == 0 ||
            std::strcmp(name, "digital_people") == 0;
 }
 
