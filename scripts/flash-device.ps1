@@ -79,7 +79,7 @@ try {
 
         if (-not $SkipBuild) {
             Write-Step '增量编译中...'
-            & $python -u "$idfPath\tools\idf.py" -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCCACHE_ENABLE=ON build 2>&1 |
+            & $python -u "$idfPath\tools\idf.py" -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON --ccache build 2>&1 |
                 Tee-Object -FilePath (Join-Path $repoRoot 'flash_build.log') | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host '[flash] 编译失败，日志：flash_build.log' -ForegroundColor Red; exit 1

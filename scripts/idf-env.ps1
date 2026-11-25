@@ -2,7 +2,7 @@
 #
 # 用法：
 #   . scripts\idf-env.ps1
-#   idf.py -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCCACHE_ENABLE=ON build
+#   idf.py -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON --ccache build
 
 $ccacheDir = 'D:\Espressif\tools\ccache\4.12.1\ccache-4.12.1-windows-x86_64'
 
@@ -20,6 +20,7 @@ $env:PYTHONIOENCODING = 'utf-8'
 # ccache：所有 worktree 共用一个缓存，跨目录命中
 $env:CCACHE_DIR = 'D:\Espressif\ccache-cache'
 $env:CCACHE_MAXSIZE = '8G'
+$env:IDF_CCACHE_ENABLE = '1'
 $env:CCACHE_COMPRESS = '1'
 $env:CCACHE_BASEDIR = 'E:\09-Soft_DEV'
 if (-not (Test-Path $env:CCACHE_DIR)) { New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null }

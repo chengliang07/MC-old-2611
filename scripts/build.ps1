@@ -27,7 +27,7 @@ try {
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $python -u $idfPy -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCCACHE_ENABLE=ON build 2>&1 |
+    & $python -u $idfPy -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON --ccache build 2>&1 |
         Tee-Object -FilePath (Join-Path $repoRoot 'build.log') | Out-Null
     $code = $LASTEXITCODE
     $sw.Stop()
