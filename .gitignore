@@ -37,3 +37,5 @@ local-changes-summary.md
 *.log
 # 设备绑定文件：含真实 token，绝不能入库
 podcast_token.txt
+# 多窗口并行的构建/烧录闸门状态与日志
+.gates/

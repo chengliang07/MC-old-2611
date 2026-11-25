@@ -107,9 +107,14 @@ int BTAudioCodec::Read(int16_t *dest, int samples)
     size_t bytes_read;
 
     std::vector<int32_t> bit32_buffer(samples);
-    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, portMAX_DELAY) != ESP_OK)
+    // 不能用 portMAX_DELAY：BT 音频模块一旦短暂停时钟（换页/重连/省电），
+    // 调用者会永久阻塞。口语页的读麦循环卡在这里就再也回不来（tick 停止、
+    // 电源键失效），只能重启设备。超时返回 0，让调用方下一轮重试。
+    esp_err_t err = i2s_channel_read(rx_handle_, bit32_buffer.data(),
+                                     samples * sizeof(int32_t), &bytes_read,
+                                     pdMS_TO_TICKS(200));
+    if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "Read Failed!");
         return 0;
     }
 

@@ -1,0 +1,60 @@
+{
+  "_comment": "Module claim table: one window may only edit paths under its own claims. 'integration' owns build/config/packaging. Run scripts/parallel/check_scope.ps1 before building.",
+  "windows": {
+    "oral": {
+      "paths": [
+        "main/display/screen/oral_screen/",
+        "docs/oral_relay_contract.md"
+      ]
+    },
+    "podcast": {
+      "paths": [
+        "main/display/screen/podcast_screen/"
+      ]
+    },
+    "audio": {
+      "paths": [
+        "main/audio/",
+        "main/boards/common/bt_audio_codec.cc",
+        "main/boards/common/bt_audio_codec.h"
+      ]
+    },
+    "ui": {
+      "paths": [
+        "main/display/lv_adapter_display.cc",
+        "main/display/screen/home_screen/",
+        "main/display/screen/pwr_key_handler.cc",
+        "main/i18n/"
+      ]
+    },
+    "pet": {
+      "paths": [
+        "main/display/screen/pet_screen/",
+        "main/display/screen/pet2_screen/",
+        "main/display/pet_widget/"
+      ]
+    },
+    "boot": {
+      "paths": [
+        "main/main.cc",
+        "main/application.cc",
+        "main/application.h"
+      ]
+    },
+    "integration": {
+      "paths": [
+        "CMakeLists.txt",
+        "main/CMakeLists.txt",
+        "main/idf_component.yml",
+        "sdkconfig",
+        "sdkconfig.defaults",
+        "partitions/",
+        "scripts/",
+        "docs/parallel_workflow.md",
+        "docs/parallel/",
+        ".github/",
+        ".gitignore"
+      ]
+    }
+  }
+}

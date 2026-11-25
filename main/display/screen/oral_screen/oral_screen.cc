@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
 #include "freertos/FreeRTOS.h"
@@ -22,6 +23,7 @@
 #include "board.h"
 #include "home_screen/home_screen.h"
 #include "chat_screen/chat_screen.h"
+#include "idle_power_policy.h"
 #include "pwr_key_handler.h"
 #include "settings.h"
 #include <web_socket.h>
@@ -32,6 +34,8 @@ LV_FONT_DECLARE(font_puhui_30_4);
 namespace {
 
 constexpr const char* TAG = "OralScreen";
+// 临时诊断打点（定位口语卡顿）：1=打开，0=关闭。只打日志，不改任何逻辑。
+#define ORAL_TRACE 1
 constexpr int32_t kPanelW = 720;
 constexpr int32_t kPanelH = 720;
 constexpr int32_t kHeaderH = 88;
@@ -56,8 +60,16 @@ constexpr int kMaxTextChars = 800;
 constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
 // 100ms 切片配合 MAX_PLAYBACK_TASKS_IN_QUEUE=8，播放侧缓冲约 800ms。
 constexpr size_t kPlaybackSliceSamples = 1600;
-constexpr size_t kMaxAudioChunks = 16;
-constexpr size_t kMaxAudioBytes = 192 * 1024;
+// 下行缓冲：relay 是突发投递（实测 0.32 s 音频 / 0.2 s 墙钟），
+// 192 KB（6 s）在长回答时会被顶满并丢弃最旧音频 —— 表现为“AI 吞字”。
+constexpr size_t kMaxAudioChunks = 32;
+constexpr size_t kMaxAudioBytes = 256 * 1024;
+// 上行发送缓冲：采集只入队，网络再慢也不阻塞读麦（原来 Send 阻塞
+// 100–600ms 会直接丢掉 I2S DMA 里的麦克风样本）。
+constexpr size_t kMaxTxChunks = 8;
+// 服务端漏发 / 长时间不发 response.done 时，客户端会永远停在“回答中”，
+// 只能按电源键才能继续。这里做兜底：最后一块音频之后静默太久，就当作本轮结束。
+constexpr uint32_t kTurnIdleTimeoutMs = 8000;
 constexpr uint32_t kColorBg = 0x0E1116;
 constexpr uint32_t kColorHeaderBg = 0x12151C;
 constexpr uint32_t kColorDivider = 0x2A2F3A;
@@ -81,6 +93,15 @@ std::atomic<bool> s_ws_ready{false};
 std::atomic<bool> s_mic_enabled{false};
 std::atomic<bool> s_waiting_wake{false};
 std::atomic<bool> s_user_streamed{false};
+// 用户气泡已用占位符创建、等待转写回填
+std::atomic<bool> s_user_pending{false};
+// 当前 AI 气泡已设置的宽度（UI 线程独占），用于“只增不减”的平滑扩张
+int32_t s_bubble_w = 0;
+// 打断/收尾后的上行静音窗：扬声器余音 + 房间混响会被裸麦克风当成用户说话，
+// 送上去就变成“AI 自问自答”。窗口内继续读麦（排空 I2S），只是不上传。
+std::atomic<uint32_t> s_uplink_mute_until_ms{0};
+// 占位气泡的创建时间，用于超时清理（一直没转写就把 "…" 删掉）
+std::atomic<uint32_t> s_user_pending_ms{0};
 // user_transcript.done 之后迟到的 delta 不能再追加，否则会把下一轮的话
 // 拼进上一轮气泡，长对话看起来就是“顺序乱”。
 std::atomic<bool> s_user_transcript_closed{false};
@@ -131,6 +152,14 @@ std::deque<AudioChunk> s_audio_chunks;
 size_t s_audio_bytes = 0;
 std::mutex s_audio_mutex;
 std::atomic<bool> s_audio_task_running{false};
+// 上行（麦克风）发送队列：采集线程只入队，独立任务负责 WS 发送。
+std::deque<std::vector<int16_t>> s_tx_chunks;
+std::mutex s_tx_mutex;
+std::atomic<bool> s_tx_stop{true};
+std::atomic<bool> s_tx_running{false};
+std::atomic<uint32_t> s_tx_dropped{0};
+std::atomic<uint32_t> s_last_audio_ms{0};
+std::atomic<uint32_t> s_rstart_ms{0};
 
 bool session_alive(uint32_t session) {
     return session == s_session.load(std::memory_order_acquire) &&
@@ -173,9 +202,28 @@ void trim_messages() {
 
 int32_t bubble_width_for_text(const char* text, bool is_right) {
     const lv_font_t* font = &font_puhui_20_4;
-    const int32_t max_bubble_w = kPanelW * (is_right ? 72 : 90) / 100;
+    // 最大宽度：AI 78%、用户 70%，都不占满屏；超过就在气泡内自动换行。
+    const int32_t max_bubble_w = kPanelW * (is_right ? 70 : 78) / 100;
     int32_t text_w = lv_txt_get_width(text, std::strlen(text), font, 0);
-    if (text_w < 24) text_w = 24;
+    // 最小宽度按“最长单词”算：既能让短句气泡跟着字数变窄（Yes/OK 就是小气泡），
+    // 又不会把一个单词逐字折行成“又长又细”的条。
+    int32_t longest_word_w = 0;
+    {
+        const char* p = text;
+        while (*p != '\0') {
+            while (*p == ' ' || *p == '\n' || *p == '\t') ++p;
+            const char* start = p;
+            while (*p != '\0' && *p != ' ' && *p != '\n' && *p != '\t') ++p;
+            if (p > start) {
+                const int32_t w = lv_txt_get_width(start,
+                                                   static_cast<uint32_t>(p - start),
+                                                   font, 0);
+                if (w > longest_word_w) longest_word_w = w;
+            }
+        }
+    }
+    const int32_t min_text_w = longest_word_w > 0 ? longest_word_w + 8 : 24;
+    if (text_w < min_text_w) text_w = min_text_w;
     int32_t bubble_w = text_w + kBubblePadX * 2;
     if (bubble_w > max_bubble_w) bubble_w = max_bubble_w;
     return bubble_w;
@@ -192,6 +240,29 @@ void resize_bubble(lv_obj_t* bubble, lv_obj_t* label, const char* text, bool is_
 uint32_t now_ms() {
     return static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+
+#if ORAL_TRACE
+// ---- 临时诊断打点（定位口语卡顿）----
+// 只记录时间与队列水位，不改任何行为；ORAL_TRACE=0 时全部消失。
+std::atomic<uint32_t> t_last_rx_ms{0};
+std::atomic<uint32_t> t_rstart_ms{0};
+std::atomic<uint32_t> t_rdone_ms{0};
+std::atomic<uint32_t> t_first_audio_ms{0};
+std::atomic<uint32_t> t_last_audio_ms{0};
+std::atomic<uint32_t> t_tick_ms{0};
+std::atomic<uint32_t> t_rx_pkts{0};
+std::atomic<uint32_t> t_rx_bytes{0};
+std::atomic<uint32_t> t_rx_max_dt{0};
+std::atomic<uint32_t> t_rx_slow{0};
+std::atomic<uint32_t> t_drop_bytes{0};
+std::atomic<uint32_t> t_gap_cnt{0};
+std::atomic<uint32_t> t_gap_ms{0};
+std::atomic<uint32_t> t_gap_max{0};
+std::atomic<uint32_t> t_tx_max_us{0};
+std::atomic<uint32_t> t_tx_slow{0};
+std::atomic<bool> t_turn_open{false};
+uint32_t t_gap_begin_ms = 0;  // 只在 oral_ws 任务里访问
+#endif
 
 bool ends_sentence(const char* text) {
     if (text == nullptr || text[0] == '\0') return false;
@@ -259,7 +330,11 @@ bool response_says_goodbye() {
         std::lock_guard<std::mutex> lock(s_text_mutex);
         text = s_response_text;
     }
+    text = normalize_text(text);
     if (text.empty()) return false;
+    // 只有“整句就是道别”才算结束会话。之前只要出现 see you / 再见 就退出，
+    // 辅导老师一句 "See you next time" 会把会话直接掐掉（表现为“自动等待唤醒”）。
+    if (text.size() > 40) return false;
     if (text.find("再见") != std::string::npos ||
         text.find("拜拜") != std::string::npos ||
         text.find("下次见") != std::string::npos ||
@@ -272,13 +347,13 @@ bool response_says_goodbye() {
     }
     return text.find("goodbye") != std::string::npos ||
            text.find("see you") != std::string::npos ||
-           text.find("bye bye") != std::string::npos;
+           text.find("bye") != std::string::npos;
 }
 
 void post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user = false,
              bool reset_assistant = false, bool close_assistant = false,
-             bool reset_user = false);
+             bool reset_user = false, bool replace_user = false);
 void exit_to_return_screen();
 
 void flush_stream_text(uint32_t session, bool close_assistant = false) {
@@ -318,7 +393,8 @@ void stop_barge_in_detection() {
 
 void post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user,
-             bool reset_assistant, bool close_assistant, bool reset_user) {
+             bool reset_assistant, bool close_assistant, bool reset_user,
+             bool replace_user) {
     struct UiPayload {
         uint32_t session;
         State state;
@@ -331,6 +407,7 @@ void post_ui(uint32_t session, State state, const char* status,
         bool reset_assistant;
         bool close_assistant;
         bool reset_user;
+        bool replace_user;
     };
     if (!session_alive(session)) state = State::Error;
     auto* payload = new UiPayload{};
@@ -345,6 +422,7 @@ void post_ui(uint32_t session, State state, const char* status,
     payload->reset_assistant = reset_assistant;
     payload->close_assistant = close_assistant;
     payload->reset_user = reset_user;
+    payload->replace_user = replace_user;
     if (lv_async_call([](void* data) {
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
@@ -367,15 +445,53 @@ void post_ui(uint32_t session, State state, const char* status,
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text.clear();
             }
-            if (item->append.empty() || s_chat == nullptr ||
-                item->generation != s_generation.load(std::memory_order_acquire)) return;
+            // 用户气泡先占位（"…"）再回填：新模型的 ASR 转写比 response.start
+            // 晚到，先建 Assistant 气泡会导致 AI 气泡跑到用户前面。
+            // 空文本表示“本轮到结束都没拿到转写”，直接删掉占位气泡。
+            if (item->replace_user && item->role == BubbleRole::User) {
+                if (item->append.empty()) {
+                    if (s_user_row != nullptr) {
+                        lv_obj_t* row = s_user_row;
+                        s_user_row = nullptr;
+                        s_user_text_label = nullptr;
+                        s_user_text_bubble = nullptr;
+                        {
+                            std::lock_guard<std::mutex> lock(s_text_mutex);
+                            s_user_text.clear();
+                        }
+                        lv_obj_delete(row);
+                        scroll_chat_to_bottom();
+                    }
+                    return;
+                }
+                if (s_user_text_label != nullptr) {
+                    std::lock_guard<std::mutex> lock(s_text_mutex);
+                    s_user_text = item->append;
+                    lv_label_set_text(s_user_text_label, s_user_text.c_str());
+                    resize_bubble(s_user_text_bubble, s_user_text_label,
+                                  s_user_text.c_str(), true);
+                    scroll_chat_to_bottom();
+                }
+                return;
+            }
+            // generation 只用来丢弃过期的流式文本；用户气泡是结构性消息，
+            // 晚一拍到也必须在，否则最终会被 response.start 的 generation++
+            // 判过期而整条丢失（表现为只有第一句有气泡）。
+            if (item->role != BubbleRole::User &&
+                item->generation != s_generation.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (item->append.empty() || s_chat == nullptr) return;
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text += item->append;
                 lv_label_set_text(s_user_text_label, s_user_text.c_str());
-                if (s_user_text.size() >= 24) {
-                    resize_bubble(s_user_text_bubble, s_user_text_label, s_user_text.c_str(), true);
-                }
+                // 用户气泡都很短，但同样是流式追加：60ms 一次重排足够，
+                // 每个 delta 都 lv_obj_update_layout 会拖慢音频播放。
+                const uint32_t now = now_ms();
+                if (now - s_text_layout_ms < 60) return;
+                s_text_layout_ms = now;
+                resize_bubble(s_user_text_bubble, s_user_text_label, s_user_text.c_str(), true);
                 scroll_chat_to_bottom();
                 return;
             }
@@ -395,24 +511,36 @@ void post_ui(uint32_t session, State state, const char* status,
                     }
                 }
                 if (!overflow) {
+                    const uint32_t now = now_ms();
+                    // 关键：流式期间最多 80ms 重排一次。每个 delta 都
+                    // lv_label_set_text + lv_obj_update_layout 会让 LVGL 任务
+                    // 把 CPU/PSRAM 吃满（实测每秒 20~40 次），音频包被延迟、
+                    // 播放端欠载 —— 表现为“改气泡之后 AI 变卡”。
+                    const bool due = item->close_assistant ||
+                                     now - s_text_layout_ms >= 80;
+                    if (!due) return;
+                    s_text_layout_ms = now;
                     std::lock_guard<std::mutex> lock(s_text_mutex);
                     lv_label_set_text(s_text, s_answer.c_str());
-                    const uint32_t now = now_ms();
-                    // 每个 delta 都重排/滚动会让长对话越来越卡，80ms 一次足够。
-                    if (item->close_assistant ||
-                        (s_answer.size() >= 24 && now - s_text_layout_ms >= 80)) {
-                        resize_bubble(s_text_bubble, s_text, s_answer.c_str(),
-                                      false);
-                        scroll_chat_to_bottom();
-                        s_text_layout_ms = now;
-                    }
                     if (item->close_assistant) {
+                        resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
+                        scroll_chat_to_bottom();
                         s_text = nullptr;
                         s_text_bubble = nullptr;
                         s_assistant_row = nullptr;
                         s_answer.clear();
                         s_text_layout_ms = 0;
+                        s_bubble_w = 0;
+                        return;
                     }
+                    // 只在明显变宽时才重排，宽度单调增长，不再抖动。
+                    const int32_t want =
+                        bubble_width_for_text(s_answer.c_str(), false);
+                    if (want >= s_bubble_w + 24) {
+                        resize_bubble(s_text_bubble, s_text, s_answer.c_str(), false);
+                        s_bubble_w = want;
+                    }
+                    scroll_chat_to_bottom();
                     return;
                 }
                 s_text = nullptr;
@@ -444,8 +572,10 @@ void post_ui(uint32_t session, State state, const char* status,
             lv_obj_remove_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_bg_color(bubble, lv_color_hex(is_user ? kColorRightBubble : kColorLeftBubble), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
-            const int32_t width =
-                bubble_width_for_text(item->append.c_str(), is_user);
+            // 气泡宽度按文本自适应；流式期间只在“需要变宽 24px 以上”时
+            // 才重排，避免每个分片都跳一次宽度；封口时再精确收窄。
+            const int32_t width = bubble_width_for_text(item->append.c_str(), is_user);
+            if (!is_user) s_bubble_w = width;
             lv_obj_set_width(bubble, width);
             if (is_user) lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, -kSideMargin, 0);
             else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, kSideMargin, 0);
@@ -494,6 +624,61 @@ bool has_queued_audio() {
     std::lock_guard<std::mutex> lock(s_audio_mutex);
     return !s_audio_chunks.empty();
 }
+
+#if ORAL_TRACE
+void audio_queue_stats(size_t& chunks, size_t& bytes) {
+    std::lock_guard<std::mutex> lock(s_audio_mutex);
+    chunks = s_audio_chunks.size();
+    bytes = s_audio_bytes;
+}
+
+// 每 ~20ms 调一次：统计“该出声却没声音”的空窗（播放欠载），并每秒打一行汇总。
+void trace_tick() {
+    const uint32_t now = now_ms();
+    auto& audio = Application::GetInstance().GetAudioService();
+    const bool should_play =
+        s_ws_ready.load(std::memory_order_acquire) &&
+        !s_mic_enabled.load(std::memory_order_acquire) &&
+        !s_response_done_pending.load(std::memory_order_acquire);
+    size_t chunks = 0;
+    size_t bytes = 0;
+    audio_queue_stats(chunks, bytes);
+    const bool starved = should_play && chunks == 0 && !audio.IsPlaybackPending();
+
+    if (starved) {
+        if (t_gap_begin_ms == 0) t_gap_begin_ms = now;
+        const uint32_t d = now - t_gap_begin_ms;
+        if (d > t_gap_max.load(std::memory_order_relaxed)) {
+            t_gap_max.store(d, std::memory_order_relaxed);
+        }
+    } else if (t_gap_begin_ms != 0) {
+        const uint32_t d = now - t_gap_begin_ms;
+        t_gap_begin_ms = 0;
+        if (d >= 100) {
+            ++t_gap_cnt;
+            t_gap_ms += d;
+            ESP_LOGW(TAG, "[T] gap_end dur=%u ms", d);
+        }
+    }
+
+    if (now - t_tick_ms.load(std::memory_order_relaxed) < 1000) return;
+    t_tick_ms.store(now, std::memory_order_relaxed);
+    ESP_LOGI(TAG,
+             "[T] tick rxn=%u rxb=%u rxslow=%u rxmax=%u drop=%u qn=%u qkb=%u "
+             "gapn=%u gapms=%u gapmax=%u txmax=%u txslow=%u heapint=%u "
+             "heapps=%u lfb=%u",
+             (unsigned)t_rx_pkts.exchange(0), (unsigned)t_rx_bytes.exchange(0),
+             (unsigned)t_rx_slow.exchange(0),
+             (unsigned)t_rx_max_dt.exchange(0),
+             (unsigned)t_drop_bytes.exchange(0), (unsigned)chunks,
+             (unsigned)(bytes / 1024), (unsigned)t_gap_cnt.exchange(0),
+             (unsigned)t_gap_ms.exchange(0), (unsigned)t_gap_max.load(),
+             (unsigned)t_tx_max_us.exchange(0), (unsigned)t_tx_slow.exchange(0),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+}
+#endif
 
 void audio_playback_task(void* /*arg*/) {
     while (true) {
@@ -562,6 +747,10 @@ void queue_audio_output(const std::vector<int16_t>& output) {
         while (s_audio_chunks.size() >= kMaxAudioChunks ||
                s_audio_bytes + bytes > kMaxAudioBytes) {
             s_audio_bytes -= s_audio_chunks.front().pcm.size() * sizeof(int16_t);
+#if ORAL_TRACE
+            t_drop_bytes += static_cast<uint32_t>(
+                s_audio_chunks.front().pcm.size() * sizeof(int16_t));
+#endif
             s_audio_chunks.pop_front();
         }
         s_audio_chunks.push_back(AudioChunk{output, s_generation.load(std::memory_order_acquire)});
@@ -586,6 +775,64 @@ void close_websocket() {
 }
 
 void start_session();
+
+void clear_tx_queue() {
+    std::lock_guard<std::mutex> lock(s_tx_mutex);
+    s_tx_chunks.clear();
+}
+
+// 采集侧调用：永不阻塞；队列满时丢最旧的一帧，保证读麦节拍不被网络拖住。
+void queue_tx_frame(const int16_t* pcm, size_t samples) {
+    if (pcm == nullptr || samples == 0) return;
+    std::lock_guard<std::mutex> lock(s_tx_mutex);
+    while (s_tx_chunks.size() >= kMaxTxChunks) {
+        s_tx_chunks.pop_front();
+        s_tx_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    s_tx_chunks.emplace_back(pcm, pcm + samples);
+}
+
+// 独立的 WS 发送任务：Send 再慢也只堵自己，不堵麦克风。
+void tx_task(void* /*arg*/) {
+    s_tx_running.store(true, std::memory_order_release);
+    while (!s_tx_stop.load(std::memory_order_acquire)) {
+        std::vector<int16_t> frame;
+        {
+            std::lock_guard<std::mutex> lock(s_tx_mutex);
+            if (!s_tx_chunks.empty()) {
+                frame = std::move(s_tx_chunks.front());
+                s_tx_chunks.pop_front();
+            }
+        }
+        if (frame.empty()) {
+            vTaskDelay(pdMS_TO_TICKS(4));
+            continue;
+        }
+        std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
+        if (!s_ws || !s_ws->IsConnected()) break;
+#if ORAL_TRACE
+        const int64_t t0 = esp_timer_get_time();
+        const bool ok =
+            s_ws->Send(frame.data(), frame.size() * sizeof(int16_t), true);
+        const uint32_t us = static_cast<uint32_t>(esp_timer_get_time() - t0);
+        if (us > t_tx_max_us.load(std::memory_order_relaxed)) {
+            t_tx_max_us.store(us, std::memory_order_relaxed);
+        }
+        if (us >= 20000) {
+            ++t_tx_slow;
+            ESP_LOGW(TAG, "[T] tx_slow us=%u", us);
+        }
+        if (!ok) break;
+#else
+        if (!s_ws->Send(frame.data(), frame.size() * sizeof(int16_t), true)) {
+            break;
+        }
+#endif
+    }
+    s_tx_stop.store(true, std::memory_order_release);
+    s_tx_running.store(false, std::memory_order_release);
+    vTaskDelete(nullptr);
+}
 
 void send_ws_text(const char* text) {
     std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
@@ -613,6 +860,31 @@ void handle_binary_audio(const char* data, size_t len, uint32_t session) {
     if (!session_alive(session)) return;
     if (s_drop_incoming_audio.load(std::memory_order_acquire)) return;
     if (data == nullptr || len < sizeof(int16_t)) return;
+    s_last_audio_ms.store(now_ms(), std::memory_order_relaxed);
+#if ORAL_TRACE
+    {
+        const uint32_t now = now_ms();
+        const uint32_t last = t_last_rx_ms.exchange(now, std::memory_order_acq_rel);
+        if (last != 0) {
+            const uint32_t dt = now - last;
+            if (dt > t_rx_max_dt.load(std::memory_order_relaxed)) {
+                t_rx_max_dt.store(dt, std::memory_order_relaxed);
+            }
+            if (dt >= 120) {
+                ++t_rx_slow;
+                ESP_LOGW(TAG, "[T] rx_slow dt=%u ms len=%u", dt, (unsigned)len);
+            }
+        }
+        ++t_rx_pkts;
+        t_rx_bytes += static_cast<uint32_t>(len);
+        t_last_audio_ms.store(now, std::memory_order_relaxed);
+        const uint32_t rstart = t_rstart_ms.load(std::memory_order_relaxed);
+        if (rstart != 0 && t_first_audio_ms.load(std::memory_order_relaxed) == 0) {
+            t_first_audio_ms.store(now, std::memory_order_relaxed);
+            ESP_LOGI(TAG, "[T] ev=first_audio dt=%u", now - rstart);
+        }
+    }
+#endif
     size_t samples = (len / sizeof(int16_t)) & ~static_cast<size_t>(1);
     auto* pcm = reinterpret_cast<const int16_t*>(data);
     std::vector<int16_t> input(pcm, pcm + samples);
@@ -633,28 +905,68 @@ void handle_json(const char* data, size_t len, uint32_t session) {
 
     if (std::strcmp(type, "relay.ready") == 0) {
         s_ws_ready.store(true, std::memory_order_release);
+        // relay.ready 里带 model/voice，打出来才能确认服务端真的换了模型
+        // （allowedModels 不匹配时 relay 会静默回落到默认模型）。
+        {
+            const cJSON* model_item = cJSON_GetObjectItem(root, "model");
+            const cJSON* voice_item = cJSON_GetObjectItem(root, "voice");
+            ESP_LOGI(TAG, "relay ready: model=%s voice=%s",
+                     cJSON_IsString(model_item) ? model_item->valuestring : "?",
+                     cJSON_IsString(voice_item) ? voice_item->valuestring : "?");
+        }
+#if ORAL_TRACE
+        ESP_LOGI(TAG, "[T] ev=ready up=%u", now_ms());
+#endif
         s_drop_incoming_audio.store(false, std::memory_order_release);
         s_response_done_pending.store(false, std::memory_order_release);
         s_user_transcript_closed.store(false, std::memory_order_release);
         post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.speech_stopped") == 0) {
         s_mic_enabled.store(false, std::memory_order_release);
+#if ORAL_TRACE
+        ESP_LOGI(TAG, "[T] ev=speech_stopped up=%u", now_ms());
+#endif
         // 新一句话开始：上一轮的用户气泡必须封口，否则本轮增量会拼进旧气泡。
         s_user_transcript_closed.store(false, std::memory_order_release);
         s_user_streamed.store(false, std::memory_order_release);
-        post_ui(session, State::Answering, "思考中…", BubbleRole::Assistant,
-                nullptr, false, false, false, true);
+        // 从“用户说完”开始计看门狗：上游若迟迟不给 response.start
+        // （例如直接报 invalid_value），麦克风会一直关着，必须能自愈。
+        {
+            const uint32_t now = now_ms();
+            s_last_audio_ms.store(now, std::memory_order_relaxed);
+            s_rstart_ms.store(now, std::memory_order_relaxed);
+        }
+        // 打断时已经建过占位气泡就复用，避免同一轮出现两个空气泡
+        if (!s_user_pending.exchange(true, std::memory_order_acq_rel)) {
+            post_ui(session, State::Answering, "思考中…", BubbleRole::User, "…");
+        }
+        s_user_pending_ms.store(now_ms(), std::memory_order_release);
     } else if (std::strcmp(type, "relay.user_transcript.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr &&
             !s_user_transcript_closed.load(std::memory_order_acquire)) {
             s_user_streamed.store(true, std::memory_order_release);
-            post_ui(session, State::Listening, "聆听中…", BubbleRole::User, delta->valuestring, true);
+            if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
+                // 第一个增量直接把占位符替换掉，保持气泡顺序
+                post_ui(session, State::Listening, "聆听中…", BubbleRole::User,
+                        delta->valuestring, false, false, false, false, true);
+            } else {
+                post_ui(session, State::Listening, "聆听中…", BubbleRole::User,
+                        delta->valuestring, true);
+            }
         }
     } else if (std::strcmp(type, "relay.user_transcript.done") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         s_user_transcript_closed.store(true, std::memory_order_release);
-        if (s_user_streamed.exchange(false, std::memory_order_acq_rel)) {
+        if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
+            // 没有增量、只给了整句：回填占位气泡
+            if (cJSON_IsString(text) && text->valuestring != nullptr &&
+                text->valuestring[0] != '\0') {
+                post_ui(session, State::Answering, "思考中…", BubbleRole::User,
+                        text->valuestring, false, false, false, false, true);
+            }
+            s_user_streamed.store(false, std::memory_order_release);
+        } else if (s_user_streamed.exchange(false, std::memory_order_acq_rel)) {
             // 已经按增量建过气泡，done 只更新状态，避免整句重复插入。
             post_ui(session, State::Answering, "思考中…",
                     BubbleRole::Assistant, nullptr, false, false, false, true);
@@ -677,6 +989,32 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         }
         post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant,
                 nullptr, false, true);
+        // 从本轮起点重新计时，避免上一轮的旧时间戳立刻触发 watchdog。
+        {
+            const uint32_t now = now_ms();
+            s_last_audio_ms.store(now, std::memory_order_relaxed);
+            s_rstart_ms.store(now, std::memory_order_relaxed);
+        }
+#if ORAL_TRACE
+        {
+            const uint32_t now = now_ms();
+            const bool was_open = t_turn_open.exchange(true);
+            t_rstart_ms.store(now, std::memory_order_relaxed);
+            t_first_audio_ms.store(0, std::memory_order_relaxed);
+            t_rx_pkts.store(0);
+            t_rx_bytes.store(0);
+            t_rx_max_dt.store(0);
+            t_rx_slow.store(0);
+            t_drop_bytes.store(0);
+            t_gap_cnt.store(0);
+            t_gap_ms.store(0);
+            t_gap_max.store(0);
+            const uint32_t prev_done = t_rdone_ms.load(std::memory_order_relaxed);
+            ESP_LOGI(TAG, "[T] ev=rstart up=%u prev_done_ago=%u ms open=%d",
+                     now, prev_done == 0 ? 0 : now - prev_done,
+                     was_open ? 1 : 0);
+        }
+#endif
     } else if (std::strcmp(type, "relay.text.delta") == 0) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr) {
@@ -735,6 +1073,12 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             }
             if (response_id != 0) s_last_done_response_id.store(response_id, std::memory_order_release);
             flush_stream_text(session);
+            // 本轮结束还没等到转写：删掉用户气泡里的 "…" 占位，
+            // 否则屏幕上会一直留着一个空白的用户气泡。
+            if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
+                post_ui(session, State::Answering, "回答中…", BubbleRole::User,
+                        "", false, false, false, false, true);
+            }
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
             s_response_done_at_us.store(esp_timer_get_time(),
@@ -744,6 +1088,36 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                 // 主动结束会话：避免 close 时 OnDisconnected 触发自动重连。
                 s_user_exit.store(true, std::memory_order_release);
             }
+#if ORAL_TRACE
+            {
+                const uint32_t now = now_ms();
+                const uint32_t rstart = t_rstart_ms.load(std::memory_order_relaxed);
+                const uint32_t last_audio =
+                    t_last_audio_ms.load(std::memory_order_relaxed);
+                size_t chunks = 0;
+                size_t bytes = 0;
+                audio_queue_stats(chunks, bytes);
+                t_rdone_ms.store(now, std::memory_order_relaxed);
+                t_turn_open.store(false);
+                ESP_LOGI(TAG,
+                         "[T] ev=rdone up=%u since_rstart=%u last_audio_ago=%u "
+                         "qn=%u qkb=%u pending=%d rxn=%u rxb=%u rxmax=%u "
+                         "drop=%u gapn=%u gapms=%u gapmax=%u",
+                         now, rstart == 0 ? 0 : now - rstart,
+                         last_audio == 0 ? 0 : now - last_audio,
+                         (unsigned)chunks, (unsigned)(bytes / 1024),
+                         Application::GetInstance()
+                                 .GetAudioService()
+                                 .IsPlaybackPending()
+                             ? 1
+                             : 0,
+                         (unsigned)t_rx_pkts.load(), (unsigned)t_rx_bytes.load(),
+                         (unsigned)t_rx_max_dt.load(),
+                         (unsigned)t_drop_bytes.load(),
+                         (unsigned)t_gap_cnt.load(), (unsigned)t_gap_ms.load(),
+                         (unsigned)t_gap_max.load());
+            }
+#endif
         }
     } else if (std::strcmp(type, "relay.interrupted") == 0) {
         s_drop_incoming_audio.store(true, std::memory_order_release);
@@ -751,13 +1125,39 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         s_end_after_playback.store(false, std::memory_order_release);
         s_mic_enabled.store(true, std::memory_order_release);
         s_user_transcript_closed.store(false, std::memory_order_release);
+#if ORAL_TRACE
+        ESP_LOGI(TAG, "[T] ev=interrupted up=%u", now_ms());
+        t_turn_open.store(false);
+#endif
+        // 服务端打断：喇叭刚停，留一小段静音窗避免回采自答
+        s_uplink_mute_until_ms.store(now_ms() + 400, std::memory_order_relaxed);
+        clear_tx_queue();
+        // 打断后进入新一轮聆听：计时从此刻重新开始。
+        {
+            const uint32_t now = now_ms();
+            s_last_audio_ms.store(now, std::memory_order_relaxed);
+            s_rstart_ms.store(now, std::memory_order_relaxed);
+        }
         post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
     } else if (std::strcmp(type, "relay.error") == 0) {
         const cJSON* error = cJSON_GetObjectItem(root, "error");
         const char* detail = cJSON_IsString(error) ? error->valuestring : "服务错误";
+        ESP_LOGE(TAG, "relay error: %s", detail);
         char message[256];
         std::snprintf(message, sizeof(message), "错误：%s", detail);
         post_ui(session, State::Error, message, BubbleRole::Assistant, nullptr);
+        // 上游报错后这一轮已经废了：立刻恢复聆听，不能把麦克风一直关着
+        // （否则界面停在“回答中”，用户说什么都没反应）。
+        s_response_done_pending.store(false, std::memory_order_release);
+        s_end_after_playback.store(false, std::memory_order_release);
+        s_drop_incoming_audio.store(true, std::memory_order_release);
+        stop_barge_in_detection();
+        {
+            const uint32_t now = now_ms();
+            s_last_audio_ms.store(now, std::memory_order_relaxed);
+            s_rstart_ms.store(now, std::memory_order_relaxed);
+        }
+        s_mic_enabled.store(true, std::memory_order_release);
     }
     cJSON_Delete(root);
 }
@@ -813,9 +1213,34 @@ void stream_microphone(uint32_t session) {
     while (!s_stop_requested.load(std::memory_order_acquire) &&
            !s_reconnect_requested.load(std::memory_order_acquire) &&
            session_alive(session)) {
+#if ORAL_TRACE
+        trace_tick();
+#endif
+        {
+            // 卡顿/卡死自检：单次循环耗时超过 1.5s 说明有地方阻塞了
+            // （读麦、网络或 AFE），打一条便于定位。
+            static uint32_t prev_iter_ms = 0;
+            const uint32_t iter_now = now_ms();
+            if (prev_iter_ms != 0 && iter_now - prev_iter_ms > 1500) {
+                ESP_LOGW(TAG, "loop stall %u ms",
+                         (unsigned)(iter_now - prev_iter_ms));
+            }
+            prev_iter_ms = iter_now;
+        }
         if (s_barge_detection_requested.exchange(false,
                                                 std::memory_order_acq_rel)) {
             start_barge_in_detection();
+        }
+        // 占位气泡超时清理：一直没等到转写就删掉 "…"，避免屏幕上留空气泡
+        if (s_user_pending.load(std::memory_order_acquire)) {
+            const uint32_t since =
+                s_user_pending_ms.load(std::memory_order_relaxed);
+            if (since != 0 && now_ms() - since > 3000) {
+                s_user_pending.store(false, std::memory_order_release);
+                s_user_pending_ms.store(0, std::memory_order_release);
+                post_ui(session, State::Listening, "聆听中…", BubbleRole::User,
+                        "", false, false, false, false, true);
+            }
         }
         if (s_interrupt_requested.exchange(false, std::memory_order_acq_rel)) {
             auto& audio = Application::GetInstance().GetAudioService();
@@ -828,8 +1253,46 @@ void stream_microphone(uint32_t session) {
             s_end_after_playback.store(false, std::memory_order_release);
             send_ws_json("{\"type\":\"interrupt\"}");
             send_ws_json("{\"type\":\"resume_mic\"}");
+            // 与 OralScreen::Interrupt 同样处理：静音窗 + 丢掉已排队的回声帧
+            s_uplink_mute_until_ms.store(now_ms() + 600, std::memory_order_relaxed);
+            clear_tx_queue();
             s_mic_enabled.store(true, std::memory_order_release);
             post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
+#if ORAL_TRACE
+            ESP_LOGI(TAG, "[T] ev=interrupt up=%u", now_ms());
+            t_turn_open.store(false);
+#endif
+        }
+        // 服务端长时间不给 response.done 时，客户端会永远停在“回答中”。
+        // 最后一块音频后静默超过阈值，且没有排队/正在播放的音频，就当作本轮
+        // 结束：打断 + 重新开麦，避免必须按电源键才能继续。
+        if (!s_response_done_pending.load(std::memory_order_acquire) &&
+            !s_mic_enabled.load(std::memory_order_acquire) &&
+            s_ws_ready.load(std::memory_order_acquire)) {
+            const uint32_t now = now_ms();
+            const uint32_t last_audio =
+                s_last_audio_ms.load(std::memory_order_relaxed);
+            const uint32_t rstart = s_rstart_ms.load(std::memory_order_relaxed);
+            // 刚开一轮（response.start 之后）必须先给服务端时间出首包，
+            // 否则上一轮的旧时间戳会立刻误触发打断。
+            const bool turn_old_enough = rstart != 0 && now - rstart >= kTurnIdleTimeoutMs;
+            if (turn_old_enough && last_audio != 0 &&
+                now - last_audio >= kTurnIdleTimeoutMs &&
+                !audio.IsPlaybackPending() && !has_queued_audio()) {
+                ESP_LOGW(TAG, "turn watchdog: %u ms silence, resume mic",
+                         (unsigned)(now - last_audio));
+                audio.ClearPlaybackQueue();
+                clear_audio_queue();
+                s_generation.fetch_add(1, std::memory_order_acq_rel);
+                s_drop_incoming_audio.store(true, std::memory_order_release);
+                s_end_after_playback.store(false, std::memory_order_release);
+                stop_barge_in_detection();
+                send_ws_json("{\"type\":\"interrupt\"}");
+                send_ws_json("{\"type\":\"resume_mic\"}");
+                s_mic_enabled.store(true, std::memory_order_release);
+                post_ui(session, State::Listening, "聆听中…",
+                        BubbleRole::Assistant, nullptr);
+            }
         }
         if (s_response_done_pending.load(std::memory_order_acquire)) {
             if (audio.IsPlaybackPending() || has_queued_audio()) {
@@ -851,12 +1314,28 @@ void stream_microphone(uint32_t session) {
                     send_ws_json("{\"type\":\"resume_mic\"}");
                     post_ui(session, State::Listening,
                             "聆听中…", BubbleRole::Assistant, nullptr);
+#if ORAL_TRACE
+                    ESP_LOGW(TAG, "[T] ev=resume_timeout8s up=%u", now_ms());
+                    t_turn_open.store(false);
+#endif
                 } else if (now - playback_idle_tick >= pdMS_TO_TICKS(250)) {
                     stop_barge_in_detection();
                     s_response_done_pending.store(false, std::memory_order_release);
                     s_mic_enabled.store(true, std::memory_order_release);
+                    // 刚播完的尾音可能还在扬声器里，留 150ms 静音窗
+                    s_uplink_mute_until_ms.store(now_ms() + 150, std::memory_order_relaxed);
                     send_ws_json("{\"type\":\"resume_mic\"}");
                     post_ui(session, State::Listening, "聆听中…", BubbleRole::Assistant, nullptr);
+#if ORAL_TRACE
+                    {
+                        const uint32_t up = now_ms();
+                        const uint32_t done =
+                            t_rdone_ms.load(std::memory_order_relaxed);
+                        ESP_LOGI(TAG, "[T] ev=resume up=%u since_rdone=%u ms",
+                                 up, done == 0 ? 0 : up - done);
+                        t_turn_open.store(false);
+                    }
+#endif
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -875,9 +1354,12 @@ void stream_microphone(uint32_t session) {
             for (size_t i = 0; i + 1 < frame.size(); i += 2) frame[i / 2] = frame[i];
             frame.resize(frame.size() / 2);
         }
-        std::lock_guard<std::recursive_mutex> lock(s_ws_mutex);
-        if (!s_ws || !s_ws->IsConnected()) break;
-        if (!s_ws->Send(frame.data(), frame.size() * sizeof(int16_t), true)) break;
+        // 静音窗内照常读麦（避免 I2S 缓冲积旧数据），但不上传。
+        if (now_ms() < s_uplink_mute_until_ms.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        // 只入队，不在这里 Send：网络阻塞不能拖慢读麦。
+        queue_tx_frame(frame.data(), frame.size());
     }
 }
 
@@ -928,8 +1410,24 @@ void worker_task(void* /*arg*/) {
             continue;
         }
         s_mic_enabled.store(true, std::memory_order_release);
+#if ORAL_TRACE
+        ESP_LOGI(TAG, "[T] ev=mic_on up=%u", now_ms());
+#endif
+        clear_tx_queue();
+        s_tx_stop.store(false, std::memory_order_release);
+        if (xTaskCreate(tx_task, "oral_tx", 6144, nullptr, 5, nullptr) != pdPASS) {
+            // 建不起发送任务：退化为原来同步发，至少不丢音频。
+            s_tx_stop.store(true, std::memory_order_release);
+            ESP_LOGE(TAG, "tx task create failed");
+        }
         stream_microphone(session);
         s_mic_enabled.store(false, std::memory_order_release);
+        s_tx_stop.store(true, std::memory_order_release);
+        for (int i = 0; i < 30 && s_tx_running.load(std::memory_order_acquire);
+             ++i) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        clear_tx_queue();
         close_websocket();
         if (s_reconnect_requested.load(std::memory_order_acquire)) {
             s_reconnect_requested.store(false, std::memory_order_release);
@@ -1023,6 +1521,7 @@ void start_session() {
     s_last_done_response_id.store(0, std::memory_order_release);
     s_last_text_seq.store(0, std::memory_order_release);
     s_user_streamed.store(false, std::memory_order_release);
+    s_user_pending.store(false, std::memory_order_release);
     s_end_after_playback.store(false, std::memory_order_release);
     s_drop_incoming_audio.store(false, std::memory_order_release);
     s_text = nullptr;
@@ -1032,6 +1531,10 @@ void start_session() {
     s_user_text_bubble = nullptr;
     s_user_row = nullptr;
     clear_audio_queue();
+    clear_tx_queue();
+    s_tx_stop.store(true, std::memory_order_release);
+    s_tx_dropped.store(0, std::memory_order_relaxed);
+    s_last_audio_ms.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(s_text_mutex);
         s_answer.clear();
@@ -1063,6 +1566,8 @@ void stop_session() {
     s_generation.fetch_add(1, std::memory_order_acq_rel);
     // 立即丢掉未播完的旧语音，避免退出后继续出声、拖慢其他页面。
     clear_audio_queue();
+    clear_tx_queue();
+    s_tx_stop.store(true, std::memory_order_release);
     Application::GetInstance().GetAudioService().ClearPlaybackQueue();
 }
 
@@ -1228,6 +1733,8 @@ void OralScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         Application::GetInstance().SetVoiceUiDesired(false);
         // 口语是实时双向语音，WiFi 省电会让下行音频出现周期性卡顿。
         Board::GetInstance().SetPowerSaveMode(false);
+        // 口语会话期间不能被首页/待机的空闲计时判为“无操作”而自动关机。
+        IdlePower_Detach(IdlePowerSession::Home);
         // 学伴的 TTS 可能还在播放队列里，进口语前必须清掉，否则两路声音叠加。
         Application::GetInstance().GetAudioService().ClearPlaybackQueue();
         clear_audio_queue();
@@ -1236,6 +1743,8 @@ void OralScreen::LifecycleCallback(screen_lifecycle_event_t event) {
     ESP_LOGI(TAG, "unload: oral_screen");
     stop_session();
     Board::GetInstance().SetPowerSaveMode(true);
+    // 交还空闲计时：从离开口语页重新开始累计。
+    IdlePower_Attach(IdlePowerSession::Home, /*reset_activity=*/true);
 }
 
 bool OralScreen::IsActive() {
@@ -1252,6 +1761,14 @@ void OralScreen::Interrupt() {
     s_drop_incoming_audio.store(true, std::memory_order_release);
     audio.ClearPlaybackQueue();
     clear_audio_queue();
+    // 打断瞬间扬声器还有余音：上行静音 300ms（覆盖 I2S DMA 余量 + 尾音），
+    // 太大会把用户打断后说的头几个字一起吞掉。
+    s_uplink_mute_until_ms.store(now_ms() + 300, std::memory_order_relaxed);
+    clear_tx_queue();
+    // 立刻占一个用户气泡：屏幕马上有反馈，不用等模型 VAD + 转写。
+    s_user_pending.store(true, std::memory_order_release);
+    s_user_pending_ms.store(now_ms(), std::memory_order_release);
+    post_ui(s_session.load(), State::Listening, "聆听中…", BubbleRole::User, "…");
     s_generation.fetch_add(1, std::memory_order_acq_rel);
     s_response_done_pending.store(false, std::memory_order_release);
     s_end_after_playback.store(false, std::memory_order_release);
