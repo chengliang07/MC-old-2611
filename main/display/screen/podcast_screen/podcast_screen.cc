@@ -19,6 +19,7 @@
 #include "chat_screen/chat_screen.h"
 #include "dual_network_board.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -828,10 +829,9 @@ struct PrefetchTaskArg {
     std::vector<std::string> ids;
 };
 
-// 只预取"播放地址"（写进 play 缓存，点击时零等待）。
-// 不再在这里 Prepare 播放器：实测预播会把管线占了 45s 且始终没就绪
-// （first_pcm_buffered 从未出现），点击时反而要花 1s 拆掉它，
-// 而且它和点击后的请求并发抢 TLS/带宽，正是那次 10s 超时的诱因之一。
+// 预取播放地址（写进 play 缓存），并把第一集直接"预开流"：
+// 用户停留在列表的这 1~2 秒里，TLS/HTTP/解码都已经就绪，
+// 点第一集时只要把按住的首帧放出来，基本立刻出声。
 void PrefetchFirstPlayUrlWorker(void* data) {
     std::unique_ptr<PrefetchTaskArg> arg(static_cast<PrefetchTaskArg*>(data));
     const uint32_t session = arg->session;
@@ -849,8 +849,30 @@ void PrefetchFirstPlayUrlWorker(void* data) {
         std::string error;
         const PodcastPlayInfo play =
             PodcastClient::ResolvePlayUrl(arg->ids[i], error);
-        if (play.ok) {
-            ESP_LOGI(TAG, "prefetched play url #%u", static_cast<unsigned>(i));
+        if (!play.ok) {
+            continue;
+        }
+        ESP_LOGI(TAG, "prefetched play url #%u", static_cast<unsigned>(i));
+        // 只预开第一集：多开会和点击后的建流抢带宽，实测把第二集撞成建流超时。
+        if (i != 0 || s_playing || s_paused ||
+            s_preparing_play.load(std::memory_order_acquire) ||
+            !IsCurrentSession(session)) {
+            continue;
+        }
+        std::string prepare_error;
+        // 预开流会长期占住一条 TLS + 一块播放缓冲；内部 RAM 不宽裕时宁可不预开，
+        // 也不能把别的模块挤到 CreateHttp 失败。
+        const size_t largest_internal = heap_caps_get_largest_free_block(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (largest_internal < 120 * 1024) {
+            ESP_LOGW(TAG, "skip prepare, internal largest=%u",
+                     static_cast<unsigned>(largest_internal));
+            continue;
+        }
+        if (PodcastPlayer::Prepare(play.url, prepare_error)) {
+            ESP_LOGI(TAG, "prepare first episode started");
+        } else {
+            ESP_LOGW(TAG, "prepare skipped: %s", prepare_error.c_str());
         }
     }
     vTaskDelete(nullptr);
@@ -861,9 +883,8 @@ void PrefetchFirstPlayUrl() {
         s_playing || s_preparing_play.load(std::memory_order_acquire)) {
         return;
     }
-    // 只预取第一条：预取 4 条会连续开 4 次 TLS，与点击后的建流抢资源，
-    // 实测导致"播放失败@aud_dec"（建流超时）。
-    constexpr size_t kPrefetchCount = 1;
+    // 前 3 集都先取地址（串行）：点第 2、3 集时省掉 2~3 秒地址请求。
+    constexpr size_t kPrefetchCount = 3;
     auto* arg = new PrefetchTaskArg{};
     arg->session = CurrentSession();
     arg->generation =
@@ -903,6 +924,37 @@ std::string FirstGlyph(const std::string& text) {
         len = text.size() - i;
     }
     return text.substr(i, len);
+}
+
+// 列表标题必须保持单行：按显示宽度截断（CJK 记 2 个单位），
+// 否则标题折成两行会压到右下角的时长/完成状态。
+std::string TruncateForWidth(const std::string& text, size_t max_units) {
+    std::string out;
+    size_t units = 0;
+    size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        size_t len = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            len = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            len = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            len = 4;
+        }
+        if (i + len > text.size()) {
+            len = text.size() - i;
+        }
+        const size_t glyph_units = len > 1 ? 2 : 1;
+        if (units + glyph_units > max_units) {
+            out += "…";
+            break;
+        }
+        out.append(text, i, len);
+        units += glyph_units;
+        i += len;
+    }
+    return out;
 }
 
 lv_obj_t* CreatePillButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
@@ -1031,10 +1083,11 @@ void RebuildList() {
         screen_make_input_passive(glyph);
 
         lv_obj_t* title = lv_label_create(row);
-        lv_label_set_text(title, item.title.c_str());
+        const std::string title_text = TruncateForWidth(item.title, 40);
+        lv_label_set_text(title, title_text.c_str());
         lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(title, 92, 16);
-        lv_obj_set_width(title, 452);
+        lv_obj_set_pos(title, 92, 14);
+        lv_obj_set_width(title, 430);
         lv_obj_set_style_text_font(title, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(
             title, lv_color_hex(is_current ? kColorAccent : kColorText),
@@ -1049,7 +1102,8 @@ void RebuildList() {
                                      : I18n::T("未完成"));
         lv_obj_t* meta = lv_label_create(row);
         lv_label_set_text(meta, meta_text);
-        lv_obj_set_pos(meta, 92, 46);
+        // 时长/完成状态固定右下角，标题只占上面一行，互不覆盖。
+        lv_obj_align(meta, LV_ALIGN_BOTTOM_RIGHT, -20, -12);
         lv_obj_set_style_text_font(meta, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(
             meta, lv_color_hex(item.completed ? kColorDone : kColorSubtle),
@@ -1059,7 +1113,7 @@ void RebuildList() {
         if (is_current) {
             lv_obj_t* badge = lv_label_create(row);
             lv_label_set_text(badge, I18n::T("正在播放"));
-            lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -20, 0);
+            lv_obj_align(badge, LV_ALIGN_TOP_RIGHT, -20, 12);
             lv_obj_set_style_text_font(badge, &font_puhui_20_4,
                                        LV_PART_MAIN);
             lv_obj_set_style_text_color(badge, lv_color_hex(kColorAccent),
