@@ -957,6 +957,13 @@ void ApplyLoadResult(void* data) {
     s_loading.store(false, std::memory_order_release);
     if (!result->error.empty()) {
         // 后台刷新失败时保留已有列表，不打断正在看的节目。
+        if (s_items.empty() && !s_cached_items.empty()) {
+            // 连"上次的节目"都不显示会让人以为列表被清空了：先用缓存顶上。
+            s_items = s_cached_items;
+            RebuildList();
+            SetStatusDirect("网络不稳，显示上次的节目");
+            return;
+        }
         if (s_items.empty()) {
             SetStatusDirect(result->error.c_str());
         }

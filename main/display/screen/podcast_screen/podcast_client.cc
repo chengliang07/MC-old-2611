@@ -355,9 +355,23 @@ PodcastList PodcastClient::FetchPodcasts(std::string& error) {
     std::string body;
     int status = 0;
     const std::string url = api_base + "/api/device/v1/podcasts";
-    if (!HttpGet(url, device_token, body, status, error)) {
-        ESP_LOGW(TAG, "podcast list failed: %s", error.c_str());
-        return {};
+    // 这条链路实测 2~10 秒都在抖：短超时 + 立刻重试一次，比干等 10 秒超时稳。
+    constexpr int kListTimeoutMs = 6000;
+    if (!HttpGet(url, device_token, body, status, error, kListTimeoutMs)) {
+        ESP_LOGW(TAG, "podcast list failed (%s), retrying once", error.c_str());
+        error.clear();
+        body.clear();
+        status = 0;
+        if (!HttpGet(url, device_token, body, status, error, kListTimeoutMs)) {
+            ESP_LOGE(TAG, "podcast list failed after retry: %s", error.c_str());
+            // 有旧数据就先给旧数据：界面上"刷新变暂无节目"比显示略旧更糟。
+            std::lock_guard<std::mutex> lock(s_list_cache_mutex);
+            if (!s_list_cache.empty()) {
+                error.clear();
+                return s_list_cache;
+            }
+            return {};
+        }
     }
 
     cJSON* root = cJSON_Parse(body.c_str());

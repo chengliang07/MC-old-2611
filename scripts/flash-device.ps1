@@ -16,7 +16,7 @@ param(
     [switch]$Force
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $lockRoot = Split-Path -Parent $repoRoot
