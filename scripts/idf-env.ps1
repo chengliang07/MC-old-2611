@@ -17,12 +17,13 @@ $env:IDF_PYTHON_CHECK_CONSTRAINTS = '0'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 
-# ccache：所有 worktree 共用一个缓存，跨目录命中
+# ccache：所有 worktree 共用一个缓存。BASEDIR 取当前 worktree 根，
+# 这样各目录里的绝对路径都被归一成 "main/..." 才能跨目录命中。
 $env:CCACHE_DIR = 'D:\Espressif\ccache-cache'
 $env:CCACHE_MAXSIZE = '8G'
 $env:IDF_CCACHE_ENABLE = '1'
 $env:CCACHE_COMPRESS = '1'
-$env:CCACHE_BASEDIR = 'E:\09-Soft_DEV'
+$env:CCACHE_BASEDIR = Split-Path -Parent $PSScriptRoot
 if (-not (Test-Path $env:CCACHE_DIR)) { New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null }
 
 $env:PATH = "$ccacheDir;$env:PATH"
