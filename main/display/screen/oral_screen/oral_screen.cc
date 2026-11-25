@@ -219,8 +219,7 @@ void set_status_visual(State state, const char* text) {
 
     const uint32_t color = status_color(state);
     if (!changed) {
-        if ((state == State::Listening || state == State::Answering) &&
-            s_wave_timer != nullptr) {
+        if (state == State::Listening && s_wave_timer != nullptr) {
             lv_timer_resume(s_wave_timer);
         }
         return;
@@ -257,42 +256,41 @@ void set_status_visual(State state, const char* text) {
         }
         lv_label_set_text(s_hint, hint);
     }
-    // 波柱只在真正收/放音时跑；静止时由 wave_timer_cb 自己暂停。
-    if ((state == State::Listening || state == State::Answering) &&
-        s_wave_timer != nullptr) {
+    // 波柱只在用户说话时动；回答/空闲由 wave_timer_cb 自己暂停。
+    if (state == State::Listening && s_wave_timer != nullptr) {
         lv_timer_resume(s_wave_timer);
     }
 }
 
-// 底部波柱：5 根柱子按 6 帧循环涨落。空闲时自己暂停，别让它在没人说话
-// 的时候还每 90ms 触发一次重绘（长时间会话会积成可观的 CPU 占用）。
+// 底部波柱：只在「用户说话」时轻微起伏。AI 回答时冻结成静态电平条，
+// 空闲时压平 —— 之前回答时也每 90ms 跳一下，看着就是一根蓝光标在闪。
 void wave_timer_cb(lv_timer_t* timer) {
     static const uint8_t kFrames[6][5] = {
         {10, 22, 14, 26, 12}, {16, 14, 26, 12, 22}, {22, 26, 12, 22, 14},
         {26, 12, 22, 14, 26}, {14, 22, 12, 26, 16}, {12, 26, 16, 12, 22},
     };
+    static const uint8_t kAnsweringBars[5] = {8, 16, 10, 18, 8};
     static uint32_t last_color = 0xFFFFFFFFu;
     if (s_footer == nullptr) {
         lv_timer_pause(timer);
         return;
     }
     const State state = s_state.load(std::memory_order_acquire);
-    const bool active =
-        state == State::Listening || state == State::Answering;
-    if (!active) {
+    if (state != State::Listening) {
         if (s_wave_tick != 0) {
             s_wave_tick = 0;
             for (int i = 0; i < 5; ++i) {
-                if (s_wave_bars[i] != nullptr) {
-                    lv_obj_set_height(s_wave_bars[i], 6);
-                }
+                if (s_wave_bars[i] == nullptr) continue;
+                lv_obj_set_height(s_wave_bars[i],
+                                  state == State::Answering
+                                      ? kAnsweringBars[i]
+                                      : 6);
             }
         }
         lv_timer_pause(timer);
         return;
     }
-    const uint32_t color =
-        state == State::Answering ? kColorStatusAnswering : kColorAccent;
+    const uint32_t color = kColorAccent;  // 只有聆听态会走到这里
     const uint8_t* frame = kFrames[s_wave_tick % 6];
     ++s_wave_tick;
     for (int i = 0; i < 5; ++i) {
@@ -1938,7 +1936,8 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_set_style_bg_opa(s_chat, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_add_flag(s_chat, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chat, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_AUTO);
+    // 列表已自动跟到最新，右侧滚动条只会闪，干脆不画。
+    lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_event_cb(s_chat, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
 
     // 底部聆听区：波柱 + 一句提示，固定压在列表下方。
