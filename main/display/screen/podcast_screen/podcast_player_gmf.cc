@@ -407,7 +407,7 @@ bool WaitForPendingStop(esp_asp_handle_t player) {
             return true;
         }
     }
-    for (int i = 0; i < 1500; ++i) {
+    for (int i = 0; i < 500; ++i) {
         {
             std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
             if (s_pending_stop_player != player) {
