@@ -43,12 +43,17 @@ constexpr int32_t kBackBtnSize = 72;
 constexpr int32_t kHeaderRightPad = 16;
 constexpr int32_t kListPadH = 18;
 constexpr int32_t kListPadTop = 102;
-constexpr int32_t kListPadBottom = 32;
-constexpr int32_t kRowGap = 12;
+// 底部固定留出麦克风/波形区，最后一条气泡不被压住。
+constexpr int32_t kFooterH = 104;
+constexpr int32_t kListPadBottom = 108;
+constexpr int32_t kRowGap = 14;
 constexpr int32_t kBubblePadX = 18;
 constexpr int32_t kBubblePadY = 14;
-constexpr int32_t kBubbleRadius = 18;
+constexpr int32_t kBubbleRadius = 22;
 constexpr int32_t kSideMargin = 8;
+// AI 侧头像；用户侧不加头像，右对齐本身就是身份标识。
+constexpr int32_t kAvatarSize = 36;
+constexpr int32_t kAvatarGap = 8;
 constexpr int32_t kMaxMessages = 12;
 constexpr const char* kRelayUrl =
     "wss://oemsbxavqkmtuyasxsba.supabase.co/functions/v1/oral-coach-relay-probe";
@@ -70,18 +75,21 @@ constexpr size_t kMaxTxChunks = 8;
 // 服务端漏发 / 长时间不发 response.done 时，客户端会永远停在“回答中”，
 // 只能按电源键才能继续。这里做兜底：最后一块音频之后静默太久，就当作本轮结束。
 constexpr uint32_t kTurnIdleTimeoutMs = 8000;
-constexpr uint32_t kColorBg = 0x0E1116;
-constexpr uint32_t kColorHeaderBg = 0x12151C;
-constexpr uint32_t kColorDivider = 0x2A2F3A;
-constexpr uint32_t kColorHeaderText = 0xFFFFFF;
-constexpr uint32_t kColorLeftBubble = 0x202736;
-constexpr uint32_t kColorRightBubble = 0x1E3A2F;
-constexpr uint32_t kColorLeftBubbleText = 0xE5E7EB;
-constexpr uint32_t kColorRightBubbleText = 0xE8F5E9;
-constexpr uint32_t kColorStatusListening = 0x34D399;
+// ---- 配色（改这 6 行就能整页换肤）----
+// 底色：深海军蓝的竖向渐变，替代原来的纯黑平铺。
+constexpr uint32_t kColorBgTop = 0x0E1A2B;
+constexpr uint32_t kColorBgBottom = 0x06090F;
+// 主色：暖琥珀。备选：蓝 0x4C8DFF / 紫 0xA78BFA / 珊瑚 0xFF7A59。
+constexpr uint32_t kColorAccent = 0xF2B25C;
+constexpr uint32_t kColorAccentDeep = 0xD98E3E;
+constexpr uint32_t kColorAccentInk = 0x241505;  // 主色气泡上的深色字
+// 辅助色：用户/AI 两侧的语义色，不参与品牌色。
 constexpr uint32_t kColorStatusAnswering = 0x60A5FA;
-constexpr uint32_t kColorStatusConnecting = 0xFBBF24;
+constexpr uint32_t kColorStatusConnecting = 0x94A3B8;
 constexpr uint32_t kColorStatusError = 0xF87171;
+
+constexpr uint32_t kColorHeaderText = 0xF4F6FA;
+constexpr uint32_t kColorAiBubbleText = 0xE9EDF5;
 
 enum class State { Idle, Connecting, Listening, Answering, Error };
 enum class BubbleRole { User, Assistant };
@@ -129,6 +137,15 @@ lv_obj_t* s_user_text_label = nullptr;
 lv_obj_t* s_user_text_bubble = nullptr;
 lv_obj_t* s_user_row = nullptr;
 lv_obj_t* s_chat = nullptr;
+// 状态胶囊：容器 + 发光圆点，颜色跟 State 走。
+lv_obj_t* s_status_pill = nullptr;
+lv_obj_t* s_status_dot = nullptr;
+// 底部聆听区：麦克风胶囊 + 5 根波柱 + 一句提示。
+lv_obj_t* s_footer = nullptr;
+lv_obj_t* s_hint = nullptr;
+lv_obj_t* s_wave_bars[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_timer_t* s_wave_timer = nullptr;
+uint32_t s_wave_tick = 0;
 lv_obj_t* s_return_screen = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
@@ -169,7 +186,7 @@ bool session_alive(uint32_t session) {
 uint32_t status_color(State state) {
     switch (state) {
         case State::Listening:
-            return kColorStatusListening;
+            return kColorAccent;
         case State::Connecting:
             return kColorStatusConnecting;
         case State::Error:
@@ -178,6 +195,65 @@ uint32_t status_color(State state) {
             return kColorStatusAnswering;
         default:
             return kColorStatusConnecting;
+    }
+}
+
+// 状态胶囊 + 底部提示统一在这里改，避免状态色散落在多个回调里。
+void set_status_visual(State state, const char* text) {
+    const uint32_t color = status_color(state);
+    if (s_status != nullptr) {
+        lv_label_set_text(s_status, text != nullptr ? text : "");
+        lv_obj_set_style_text_color(s_status, lv_color_hex(color), LV_PART_MAIN);
+    }
+    if (s_status_dot != nullptr) {
+        lv_obj_set_style_bg_color(s_status_dot, lv_color_hex(color), LV_PART_MAIN);
+        lv_obj_set_style_shadow_color(s_status_dot, lv_color_hex(color), LV_PART_MAIN);
+    }
+    if (s_status_pill != nullptr) {
+        lv_obj_set_style_bg_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
+    }
+    if (s_hint != nullptr) {
+        const char* hint = "轻触屏幕开始";
+        switch (state) {
+            case State::Listening:
+                hint = "直接说英文，说完停一下";
+                break;
+            case State::Answering:
+                hint = "AI 回答中 · 可随时打断";
+                break;
+            case State::Connecting:
+                hint = "正在连接…";
+                break;
+            case State::Error:
+                hint = "连接失败 · 轻触屏幕重试";
+                break;
+            default:
+                break;
+        }
+        lv_label_set_text(s_hint, hint);
+    }
+}
+
+// 底部波柱：5 根柱子按 6 帧循环涨落，只在聆听/回答时动。
+void wave_timer_cb(lv_timer_t* /*timer*/) {
+    static const uint8_t kFrames[6][5] = {
+        {10, 22, 14, 26, 12}, {16, 14, 26, 12, 22}, {22, 26, 12, 22, 14},
+        {26, 12, 22, 14, 26}, {14, 22, 12, 26, 16}, {12, 26, 16, 12, 22},
+    };
+    if (s_footer == nullptr) return;
+    const State state = s_state.load(std::memory_order_acquire);
+    const bool active =
+        state == State::Listening || state == State::Answering;
+    const uint8_t* frame = kFrames[s_wave_tick % 6];
+    ++s_wave_tick;
+    const uint32_t color =
+        state == State::Answering ? kColorStatusAnswering : kColorAccent;
+    for (int i = 0; i < 5; ++i) {
+        if (s_wave_bars[i] == nullptr) continue;
+        lv_obj_set_height(s_wave_bars[i], active ? frame[i] : 6);
+        lv_obj_set_style_bg_color(s_wave_bars[i], lv_color_hex(color),
+                                  LV_PART_MAIN);
     }
 }
 
@@ -427,10 +503,7 @@ void post_ui(uint32_t session, State state, const char* status,
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
             s_state.store(item->state, std::memory_order_release);
-            if (s_status != nullptr) {
-                lv_label_set_text(s_status, item->status);
-                lv_obj_set_style_text_color(s_status, lv_color_hex(status_color(item->state)), LV_PART_MAIN);
-            }
+            set_status_visual(item->state, item->status);
             if (item->reset_assistant) {
                 s_text = nullptr;
                 s_text_bubble = nullptr;
@@ -561,31 +634,70 @@ void post_ui(uint32_t session, State state, const char* status,
             lv_obj_set_width(row, LV_PCT(100));
             lv_obj_set_height(row, LV_SIZE_CONTENT);
 
+            // AI 侧挂一个 36px 角色方块；用户侧右对齐本身就是身份标识。
+            int32_t bubble_x = kSideMargin;
+            if (!is_user) {
+                lv_obj_t* avatar = lv_obj_create(row);
+                screen_strip_obj_chrome(avatar);
+                lv_obj_remove_flag(avatar, LV_OBJ_FLAG_SCROLLABLE);
+                lv_obj_remove_flag(avatar, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_set_size(avatar, kAvatarSize, kAvatarSize);
+                lv_obj_set_style_radius(avatar, 12, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(avatar, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(avatar, 12, LV_PART_MAIN);
+                lv_obj_set_style_border_width(avatar, 1, LV_PART_MAIN);
+                lv_obj_set_style_border_color(avatar, lv_color_hex(kColorAccent), LV_PART_MAIN);
+                lv_obj_set_style_border_opa(avatar, 70, LV_PART_MAIN);
+                lv_obj_set_style_pad_all(avatar, 0, LV_PART_MAIN);
+                lv_obj_align(avatar, LV_ALIGN_TOP_LEFT, kSideMargin, 2);
+                lv_obj_t* avatar_text = lv_label_create(avatar);
+                lv_label_set_text(avatar_text, "AI");
+                lv_obj_set_style_text_font(avatar_text, &font_puhui_20_4, LV_PART_MAIN);
+                lv_obj_set_style_text_color(avatar_text, lv_color_hex(kColorAccent), LV_PART_MAIN);
+                lv_obj_center(avatar_text);
+                bubble_x = kSideMargin + kAvatarSize + kAvatarGap;
+            }
+
             lv_obj_t* bubble = lv_obj_create(row);
             screen_strip_obj_chrome(bubble);
             lv_obj_set_height(bubble, LV_SIZE_CONTENT);
             lv_obj_set_style_radius(bubble, kBubbleRadius, LV_PART_MAIN);
-            lv_obj_set_style_border_width(bubble, 0, LV_PART_MAIN);
             lv_obj_set_style_pad_hor(bubble, kBubblePadX, LV_PART_MAIN);
             lv_obj_set_style_pad_ver(bubble, kBubblePadY, LV_PART_MAIN);
             lv_obj_set_style_shadow_width(bubble, 0, LV_PART_MAIN);
             lv_obj_remove_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_style_bg_color(bubble, lv_color_hex(is_user ? kColorRightBubble : kColorLeftBubble), LV_PART_MAIN);
-            lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
+            if (is_user) {
+                // 用户：主色竖向渐变 + 深色字，整屏对比度最高的一条。
+                lv_obj_set_style_border_width(bubble, 0, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(bubble, lv_color_hex(kColorAccent), LV_PART_MAIN);
+                lv_obj_set_style_bg_grad_color(bubble, lv_color_hex(kColorAccentDeep), LV_PART_MAIN);
+                lv_obj_set_style_bg_grad_dir(bubble, LV_GRAD_DIR_VER, LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
+            } else {
+                // AI：半透明玻璃 + 1px 描边，弱于用户但不与底色糊在一起。
+                lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
+                lv_obj_set_style_border_color(bubble, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+                lv_obj_set_style_border_opa(bubble, 26, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(bubble, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(bubble, 16, LV_PART_MAIN);
+            }
             // 气泡宽度按文本自适应；流式期间只在“需要变宽 24px 以上”时
             // 才重排，避免每个分片都跳一次宽度；封口时再精确收窄。
             const int32_t width = bubble_width_for_text(item->append.c_str(), is_user);
             if (!is_user) s_bubble_w = width;
             lv_obj_set_width(bubble, width);
             if (is_user) lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, -kSideMargin, 0);
-            else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, kSideMargin, 0);
+            else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, bubble_x, 0);
 
             lv_obj_t* label = lv_label_create(bubble);
             lv_label_set_text(label, item->append.c_str());
             lv_obj_set_width(label, width - kBubblePadX * 2);
             lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
-            lv_obj_set_style_text_color(label, lv_color_hex(is_user ? kColorRightBubbleText : kColorLeftBubbleText), LV_PART_MAIN);
+            lv_obj_set_style_text_color(
+                label, lv_color_hex(is_user ? kColorAccentInk : kColorAiBubbleText),
+                LV_PART_MAIN);
+            lv_obj_set_style_text_line_space(label, 4, LV_PART_MAIN);
             screen_make_input_passive(row);
             if (!is_user) {
                 s_text = label;
@@ -1457,12 +1569,7 @@ void worker_task(void* /*arg*/) {
         lv_async_call(
             [](void*) {
                 if (s_screen != nullptr && lv_screen_active() == s_screen) {
-                    if (s_status != nullptr) {
-                        lv_label_set_text(s_status, "等待唤醒…");
-                        lv_obj_set_style_text_color(
-                            s_status, lv_color_hex(kColorStatusConnecting),
-                            LV_PART_MAIN);
-                    }
+                    set_status_visual(State::Idle, "等待唤醒…");
                 }
             },
             nullptr);
@@ -1626,6 +1733,15 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_user_text_bubble = nullptr;
     s_user_row = nullptr;
     s_chat = nullptr;
+    s_status_pill = nullptr;
+    s_status_dot = nullptr;
+    s_footer = nullptr;
+    s_hint = nullptr;
+    for (auto*& bar : s_wave_bars) bar = nullptr;
+    if (s_wave_timer != nullptr) {
+        lv_timer_delete(s_wave_timer);
+        s_wave_timer = nullptr;
+    }
 }
 
 lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font, lv_color_t color) {
@@ -1654,26 +1770,44 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     s_screen = screen;
     screen_strip_obj_chrome(screen);
     lv_obj_set_size(screen, kPanelW, kPanelH);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0F172A), LV_PART_MAIN);
+    // 底色：整页竖向渐变，替代原来的纯黑平铺。
+    lv_obj_set_style_bg_color(screen, lv_color_hex(kColorBgTop), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(screen, lv_color_hex(kColorBgBottom), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_VER, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
+    // 头部不再是独立色带：同色轻微压暗，保证滚动时文字不糊在气泡上。
     lv_obj_t* header = lv_obj_create(screen);
     screen_strip_obj_chrome(header);
     lv_obj_add_flag(header, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_size(header, kPanelW, kHeaderH);
     lv_obj_set_pos(header, 0, 0);
-    lv_obj_set_style_bg_color(header, lv_color_hex(kColorHeaderBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(header, lv_color_hex(kColorBgTop), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header, 242, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(header, 0, LV_PART_MAIN);
 
-    lv_obj_t* divider = lv_obj_create(header);
-    screen_strip_obj_chrome(divider);
-    lv_obj_set_size(divider, kPanelW, 1);
-    lv_obj_align(divider, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(divider, lv_color_hex(kColorDivider), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
-    screen_make_input_passive(divider);
+    // 1px 光缝：中点最亮、两端融进底色。LVGL 只有两色渐变，用左右两段拼。
+    lv_obj_t* seam_left = lv_obj_create(header);
+    screen_strip_obj_chrome(seam_left);
+    lv_obj_set_size(seam_left, kPanelW / 2, 1);
+    lv_obj_align(seam_left, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(seam_left, lv_color_hex(kColorBgTop), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(seam_left, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(seam_left, LV_GRAD_DIR_HOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(seam_left, 120, LV_PART_MAIN);
+    screen_make_input_passive(seam_left);
+
+    lv_obj_t* seam_right = lv_obj_create(header);
+    screen_strip_obj_chrome(seam_right);
+    lv_obj_set_size(seam_right, kPanelW / 2, 1);
+    lv_obj_align(seam_right, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(seam_right, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(seam_right, lv_color_hex(kColorBgTop), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(seam_right, LV_GRAD_DIR_HOR, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(seam_right, 120, LV_PART_MAIN);
+    screen_make_input_passive(seam_right);
 
     lv_obj_t* back = lv_button_create(header);
     lv_obj_remove_style_all(back);
@@ -1697,11 +1831,45 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_set_style_text_font(s_title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_align(s_title, LV_ALIGN_LEFT_MID, 16 + kBackBtnSize + 12, 0);
 
-    s_status = lv_label_create(header);
+    lv_obj_set_style_text_letter_space(s_title, 1, LV_PART_MAIN);
+
+    // 状态胶囊：发光圆点 + 文案，颜色跟 State 走（聆听=主色、回答=蓝、失败=红）。
+    s_status_pill = lv_obj_create(header);
+    screen_strip_obj_chrome(s_status_pill);
+    lv_obj_remove_flag(s_status_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_status_pill, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_status_pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_status_pill, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_status_pill, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_status_pill, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(s_status_pill, 13, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(s_status_pill, 7, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_status_pill, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_status_pill, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_status_pill, 26, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_status_pill, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_status_pill, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_status_pill, 70, LV_PART_MAIN);
+    lv_obj_align_to(s_status_pill, s_title, LV_ALIGN_OUT_RIGHT_MID, 14, 0);
+
+    s_status_dot = lv_obj_create(s_status_pill);
+    screen_strip_obj_chrome(s_status_dot);
+    lv_obj_remove_flag(s_status_dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_status_dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_status_dot, 9, 9);
+    lv_obj_set_style_radius(s_status_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_status_dot, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_status_dot, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(s_status_dot, 10, LV_PART_MAIN);
+    lv_obj_set_style_shadow_color(s_status_dot, lv_color_hex(kColorAccent), LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(s_status_dot, 120, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_status_dot, 0, LV_PART_MAIN);
+
+    s_status = lv_label_create(s_status_pill);
     lv_label_set_text(s_status, "连接中…");
     lv_obj_set_style_text_font(s_status, &font_puhui_20_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_status, lv_color_hex(kColorStatusConnecting), LV_PART_MAIN);
-    lv_obj_align_to(s_status, s_title, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
     screen_make_input_passive(s_status);
 
     s_chat = lv_obj_create(screen);
@@ -1715,12 +1883,59 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_set_style_pad_top(s_chat, kListPadTop - kHeaderH, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(s_chat, kListPadBottom, LV_PART_MAIN);
     lv_obj_set_style_pad_gap(s_chat, kRowGap, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_chat, lv_color_hex(kColorBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_chat, LV_OPA_COVER, LV_PART_MAIN);
+    // 列表透明，让整页渐变透上来；原来是整块不透明的深色，把底色全挡住了。
+    lv_obj_set_style_bg_opa(s_chat, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_add_flag(s_chat, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chat, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_event_cb(s_chat, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
+
+    // 底部聆听区：波柱 + 一句提示，固定压在列表下方。
+    s_footer = lv_obj_create(screen);
+    screen_strip_obj_chrome(s_footer);
+    lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_footer, kPanelW, kFooterH);
+    lv_obj_set_pos(s_footer, 0, kPanelH - kFooterH);
+    lv_obj_set_style_bg_opa(s_footer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_footer, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_footer, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_footer, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_footer, 22, LV_PART_MAIN);
+    lv_obj_add_flag(s_footer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_footer, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t* wave_row = lv_obj_create(s_footer);
+    screen_strip_obj_chrome(wave_row);
+    lv_obj_remove_flag(wave_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(wave_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(wave_row, 220, 40);
+    lv_obj_set_style_bg_opa(wave_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(wave_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wave_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(wave_row, 6, LV_PART_MAIN);
+    for (int i = 0; i < 5; ++i) {
+        lv_obj_t* bar = lv_obj_create(wave_row);
+        screen_strip_obj_chrome(bar);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(bar, 4, 6);
+        lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(kColorAccent), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
+        s_wave_bars[i] = bar;
+    }
+
+    s_hint = lv_label_create(s_footer);
+    lv_label_set_text(s_hint, "正在连接…");
+    lv_obj_set_style_text_font(s_hint, &font_puhui_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_hint, lv_color_hex(0x7C8698), LV_PART_MAIN);
+    screen_make_input_passive(s_hint);
+
+    s_wave_timer = lv_timer_create(wave_timer_cb, 90, nullptr);
+    set_status_visual(State::Connecting, "连接中…");
 
     lv_obj_add_event_cb(screen, on_screen_unloaded, LV_EVENT_SCREEN_UNLOADED, nullptr);
     start_session();
