@@ -655,22 +655,12 @@ void AudioService::ReleaseWakeWordEngine() {
 
     std::lock_guard<std::mutex> lock(wake_word_mutex_);
     wake_word_->Stop();
-    if (wake_word_initialized_) {
-        const unsigned psram_before =
-            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
-        const unsigned int_before =
-            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
-        ESP_LOGI(TAG, "Releasing wake word engine (destroy AFE)");
-        wake_word_->Deinitialize();
-        ESP_LOGI(TAG, "[afe] destroy: psram %u->%uKB (+%u) internal %u->%uKB (+%u)",
-                 psram_before,
-                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024) - psram_before,
-                 int_before,
-                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024) - int_before);
-        wake_word_initialized_ = false;
-    }
+    // 注意：这里刻意"只停不销毁"。
+    // 真机教训：销毁（Deinitialize）会释放 multinet 模型与编码任务栈，而编码任务
+    // 是每次唤醒时用这块静态栈临时创建的，若它还在跑就被释放，下一次进入页面重建
+    // 时必踩空 → 蓝屏。
+    // 现策略：模型/引擎常驻（约 2.87MB PSRAM，只加载一次），进出页面只做 Stop/Start，
+    // 既不会每次泄漏 2.87MB，也不会踩释放时机。
 }
 
 void AudioService::EnableVoiceProcessing(bool enable, bool reset_decoder) {
