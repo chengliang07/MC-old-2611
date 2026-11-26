@@ -34,6 +34,7 @@
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
+LV_FONT_DECLARE(font_awesome_30_4);
 
 namespace {
 
@@ -1045,6 +1046,58 @@ lv_obj_t* CreatePillButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
     return button;
 }
 
+// ---- 列表头像图标 ---------------------------------------------------------
+// 固定栏目用固定图标：数学=圆规、英语=地球、许云说美国=书本、一丢教育=房子。
+// 其它节目仍回退到标题首字，保持原来的观感。
+enum class PodcastAvatar { Letter, Compass, Globe, Book, House };
+
+PodcastAvatar AvatarForTitle(const std::string& title) {
+    if (title.find("数学") != std::string::npos ||
+        title.find("Math") != std::string::npos ||
+        title.find("math") != std::string::npos) {
+        return PodcastAvatar::Compass;
+    }
+    if (title.find("英语") != std::string::npos ||
+        title.find("英文") != std::string::npos ||
+        title.find("English") != std::string::npos ||
+        title.find("english") != std::string::npos) {
+        return PodcastAvatar::Globe;
+    }
+    if (title.find("许云") != std::string::npos) {
+        return PodcastAvatar::Book;
+    }
+    if (title.find("教育") != std::string::npos ||
+        title.find("家庭") != std::string::npos) {
+        return PodcastAvatar::House;
+    }
+    return PodcastAvatar::Letter;
+}
+
+void CreateFontAwesomeIcon(lv_obj_t* parent, const char* utf8) {
+    lv_obj_t* icon = lv_label_create(parent);
+    lv_label_set_text(icon, utf8);
+    lv_obj_set_style_text_font(icon, &font_awesome_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_center(icon);
+    screen_make_input_passive(icon);
+}
+
+// 书本：字体里没有书本图标，用两页白色纸面拼出来，中间留书脊缝。
+void CreateBookIcon(lv_obj_t* parent) {
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t* page = lv_obj_create(parent);
+        lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(page, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_set_size(page, 13, 21);
+        lv_obj_set_pos(page, i == 0 ? 15 : 32, 20);
+        lv_obj_set_style_radius(page, 3, LV_PART_MAIN);
+        lv_obj_set_style_border_width(page, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(page, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(page, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(page, LV_OPA_COVER, LV_PART_MAIN);
+    }
+}
+
 // 空列表 / 加载失败：居中提示 + 刷新按钮，避免用户卡在“暂无节目”无路可走。
 void BuildEmptyState() {
     lv_obj_t* box = lv_obj_create(s_ui.list);
@@ -1138,14 +1191,32 @@ void RebuildList() {
             avatar, lv_color_hex(is_current ? kColorAccent : 0x1E3A8A),
             LV_PART_MAIN);
         lv_obj_set_style_bg_grad_dir(avatar, LV_GRAD_DIR_VER, LV_PART_MAIN);
-        lv_obj_t* glyph = lv_label_create(avatar);
-        const std::string initial = FirstGlyph(item.title);
-        lv_label_set_text(glyph, initial.c_str());
-        lv_obj_set_style_text_font(glyph, &font_puhui_30_4, LV_PART_MAIN);
-        lv_obj_set_style_text_color(glyph, lv_color_hex(0xFFFFFF),
-                                    LV_PART_MAIN);
-        lv_obj_center(glyph);
-        screen_make_input_passive(glyph);
+        switch (AvatarForTitle(item.title)) {
+            case PodcastAvatar::Compass:
+                CreateFontAwesomeIcon(avatar, "\xEF\x85\x8E");  // 圆规
+                break;
+            case PodcastAvatar::Globe:
+                CreateFontAwesomeIcon(avatar, "\xEF\x82\xAC");  // 地球
+                break;
+            case PodcastAvatar::House:
+                CreateFontAwesomeIcon(avatar, "\xEF\x80\x95");  // 房子
+                break;
+            case PodcastAvatar::Book:
+                CreateBookIcon(avatar);
+                break;
+            case PodcastAvatar::Letter: {
+                lv_obj_t* glyph = lv_label_create(avatar);
+                const std::string initial = FirstGlyph(item.title);
+                lv_label_set_text(glyph, initial.c_str());
+                lv_obj_set_style_text_font(glyph, &font_puhui_30_4,
+                                           LV_PART_MAIN);
+                lv_obj_set_style_text_color(glyph, lv_color_hex(0xFFFFFF),
+                                            LV_PART_MAIN);
+                lv_obj_center(glyph);
+                screen_make_input_passive(glyph);
+                break;
+            }
+        }
 
         lv_obj_t* title = lv_label_create(row);
         const std::string title_text = TruncateForWidth(item.title, 40);
