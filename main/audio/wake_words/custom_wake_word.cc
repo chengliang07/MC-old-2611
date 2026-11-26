@@ -17,7 +17,12 @@ CustomWakeWord::CustomWakeWord()
     : wake_word_pcm_(), wake_word_opus_() {
 }
 
-CustomWakeWord::~CustomWakeWord() {
+// 释放唤醒词占用的全部资源（multinet 模型、编码任务栈、srmodel）。
+//
+// 真机实测：这一页每次进入都会 Initialize() 加载约 2.87MB PSRAM，而原来的
+// Deinitialize() 是基类的空实现 —— 等于从不释放，进出十几次就把内存吃光。
+// 这里把析构里的清理提取出来，Deinitialize() 与析构共用，且可重复调用。
+void CustomWakeWord::Deinitialize() {
     if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
         multinet_->destroy(multinet_model_data_);
         multinet_model_data_ = nullptr;
@@ -25,15 +30,22 @@ CustomWakeWord::~CustomWakeWord() {
 
     if (wake_word_encode_task_stack_ != nullptr) {
         heap_caps_free(wake_word_encode_task_stack_);
+        wake_word_encode_task_stack_ = nullptr;
     }
 
     if (wake_word_encode_task_buffer_ != nullptr) {
         heap_caps_free(wake_word_encode_task_buffer_);
+        wake_word_encode_task_buffer_ = nullptr;
     }
 
     if (models_ != nullptr) {
         esp_srmodel_deinit(models_);
+        models_ = nullptr;
     }
+}
+
+CustomWakeWord::~CustomWakeWord() {
+    Deinitialize();
 }
 
 void CustomWakeWord::ParseWakenetModelConfig() {
