@@ -920,8 +920,14 @@ void on_saved_set_default(lv_event_t* e) {
 void on_saved_remove(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
+    // 真机现象：点删除会整机静默卡死（串口无输出）。逐步打点定位卡在哪一步。
+    ESP_LOGI(TAG, "[del] begin idx=%d psram=%uKB internal=%uKB", ctx->index,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
     SsidManager::GetInstance().RemoveSsid(ctx->index);
+    ESP_LOGI(TAG, "[del] RemoveSsid returned");
     post_status(I18n::T("已删除该网络"), kColorSuccess);
+    ESP_LOGI(TAG, "[del] status posted");
     refresh_saved_list();
 }
 
