@@ -1081,20 +1081,16 @@ void BuildHeader(lv_obj_t* screen) {
     lv_obj_set_size(back, 72, 72);
     lv_obj_set_pos(back, 16, 22);
     lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0xFFFFFF),
-                              LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP,
+                            LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
     screen_swipe_back_ignore(back, true);
     lv_obj_add_event_cb(back, OnBackClicked, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* back_icon = lv_image_create(back);
-    lv_image_set_src(back_icon, "A:ic_app_back.spng");
-    lv_obj_remove_flag(back_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(back_icon);
+    // 返回键只保留点击区域，图标不显示。
 
     lv_obj_t* title = lv_label_create(screen);
-    lv_label_set_text(title, I18n::T("一丢宠物"));
+    lv_label_set_text(title, I18n::T("我的一丢"));
     lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
