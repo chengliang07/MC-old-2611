@@ -38,9 +38,14 @@
 
 ## Release rules
 
-- Never commit `sdkconfig`: it is rewritten by the local IDF patch version and drifts
-  (SOC symbol renames, ESP-Hosted target). Local builds carry build timestamps, so
-  the official package must come from CI, not from a local build.
+- **配置来源：只提交 `sdkconfig.defaults`，不提交 `sdkconfig`。**
+  - `sdkconfig` 由 IDF 在每个工作区本地生成，已在 `.gitignore` 中；IDF 版本漂移
+    （如 `IDF_INIT_VERSION`）因此不会进仓库，也不会造成分支合并冲突。
+  - 任何有意的配置调整（内存开关、TCP 缓冲、LVGL 色深、分区表、唤醒词等）
+    必须写进 `sdkconfig.defaults`，否则 CI 出的包和本地测的固件不一致。
+  - 生成方式：调好本地 `sdkconfig` 后执行 `idf.py save-defconfig`，它只导出
+    "与默认值不同"的项（当前约 100 行），再提交该文件。
+  - 新工作区或 CI 首次构建会自动按 defaults 生成 sdkconfig，无需手工拷贝。
 - `ota_1` overflow warning (`Part 'ota_1' ... overflow`) is expected: partition layout
   `partitions/v1/32m_dual.csv` reserves ota_1 for another purpose.
 - One merged flashable image is produced with `esptool merge_bin` from `build/flash_args`
