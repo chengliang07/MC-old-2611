@@ -741,6 +741,10 @@ void BeginPlayAt(size_t index) {
     s_paused = false;
     s_preparing_play.store(true, std::memory_order_release);
     UpdateControls(false, false);
+    // 准备阶段也留一个可点的“停止”，免得用户等半天却没法取消。
+    if (s_ui.stop_btn != nullptr) {
+        lv_obj_remove_flag(s_ui.stop_btn, LV_OBJ_FLAG_HIDDEN);
+    }
     SetStatusDirect(I18n::T("正在准备播放..."));
 
     auto* context = new ResolveResult{};
@@ -1677,7 +1681,7 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
         std::snprintf(text, sizeof(text), "%.1fx",
                       static_cast<double>(kSpeedOptions[i]));
         lv_obj_t* button = CreateActionButton(
-            screen, 24 + static_cast<int32_t>(i) * 82, 648, 76, 48, text,
+            screen, 24 + static_cast<int32_t>(i) * 76, 652, 68, 44, text,
             OnSpeedClicked,
             reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
         s_ui.speed_btn[i] = button;
@@ -1687,13 +1691,22 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
 
     s_ui.progress_timer = lv_timer_create(OnProgressTimer, 500, nullptr);
 
+    // 播放/暂停、停止做成大按钮：48px 高度手指很难点中，改成 64px。
     s_ui.pause_label = nullptr;
-    s_ui.pause_btn = CreateActionButton(screen, 320, 648, 168, 48,
+    s_ui.pause_btn = CreateActionButton(screen, 300, 640, 180, 64,
                                         I18n::T("暂停"), OnPauseClicked);
     s_ui.pause_label =
         lv_obj_get_child(s_ui.pause_btn, 0);
-    s_ui.stop_btn = CreateActionButton(screen, 504, 648, 168, 48,
+    // 暂停是播放中的主操作，用强调色，避免和右侧停止按钮混淆。
+    lv_obj_set_style_bg_color(s_ui.pause_btn, lv_color_hex(kColorAccentDeep),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_ui.pause_btn, lv_color_hex(0x3B82F6),
+                              LV_PART_MAIN | LV_STATE_PRESSED);
+    s_ui.stop_btn = CreateActionButton(screen, 492, 640, 180, 64,
                                        I18n::T("停止"), OnStopClicked);
+    // 再向外放宽 5px 命中区：手指边缘点上去也算按到。
+    lv_obj_set_ext_click_area(s_ui.pause_btn, 5);
+    lv_obj_set_ext_click_area(s_ui.stop_btn, 5);
     UpdateControls(false, false);
 
     LoadListCache();
