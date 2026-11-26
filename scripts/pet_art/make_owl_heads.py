@@ -59,6 +59,25 @@ def draw_head(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
     c.ellipse(30.0, 9.0, 8.0, 2.6, lighter(fill))
 
 
+def draw_body(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
+    """和外层大猫头鹰同一套比例：头占绝大部分，身体/腿只露一小截。"""
+    c.ellipse(36.0, 69.5, 15.0, 2.4, (59, 39, 24), 190)  # 底部投影
+    # 左右翅膀（比身体深一档）
+    wing = darker(fill, 0.55)
+    for cx in (24.0, 48.0):
+        c.ellipse(cx, 61.0, 3.6, 5.4, "outline")
+        c.ellipse(cx, 61.0, 2.8, 4.6, wing)
+    # 短短的身体
+    c.ellipse(36.0, 62.0, 10.5, 7.5, "outline")
+    c.ellipse(36.0, 62.0, 9.5, 6.5, fill)
+    c.ellipse(36.0, 63.5, 6.0, 4.0, "cream")
+    # 小脚
+    for x0 in (31, 38):
+        c.rect(x0, 66, x0 + 3, 68, "outline")
+        c.rect(x0 + 1, 66, x0 + 2, 68, "orange")
+        c.hline(x0 + 1, x0 + 2, 69, "orange_dark")
+
+
 def canvas_to_square_png(c: PixelCanvas, path: str) -> None:
     small = c.to_image().resize(
         (c.size * LOGICAL_SCALE, c.size * LOGICAL_SCALE), Image.NEAREST)
@@ -76,6 +95,7 @@ def canvas_to_square_png(c: PixelCanvas, path: str) -> None:
 def build_head(rgb: tuple[int, int, int]) -> PixelCanvas:
     c = PixelCanvas()
     draw_ears(c, darker(rgb))
+    draw_body(c, rgb)
     draw_head(c, rgb)
     draw_eyes(c, "idle")
     draw_beak(c, 0)

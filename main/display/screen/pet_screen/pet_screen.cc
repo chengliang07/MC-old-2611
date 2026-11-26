@@ -1200,7 +1200,7 @@ void BuildMenu() {
 
     lv_obj_t* panel = lv_obj_create(overlay);
     lv_obj_remove_style_all(panel);
-    lv_obj_set_size(panel, 470, 300);
+    lv_obj_set_size(panel, 470, 330);
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x141C2E), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
@@ -1212,7 +1212,7 @@ void BuildMenu() {
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     constexpr int32_t kCellW = 150;
-    constexpr int32_t kCellH = 130;
+    constexpr int32_t kCellH = 142;
     constexpr int32_t kLeft = 10;
     constexpr int32_t kTop = 18;
     for (int i = 0; i < 6; ++i) {
@@ -1221,7 +1221,7 @@ void BuildMenu() {
         lv_obj_t* cell = lv_button_create(panel);
         lv_obj_remove_style_all(cell);
         lv_obj_set_pos(cell, kLeft + col * kCellW, kTop + row * kCellH);
-        lv_obj_set_size(cell, kCellW, kCellH - 10);
+        lv_obj_set_size(cell, kCellW, kCellH - 6);
         lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_bg_color(cell, lv_color_hex(0xFFFFFF),
                                   LV_PART_MAIN | LV_STATE_PRESSED);
@@ -1243,7 +1243,7 @@ void BuildMenu() {
         lv_obj_set_style_text_font(label, &font_puhui_20_4, LV_PART_MAIN);
         lv_obj_set_style_text_color(label, lv_color_hex(0xCBD5E1),
                                     LV_PART_MAIN);
-        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -14);
+        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -16);
         screen_make_input_passive(label);
     }
 }
