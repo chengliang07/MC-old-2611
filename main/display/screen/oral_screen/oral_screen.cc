@@ -151,6 +151,10 @@ lv_timer_t* s_wave_timer = nullptr;
 uint32_t s_wave_tick = 0;
 // 状态文案缓存：重建页面时清掉，保证首次一定落到新对象上。
 bool s_status_seeded = false;
+// 用户占位气泡的过期时间：转写慢于一轮回答时，不能立刻删占位，
+// 否则晚到的转写没有气泡可回填，屏幕上就少一句用户发言。
+std::atomic<uint32_t> s_user_placeholder_deadline_ms{0};
+lv_timer_t* s_placeholder_timer = nullptr;
 lv_obj_t* s_return_screen = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
@@ -470,6 +474,20 @@ void flush_stream_text(uint32_t session, bool close_assistant = false) {
     }
 }
 
+// 占位气泡回收：转写比一轮回答慢时，先留着 "…"，等它回填；
+// 超过 8 秒还没等到才删。之前的写法在 response.done 立刻就删，
+// 晚到的转写只能另起一条，看起来就是“这句话没显示”。
+void placeholder_timer_cb(lv_timer_t* /*timer*/) {
+    const uint32_t deadline =
+        s_user_placeholder_deadline_ms.load(std::memory_order_acquire);
+    if (deadline == 0 || now_ms() < deadline) return;
+    s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
+    if (!s_user_pending.exchange(false, std::memory_order_acq_rel)) return;
+    post_ui(s_session.load(std::memory_order_acquire),
+            s_state.load(std::memory_order_acquire), "", BubbleRole::User, "",
+            false, false, false, false, true);
+}
+
 struct WakeWordGuard {
     AudioService& audio;
     explicit WakeWordGuard(AudioService& audio_service) : audio(audio_service) {
@@ -527,7 +545,10 @@ bool post_ui(uint32_t session, State state, const char* status,
             std::unique_ptr<UiPayload> item(static_cast<UiPayload*>(data));
             if (!session_alive(item->session)) return;
             s_state.store(item->state, std::memory_order_release);
-            set_status_visual(item->state, item->status);
+            // 空字符串表示“只动气泡、别动状态文案”。
+            if (item->status[0] != '\0') {
+                set_status_visual(item->state, item->status);
+            }
             if (item->reset_assistant) {
                 s_text = nullptr;
                 s_text_bubble = nullptr;
@@ -1101,7 +1122,13 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         const cJSON* delta = cJSON_GetObjectItem(root, "delta");
         if (cJSON_IsString(delta) && delta->valuestring != nullptr &&
             !s_user_transcript_closed.load(std::memory_order_acquire)) {
-            s_user_streamed.store(true, std::memory_order_release);
+            if (!s_user_streamed.exchange(true, std::memory_order_acq_rel)) {
+                // 第一个增量到得多晚，直接说明 ASR 的滞后程度。
+                const uint32_t since = now_ms() - s_rstart_ms.load(
+                                                   std::memory_order_relaxed);
+                ESP_LOGI(TAG, "user_transcript first delta +%u ms", since);
+            }
+            s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
             if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
                 // 第一个增量直接把占位符替换掉，保持气泡顺序
                 post_ui(session, State::Listening, "聆听中…", BubbleRole::User,
@@ -1114,13 +1141,15 @@ void handle_json(const char* data, size_t len, uint32_t session) {
     } else if (std::strcmp(type, "relay.user_transcript.done") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         // 排查“用户这句没上屏”：这行能区分是 relay 没发转写，还是 UI 吞了。
-        ESP_LOGI(TAG, "user_transcript.done len=%u pending=%d streamed=%d",
+        ESP_LOGI(TAG, "user_transcript.done len=%u pending=%d streamed=%d +%u ms",
                  (unsigned)(cJSON_IsString(text) && text->valuestring != nullptr
                                 ? std::strlen(text->valuestring)
                                 : 0),
                  s_user_pending.load(std::memory_order_acquire) ? 1 : 0,
-                 s_user_streamed.load(std::memory_order_acquire) ? 1 : 0);
+                 s_user_streamed.load(std::memory_order_acquire) ? 1 : 0,
+                 now_ms() - s_rstart_ms.load(std::memory_order_relaxed));
         s_user_transcript_closed.store(true, std::memory_order_release);
+        s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
         if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
             // 没有增量、只给了整句：回填占位气泡
             if (cJSON_IsString(text) && text->valuestring != nullptr &&
@@ -1236,11 +1265,12 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             }
             if (response_id != 0) s_last_done_response_id.store(response_id, std::memory_order_release);
             flush_stream_text(session);
-            // 本轮结束还没等到转写：删掉用户气泡里的 "…" 占位，
-            // 否则屏幕上会一直留着一个空白的用户气泡。
-            if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
-                post_ui(session, State::Answering, "回答中…", BubbleRole::User,
-                        "", false, false, false, false, true);
+            // 本轮结束还没等到转写：先别删占位。实测转写会晚于 response.done
+            // 几秒才到，删早了晚到的文本就没有气泡可回填（看起来像丢了一句）。
+            // 留 8 秒窗口，由 placeholder_timer 兜底回收。
+            if (s_user_pending.load(std::memory_order_acquire)) {
+                s_user_placeholder_deadline_ms.store(
+                    now_ms() + 8000, std::memory_order_release);
             }
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
@@ -1394,13 +1424,17 @@ void stream_microphone(uint32_t session) {
                                                 std::memory_order_acq_rel)) {
             start_barge_in_detection();
         }
-        // 占位气泡超时清理：一直没等到转写就删掉 "…"，避免屏幕上留空气泡
+        // 占位气泡兜底清理：只处理“这一轮彻底没下文”的情况。
+        // 原来是 3 秒就删，但 ASR 转写经常晚于 response.done 好几秒，
+        // 删早了晚到的文本没有气泡可回填 —— 表现就是那句话没显示。
+        // 常规回收交给 placeholder_timer（response.done 起 8 秒），这里留 12 秒保险。
         if (s_user_pending.load(std::memory_order_acquire)) {
             const uint32_t since =
                 s_user_pending_ms.load(std::memory_order_relaxed);
-            if (since != 0 && now_ms() - since > 3000) {
+            if (since != 0 && now_ms() - since > 12000) {
                 s_user_pending.store(false, std::memory_order_release);
                 s_user_pending_ms.store(0, std::memory_order_release);
+                s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
                 post_ui(session, State::Listening, "聆听中…", BubbleRole::User,
                         "", false, false, false, false, true);
             }
@@ -1792,6 +1826,11 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
         lv_timer_delete(s_wave_timer);
         s_wave_timer = nullptr;
     }
+    if (s_placeholder_timer != nullptr) {
+        lv_timer_delete(s_placeholder_timer);
+        s_placeholder_timer = nullptr;
+    }
+    s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
 }
 
 lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font, lv_color_t color) {
@@ -1981,6 +2020,7 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
 
     s_status_seeded = false;
     s_wave_timer = lv_timer_create(wave_timer_cb, 90, nullptr);
+    s_placeholder_timer = lv_timer_create(placeholder_timer_cb, 500, nullptr);
     set_status_visual(State::Connecting, "连接中…");
 
     lv_obj_add_event_cb(screen, on_screen_unloaded, LV_EVENT_SCREEN_UNLOADED, nullptr);
