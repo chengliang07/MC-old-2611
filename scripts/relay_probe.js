@@ -150,8 +150,10 @@ sock.on("data", (chunk) => {
       if (obj.model) extra.push("model=" + obj.model);
       if (obj.voice) extra.push("voice=" + obj.voice);
       if (obj.error) extra.push("ERROR=" + obj.error);
+      if (obj.type === "relay.debug") extra.push("dbg=" + JSON.stringify(obj));
       if (obj.type === "relay.user_transcript.delta") extra.push("delta=" + String(obj.delta).slice(0, 80));
       if (obj.type === "relay.user_transcript.done") extra.push("text=" + String(obj.text || "").slice(0, 120));
+      if (obj.type === "relay.user_transcript.replace") extra.push("text=" + String(obj.text || "").slice(0, 120));
       if (obj.type === "relay.qwen.event") {
         if (obj.fmt) extra.push("fmt=" + JSON.stringify(obj.fmt));
         else extra.push("raw=" + JSON.stringify(obj).slice(0, 200));

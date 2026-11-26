@@ -1138,6 +1138,20 @@ void handle_json(const char* data, size_t len, uint32_t session) {
                         delta->valuestring, true);
             }
         }
+    } else if (std::strcmp(type, "relay.user_transcript.replace") == 0) {
+        // 上游 ASR 会回头修订（"欢迎时用…" → "欢迎使用…"），所以 relay 发的是
+        // 全量快照而不是增量：这里整段替换，避免拼出重字。
+        const cJSON* text = cJSON_GetObjectItem(root, "text");
+        if (cJSON_IsString(text) && text->valuestring != nullptr &&
+            text->valuestring[0] != '\0') {
+            s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
+            s_user_pending.store(false, std::memory_order_release);
+            s_user_streamed.store(true, std::memory_order_release);
+            // 转写可能在 AI 回答中途才到，别把状态强行改回“聆听中”。
+            post_ui(session, s_state.load(std::memory_order_acquire), "",
+                    BubbleRole::User, text->valuestring, false, false, false, false,
+                    true);
+        }
     } else if (std::strcmp(type, "relay.user_transcript.done") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         // 排查“用户这句没上屏”：这行能区分是 relay 没发转写，还是 UI 吞了。
