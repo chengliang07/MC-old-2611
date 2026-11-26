@@ -693,9 +693,16 @@ public:
                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
                     const unsigned min_free_kb = static_cast<unsigned>(
                         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024);
+                    const unsigned largest_kb = static_cast<unsigned>(
+                        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024);
+                    const unsigned psram_kb = static_cast<unsigned>(
+                        heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
                     ESP_LOGI(kMonitorTag,
                              "@@@内存  | 剩余: %6u KB | 历史最小: %6u KB",
                              free_kb, min_free_kb);
+                    ESP_LOGI(kMonitorTag,
+                             "@@@mem_blk| largest: %6u KB | free: %6u KB | psram: %6u KB",
+                             largest_kb, free_kb, psram_kb);
 
                     if (temp_sensor_ok) {
                         float chip_temp_c = 0.0f;

@@ -1277,7 +1277,11 @@ static bool StartInternal(const std::string& url, std::string& error,
              static_cast<unsigned>(internal_free),
              static_cast<unsigned>(internal_largest));
     if (internal_largest < 20 * 1024) {
-        error = "内存不足，请重启设备后再试";
+        char mem_msg[96];
+        snprintf(mem_msg, sizeof(mem_msg), "内存不足(%u/%uKB)，请重启设备后再试",
+                 static_cast<unsigned>(internal_free / 1024),
+                 static_cast<unsigned>(internal_largest / 1024));
+        error = mem_msg;
         ESP_LOGE(TAG, "[mem] refuse playback: largest=%u",
                  static_cast<unsigned>(internal_largest));
         return false;
