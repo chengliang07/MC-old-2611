@@ -1378,6 +1378,8 @@ void ApplyPlayerEvent(void* data) {
             if (!s_url_retried && !s_current_podcast_id.empty() &&
                 s_current_index < s_items.size()) {
                 s_url_retried = true;
+                // 直连 /stream 被拒说明后端改了地址规则：关掉直连，回退到 /play。
+                PodcastClient::ReportDirectStreamFailure();
                 PodcastClient::InvalidatePlayUrl(s_current_podcast_id);
                 ESP_LOGW(TAG, "signed url expired, retry once");
                 SetStatusDirect(I18n::T("正在刷新播放地址..."));

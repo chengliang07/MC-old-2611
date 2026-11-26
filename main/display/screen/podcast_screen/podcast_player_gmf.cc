@@ -618,7 +618,7 @@ void ParseResponseHeaders(esp_http_client_handle_t client, uint32_t generation) 
     snprintf(timing_extra, sizeof(timing_extra), "status=%d", status);
     TimingLog(generation, "http_headers", timing_extra);
     // Supabase 签名地址过期通常返回 400(InvalidJWT)，权限问题返回 403。
-    if ((status == 400 || status == 403) &&
+    if ((status == 400 || status == 403 || status == 404) &&
         !s_quick_url.load(std::memory_order_relaxed) &&
         s_url_expired_generation.exchange(generation,
                                           std::memory_order_acq_rel) !=

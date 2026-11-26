@@ -60,6 +60,8 @@ struct PlayCacheEntry {
 
 std::mutex s_play_cache_mutex;
 std::vector<PlayCacheEntry> s_play_cache;
+// /stream 直连是否可用：一旦音频请求被判过期/拒绝，就关掉直连、回退到 /play。
+std::atomic<bool> s_direct_stream_enabled{true};
 
 std::string TrimTrailingSlash(std::string value) {
     while (!value.empty() && value.back() == '/') {
@@ -292,6 +294,12 @@ void PodcastClient::InvalidateAllPlayUrls() {
     ESP_LOGI(TAG, "all play url caches invalidated");
 }
 
+void PodcastClient::ReportDirectStreamFailure() {
+    if (s_direct_stream_enabled.exchange(false, std::memory_order_acq_rel)) {
+        ESP_LOGW(TAG, "direct /stream rejected, fallback to /play");
+    }
+}
+
 bool IsLeapYear(int year) {
     return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
 }
@@ -482,6 +490,39 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
     int status = 0;
     const std::string url = api_base + "/api/device/v1/podcasts/" +
                             UrlEncode(podcast_id) + "/play";
+
+    // /play 在设备上实测要 3~6 秒（两次 TLS + 服务端排队），而它返回的就是
+    // 固定的 /stream 地址（请求自带设备 Bearer）。直接拼出来就能省掉这一整段；
+    // 只有真的 403/404 才会调 ReportDirectStreamFailure() 回退到 /play。
+    if (s_direct_stream_enabled.load(std::memory_order_relaxed)) {
+        result.ok = true;
+        result.url = api_base + "/api/device/v1/podcasts/" +
+                     UrlEncode(podcast_id) + "/stream";
+        result.format = "mp3";
+        {
+            std::lock_guard<std::mutex> lock(s_play_cache_mutex);
+            bool replaced = false;
+            for (auto& entry : s_play_cache) {
+                if (entry.id == podcast_id) {
+                    entry.info = result;
+                    entry.expires = time(nullptr) + 10 * 60;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                if (s_play_cache.size() >= 8) {
+                    s_play_cache.erase(s_play_cache.begin());
+                }
+                s_play_cache.push_back(
+                    {podcast_id, result, time(nullptr) + 10 * 60});
+            }
+        }
+        ESP_LOGI(TAG, "[timing] resolve direct id=%s dt=%dms",
+                 podcast_id.c_str(),
+                 static_cast<int>((esp_timer_get_time() - started_us) / 1000));
+        return result;
+    }
 
     // 并发去重：如果别的线程正在解析同一集，就等它的结果。
     // 最多等 2 秒：预取线程若卡在慢请求上，点击不能跟着一起等（实测能等出十几秒），
