@@ -1,4 +1,5 @@
 #include "screen_util.h"
+#include "utils/mem_probe.h"
 
 #include <cstdlib>
 
@@ -216,6 +217,7 @@ void screen_attach_swipe_back(lv_obj_t* scr, screen_swipe_back_cb_t on_back) {
 namespace {
 
 void lifecycle_loaded_cb(lv_event_t* e) {
+    mem_probe::LogDelta("load", lv_event_get_target(e));
     auto cb = reinterpret_cast<screen_lifecycle_cb_t>(lv_event_get_user_data(e));
     if (cb != nullptr) {
         cb(SCREEN_LIFECYCLE_LOAD);
@@ -223,6 +225,7 @@ void lifecycle_loaded_cb(lv_event_t* e) {
 }
 
 void lifecycle_unloaded_cb(lv_event_t* e) {
+    mem_probe::LogDelta("unload", lv_event_get_target(e));
     auto cb = reinterpret_cast<screen_lifecycle_cb_t>(lv_event_get_user_data(e));
     if (cb != nullptr) {
         cb(SCREEN_LIFECYCLE_UNLOAD);
