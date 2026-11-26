@@ -38,8 +38,11 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     char* ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
     char* vad_model_name = esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL);
     
-    afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
-    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
+    // 低成本档：真机实测语音会话（唤醒词+AEC+NS+Opus+TLS）一次吃掉约 190KB
+    // 内部 RAM，剩 36KB 时 MQTT 的 TLS 就写不出去了（表现为全模块"发送失败"）。
+    // LOW_COST 版本用更少内部缓冲；如回声/唤醒灵敏度变差，改回 HIGH_PERF 即可。
+    afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_LOW_COST);
+    afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
     // 打断开启时 AFE 与 TTS 同时运行。VAD 用最不敏感的档位，
     // 避免扬声器残留回声被当成用户说话而反复自打断。
     afe_config->vad_mode = VAD_MODE_3;
@@ -51,7 +54,8 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     if (ns_model_name != nullptr) {
         afe_config->ns_init = true;
         afe_config->ns_model_name = ns_model_name;
-        afe_config->afe_ns_mode = AFE_NS_MODE_NET;
+        // NET 模式要额外加载神经网络降噪模型；改成 WEBRTC 降噪省内部 RAM。
+        afe_config->afe_ns_mode = AFE_NS_MODE_WEBRTC;
     } else {
         afe_config->ns_init = false;
     }
