@@ -9,7 +9,8 @@ build/
 .cursor/
 .devcontainer/
 sdkconfig.old
-# sdkconfig
+sdkconfig
+# 只提交 sdkconfig.defaults（有意配置），sdkconfig 由 IDF 本地生成
 # dependencies.lock
 .env
 releases/
