@@ -1035,10 +1035,10 @@ void PodcastPlayTask(void* arg) {
     s_reported_playing.store(false, std::memory_order_relaxed);
     s_start_gate_done.store(false, std::memory_order_relaxed);
 
-    // 内存护栏：旧播放器可能还在后台 stop（它的缓冲还没还回来）。最多等 3 秒，
+    // 内存护栏：旧播放器可能还在后台 stop（它的缓冲还没还回来）。最多等 1.5 秒，
     // 只要内部最大空闲块够建一条新管线就立刻继续——切换的体感延迟不能取决于
-    // 一次 HTTP 读超时。
-    for (int i = 0; i < 300; ++i) {
+    // 一次 HTTP 读超时。音频环形缓冲在 PSRAM，内部只需要 TLS 那一块（约 40KB）。
+    for (int i = 0; i < 150; ++i) {
         if (generation != s_generation.load(std::memory_order_acquire)) {
             abandon(nullptr);
             return;
@@ -1050,7 +1050,7 @@ void PodcastPlayTask(void* arg) {
             std::lock_guard<std::mutex> lock(s_lifecycle_mutex);
             stop_done = (s_pending_stop_player == nullptr);
         }
-        if (stop_done || largest_internal >= 96 * 1024) {
+        if (stop_done || largest_internal >= 48 * 1024) {
             if (!stop_done) {
                 ESP_LOGW(TAG, "start with old stop pending, largest=%u",
                          static_cast<unsigned>(largest_internal));
