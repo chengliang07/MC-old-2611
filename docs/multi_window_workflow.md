@@ -95,3 +95,24 @@ git merge --no-ff feat/<模块名>
 
 - `sdkconfig` 每个 worktree 一份，互不影响；**不要提交**（仓库规矩）。
 - 设备 token 放在 SD 卡 `podcast_token.txt`，卡里常驻即可，刷机抹掉 NVS 后开机会自动补回。
+## 抓崩溃（panic）
+
+真机偶发崩溃时，先把固件切到"崩溃停住"模式，再抓日志：
+
+1. 本地 `sdkconfig` 设 `CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y`（关掉 `..._PRINT_REBOOT`），
+   重编一次。注意：`sdkconfig` 不入库，CI 出包仍是自动重启。
+2. 运行抓取脚本（会自动录日志、找 Backtrace、用符号表翻译成代码行）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\capture-crash.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\capture-crash.ps1 -Seconds 180 -Reset
+```
+
+3. 复现崩溃。设备会**停住（屏幕不动）**，这是预期行为；读脚本输出的"崩溃位置"即可。
+4. 之后把设备拔插一次复位，继续工作。
+
+看结果时关注：
+
+- 最上面那一帧（由新到旧的第一行）就是出事的那行代码
+- `@@RESET@@ reason=` 判断是 panic / watchdog / 掉电
+- 如果是 lwIP/esp_netif 相关，优先怀疑"某处 stop/deinit 了正在使用的网卡"
