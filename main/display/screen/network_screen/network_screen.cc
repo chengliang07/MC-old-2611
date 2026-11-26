@@ -142,6 +142,7 @@ std::string          s_restart_headline;
 // 用来决定离开时是否恢复 WifiStation::Start()。ML307 模式下 WifiStation
 // 根本没起过，恢复时跳过即可，避免空跑一份 wifi 栈。
 bool                 s_wifi_station_was_active = false;
+bool                 s_stack_was_running = false;
 bool                 s_network_switch_pending = false;
 
 // 上网方式（network/type NVS key）：与 DualNetworkBoard::LoadNetworkTypeFromSettings
@@ -460,7 +461,22 @@ bool wifi_init_for_screen() {
     esp_err_t mode_err = esp_wifi_get_mode(&mode_before);
     s_wifi_station_was_active = (mode_err == ESP_OK && mode_before != WIFI_MODE_NULL);
     if (s_wifi_station_was_active) {
-        WifiStation::GetInstance().Stop();
+        // 栈已经在跑（WifiStation + MQTT 正用着这块 netif）：Stop() 会
+        // esp_wifi_stop()+esp_wifi_deinit()，把 netif 连同 MQTT 的 TLS 一起销毁，
+        // 随后 lwIP 访问它是空指针 → panic → 蓝屏重启。这里只注册自己的事件处理。
+        s_stack_was_running = true;
+        s_wifi_initialized = true;
+        if (s_evt_group == nullptr) {
+            s_evt_group = xEventGroupCreate();
+        } else {
+            xEventGroupClearBits(s_evt_group, 0xFFFFFF);
+        }
+        esp_event_handler_instance_register(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_evt_handler, nullptr, &s_wifi_evt_inst);
+        esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_evt_handler, nullptr, &s_ip_evt_inst);
+        ESP_LOGI(TAG, "reuse running wifi stack (skip init/deinit)");
+        return true;
     }
 
     if (s_evt_group == nullptr) {
@@ -513,7 +529,9 @@ bool wifi_init_for_screen() {
 void wifi_teardown_for_screen() {
     if (!s_wifi_initialized) return;
     esp_wifi_scan_stop();
-    esp_wifi_disconnect();
+    if (!s_stack_was_running) {
+        esp_wifi_disconnect();
+    }
 
     if (s_wifi_evt_inst != nullptr) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_evt_inst);
@@ -523,21 +541,26 @@ void wifi_teardown_for_screen() {
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_evt_inst);
         s_ip_evt_inst = nullptr;
     }
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    if (s_netif != nullptr) {
-        esp_netif_destroy(s_netif);
-        s_netif = nullptr;
+    if (!s_stack_was_running) {
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        if (s_netif != nullptr) {
+            esp_netif_destroy(s_netif);
+            s_netif = nullptr;
+        }
+    } else {
+        ESP_LOGI(TAG, "wifi stack reused, skip deinit");
     }
     s_wifi_initialized = false;
     ESP_LOGI(TAG, "wifi stack torn down");
 
     // 只有进入页面前 WifiStation 在跑时（即 WiFi 模式）才恢复它；ML307
     // 模式下进入本页面前 wifi 栈本来就没起，不要无中生有起一份。
-    if (s_wifi_station_was_active) {
+    if (!s_stack_was_running && s_wifi_station_was_active) {
         WifiStation::GetInstance().Start();
     }
     s_wifi_station_was_active = false;
+    s_stack_was_running = false;
 }
 
 // ---------------------------------------------------------------------------
