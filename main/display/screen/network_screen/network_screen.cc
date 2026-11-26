@@ -1,4 +1,5 @@
 #include "network_screen.h"
+#include "utils/wifi_activity.h"
 #include "i18n.h"
 
 #include <algorithm>
@@ -596,12 +597,15 @@ void scan_task(void* /*arg*/) {
 
     wifi_scan_config_t cfg = {};
     cfg.show_hidden = false;
+    // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表永远为空。
+    wifi_activity::SetScanning(true);
     esp_err_t err = esp_wifi_scan_start(&cfg, false);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
         char buf[64];
         snprintf(buf, sizeof(buf), I18n::T("启动扫描失败 (err=%d)"), err);
         post_status(buf, kColorError);
+        wifi_activity::SetScanning(false);
         s_scan_in_progress = false;
         refresh_nearby_list();
         post_nearby_spinner(false);
@@ -614,6 +618,7 @@ void scan_task(void* /*arg*/) {
                                     pdMS_TO_TICKS(15000));
     if (!(bits & kBitScanDone)) {
         post_status(I18n::T("扫描超时"), kColorError);
+        wifi_activity::SetScanning(false);
         s_scan_in_progress = false;
         refresh_nearby_list();
         post_nearby_spinner(false);
@@ -622,6 +627,7 @@ void scan_task(void* /*arg*/) {
         return;
     }
 
+    wifi_activity::SetScanning(false);
     uint16_t ap_num = 0;
     esp_wifi_scan_get_ap_num(&ap_num);
 
@@ -936,6 +942,8 @@ void remove_saved_task(void* param) {
             if (!s_screen_active) return;
             post_status(I18n::T("已删除该网络"), kColorSuccess);
             refresh_saved_list();
+            // 删完顺手重扫一次：否则附近列表会停在上一次的结果（可能是空的）。
+            schedule_scan();
         },
         nullptr);
     vTaskDelete(nullptr);

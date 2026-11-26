@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "utils/wifi_activity.h"
 
 #include "application.h"
 #include "assets/lang_config.h"
@@ -138,6 +139,10 @@ void WifiBoard::StartNetwork() {
                         wifi_mode_t mode = WIFI_MODE_NULL;
                         if (esp_wifi_get_mode(&mode) != ESP_OK ||
                             mode == WIFI_MODE_NULL) {
+                            continue;
+                        }
+                        // 扫描进行中不要 connect：会打断扫描，设置页就永远扫不到 WiFi。
+                        if (wifi_activity::IsScanning()) {
                             continue;
                         }
                         const esp_err_t err = esp_wifi_connect();
