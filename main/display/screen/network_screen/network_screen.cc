@@ -933,9 +933,7 @@ struct RemoveSavedArg {
 // 对照：保存密码走 AddSsid 是在后台任务里做的，从来不出问题。
 void remove_saved_task(void* param) {
     auto* arg = static_cast<RemoveSavedArg*>(param);
-    ESP_LOGI(TAG, "[del] task begin idx=%d", arg->index);
     SsidManager::GetInstance().RemoveSsid(arg->index);
-    ESP_LOGI(TAG, "[del] task done idx=%d", arg->index);
     delete arg;
     lv_async_call(
         [](void*) {
@@ -952,11 +950,9 @@ void remove_saved_task(void* param) {
 void on_saved_remove(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
-    ESP_LOGI(TAG, "[del] click idx=%d", ctx->index);
     auto* arg = new RemoveSavedArg{ctx->index};
     if (xTaskCreate(remove_saved_task, "wifi_del", 4096, arg, 4, nullptr) != pdPASS) {
         delete arg;
-        ESP_LOGE(TAG, "[del] create task failed");
         post_status(I18n::T("删除失败"), kColorError);
         return;
     }

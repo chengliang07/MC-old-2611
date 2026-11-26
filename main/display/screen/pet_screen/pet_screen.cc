@@ -1674,9 +1674,6 @@ void ReturnHome() {
     if (target == ChatScreen::CurrentScreen()) {
         ChatScreen::ResumeAfterTemporaryLeave();
     }
-    ESP_LOGI(TAG, "[leak] ReturnHome: old=%p target=%p will_delete=%d",
-             static_cast<void*>(old_screen), static_cast<void*>(target),
-             (old_screen != nullptr && old_screen != target) ? 1 : 0);
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);
     }
@@ -1706,30 +1703,11 @@ void OnScreenUnloaded(lv_event_t* event) {
 
 void OnScreenDeleted(lv_event_t* event) {
     lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
-    ESP_LOGI(TAG, "[leak] delete event: target=%p s_ui.screen=%p internal=%uKB psram=%uKB",
-             static_cast<void*>(target), static_cast<void*>(s_ui.screen),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     if (target != s_ui.screen) {
         return;
     }
     StopVoiceUi();
     StopIdleTimer();
-
-    // 真机实测：每进一次宠物页，PSRAM 永久少约 3MB、内部 RAM 少约 20KB。
-    // 这一页要加载十几张 720x720 带透明的大图，怀疑是解码后的图元缓存没释放。
-    // 这里在屏幕销毁时丢掉图片缓存，并把前后 PSRAM 打出来验证。
-    const unsigned psram_before =
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
-    lv_image_cache_drop(nullptr);
-    const unsigned psram_after =
-        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
-    ESP_LOGI(TAG, "unload: psram %uKB -> %uKB (cache dropped %uKB)",
-             psram_before, psram_after, psram_after - psram_before);
-    ESP_LOGI(TAG, "[leak] deleted: internal=%uKB psram=%uKB tasks=%u",
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-             static_cast<unsigned>(uxTaskGetNumberOfTasks()));
     s_walk_offset = 0;
     s_has_pending_reaction = false;
     s_voice_paused_for_menu = false;
@@ -1740,10 +1718,6 @@ void OnScreenDeleted(lv_event_t* event) {
 }  // namespace
 
 lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
-    ESP_LOGI(TAG, "[leak] create begin: internal=%uKB psram=%uKB tasks=%u",
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-             static_cast<unsigned>(uxTaskGetNumberOfTasks()));
     lv_obj_t* screen = lv_obj_create(nullptr);
     lv_obj_set_size(screen, kPanelSize, kPanelSize);
     lv_obj_set_style_bg_color(screen, lv_color_hex(kColorBg),
@@ -1776,10 +1750,6 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
                         LV_EVENT_SCREEN_UNLOADED, nullptr);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, nullptr);
     screen_attach_swipe_back(screen, OnSwipeBack);
-    ESP_LOGI(TAG, "[leak] create end: internal=%uKB psram=%uKB tasks=%u",
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-             static_cast<unsigned>(uxTaskGetNumberOfTasks()));
     return screen;
 }
 

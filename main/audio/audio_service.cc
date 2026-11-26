@@ -618,21 +618,6 @@ void AudioService::EnableWakeWordDetection(bool enable) {
              enable ? "Enabling" : "Disabling", wake_word_initialized_ ? 1 : 0);
     if (enable) {
         if (!wake_word_initialized_) {
-            const unsigned psram_before =
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
-            const unsigned int_before =
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
-            if (!wake_word_->Initialize(codec_, models_list_)) {
-                ESP_LOGE(TAG, "Failed to initialize wake word");
-                return;
-            }
-            ESP_LOGI(TAG, "[afe] init: psram %u->%uKB (-%u) internal %u->%uKB (-%u)",
-                     psram_before,
-                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-                     psram_before - static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-                     int_before,
-                     static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                     int_before - static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
             wake_word_initialized_ = true;
         }
         wake_word_->Start();
