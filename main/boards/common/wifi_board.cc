@@ -133,6 +133,13 @@ void WifiBoard::StartNetwork() {
                         if (WifiStation::GetInstance().IsConnected()) {
                             continue;
                         }
+                        // 关键：切到 4G 或设置页停过 WiFi 后，栈可能已经 deinit，
+                        // 这时再 esp_wifi_connect() 会踩空（真机表现为切换网络就蓝屏）。
+                        wifi_mode_t mode = WIFI_MODE_NULL;
+                        if (esp_wifi_get_mode(&mode) != ESP_OK ||
+                            mode == WIFI_MODE_NULL) {
+                            continue;
+                        }
                         const esp_err_t err = esp_wifi_connect();
                         ESP_LOGI("WifiBoard", "persistent retry connect -> %s",
                                  esp_err_to_name(err));
