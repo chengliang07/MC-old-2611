@@ -27,7 +27,6 @@ namespace {
 constexpr const char* TAG = "PetScreen";
 constexpr int32_t kPanelSize = 720;
 constexpr uint32_t kColorBg = 0x0B1020;
-constexpr uint32_t kColorPanel = 0x111827;
 constexpr uint32_t kColorText = 0xF8FAFC;
 constexpr uint32_t kColorSubtle = 0x94A3B8;
 
@@ -516,9 +515,9 @@ void BuildPetArt(const char* stage) {
     if (s_ui.use_image_art) {
         lv_image_set_src(group, PetImagePath(s_base_mood, egg));
         lv_obj_set_size(group, 360, 360);
-        s_body_base_x = 150;
-        // 舞台扩大到 660x370 后本体整体放大、居中；蛋和孵化后共用同一个基线。
-        s_body_base_y = 4;
+        s_body_base_x = 180;
+        // 整页无底板后，宠物按 720x720 画布居中：中心 = (360, 360)。
+        s_body_base_y = 180;
         lv_obj_set_pos(group, s_body_base_x + s_walk_offset, s_body_base_y);
         if (!egg) {
             const int scale = std::strcmp(stage, "adult") == 0
@@ -1106,8 +1105,8 @@ void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* egg = lv_button_create(screen);
     s_ui.egg_btn = egg;
     lv_obj_remove_style_all(egg);
-    lv_obj_set_size(egg, 84, 84);
-    lv_obj_set_pos(egg, 616, 16);
+    lv_obj_set_size(egg, 44, 44);
+    lv_obj_set_pos(egg, 656, 20);
     lv_obj_set_style_bg_opa(egg, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFFFFF),
                               LV_PART_MAIN | LV_STATE_PRESSED);
@@ -1201,7 +1200,7 @@ void BuildMenu() {
 
     lv_obj_t* panel = lv_obj_create(overlay);
     lv_obj_remove_style_all(panel);
-    lv_obj_set_size(panel, 620, 440);
+    lv_obj_set_size(panel, 470, 300);
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x141C2E), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
@@ -1212,10 +1211,10 @@ void BuildMenu() {
     lv_obj_set_style_pad_all(panel, 0, LV_PART_MAIN);
     lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    constexpr int32_t kCellW = 200;
-    constexpr int32_t kCellH = 200;
+    constexpr int32_t kCellW = 150;
+    constexpr int32_t kCellH = 130;
     constexpr int32_t kLeft = 10;
-    constexpr int32_t kTop = 20;
+    constexpr int32_t kTop = 18;
     for (int i = 0; i < 6; ++i) {
         const int col = i % 3;
         const int row = i / 3;
@@ -1254,24 +1253,11 @@ void OnEggClicked(lv_event_t* /*event*/) {
 }
 
 void BuildContent(lv_obj_t* screen) {
-    lv_obj_t* stage = lv_obj_create(screen);
-    lv_obj_remove_style_all(stage);
-    lv_obj_set_pos(stage, 20, 80);
-    lv_obj_set_size(stage, 680, 480);
-    lv_obj_set_style_bg_color(stage, lv_color_hex(kColorPanel),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(stage, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(stage, 32, LV_PART_MAIN);
-    lv_obj_set_style_border_width(stage, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(stage, 0, LV_PART_MAIN);
-    lv_obj_add_flag(stage, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_remove_flag(stage, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(stage, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_ui.art = lv_obj_create(stage);
+    // 不再套面板：宠物直接画在页面背景上，居中占满画面。
+    s_ui.art = lv_obj_create(screen);
     lv_obj_remove_style_all(s_ui.art);
-    lv_obj_set_pos(s_ui.art, 10, 10);
-    lv_obj_set_size(s_ui.art, 660, 370);
+    lv_obj_set_pos(s_ui.art, 0, 0);
+    lv_obj_set_size(s_ui.art, kPanelSize, kPanelSize);
     lv_obj_set_style_bg_opa(s_ui.art, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_ui.art, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_ui.art, 0, LV_PART_MAIN);
@@ -1279,35 +1265,32 @@ void BuildContent(lv_obj_t* screen) {
     lv_obj_remove_flag(s_ui.art, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(s_ui.art, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* hit = lv_obj_create(stage);
+    lv_obj_t* hit = lv_obj_create(screen);
     lv_obj_remove_style_all(hit);
-    lv_obj_set_pos(hit, 70, 10);
-    lv_obj_set_size(hit, 540, 370);
+    lv_obj_set_pos(hit, 140, 140);
+    lv_obj_set_size(hit, 440, 440);
     lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
     lv_obj_remove_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(hit, OnPetClicked, LV_EVENT_CLICKED, nullptr);
 
-    // 对话框属于舞台的一部分：宠物和回答在同一块面板里。
-    s_ui.bubble_card = lv_obj_create(stage);
+    // 对话框贴在页面底部，透明底，只有文字。
+    s_ui.bubble_card = lv_obj_create(screen);
     lv_obj_t* bubble_card = s_ui.bubble_card;
     lv_obj_remove_style_all(bubble_card);
-    lv_obj_set_pos(bubble_card, 30, 384);
-    lv_obj_set_size(bubble_card, 620, 84);
-    lv_obj_set_style_bg_color(bubble_card, lv_color_hex(0x1B2740),
-                              LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bubble_card, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bubble_card, 20, LV_PART_MAIN);
+    lv_obj_set_pos(bubble_card, 40, 624);
+    lv_obj_set_size(bubble_card, 640, 76);
+    lv_obj_set_style_bg_opa(bubble_card, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(bubble_card, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bubble_card, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bubble_card, 0, LV_PART_MAIN);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(bubble_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(bubble_card, LV_OBJ_FLAG_HIDDEN);
 
     s_ui.bubble = lv_label_create(bubble_card);
     lv_label_set_text(s_ui.bubble, "");
-    lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_size(s_ui.bubble, 600, 64);
+    lv_label_set_long_mode(s_ui.bubble, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_size(s_ui.bubble, 640, 76);
     lv_obj_set_style_text_font(s_ui.bubble, &font_puhui_20_4,
                                LV_PART_MAIN);
     lv_obj_set_style_text_color(s_ui.bubble, lv_color_hex(kColorText),
