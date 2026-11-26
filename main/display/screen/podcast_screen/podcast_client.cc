@@ -11,8 +11,10 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <netdb.h>
 #include <set>
 #include <string>
+#include <sys/socket.h>
 #include <vector>
 
 #include "board.h"
@@ -599,6 +601,24 @@ PodcastPlayInfo PodcastClient::ResolvePlayUrl(const std::string& podcast_id,
 std::string PodcastClient::DeviceToken() {
     Settings settings(kSettingsNs, false);
     return settings.GetString(kKeyDeviceToken, CONFIG_PODCAST_DEVICE_TOKEN);
+}
+
+void PodcastClient::WarmUpHost(const std::string& url) {
+    const std::string host = HostOfUrl(url);
+    if (host.empty()) {
+        return;
+    }
+    const int64_t started_us = esp_timer_get_time();
+    struct addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* result = nullptr;
+    const int rc = getaddrinfo(host.c_str(), "443", &hints, &result);
+    if (result != nullptr) {
+        freeaddrinfo(result);
+    }
+    ESP_LOGI(TAG, "[timing] dns host=%s rc=%d dt=%dms", host.c_str(), rc,
+             static_cast<int>((esp_timer_get_time() - started_us) / 1000));
 }
 
 bool PodcastClient::IsOwnHost(const std::string& url) {

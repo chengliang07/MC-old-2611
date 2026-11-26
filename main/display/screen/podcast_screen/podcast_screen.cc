@@ -920,6 +920,8 @@ void PrefetchFirstPlayUrlWorker(void* data) {
             continue;
         }
         ESP_LOGI(TAG, "prefetched play url #%u", static_cast<unsigned>(i));
+        // 顺手把音频域名的 DNS 解掉：真机首次解析 1~3 秒，点击时再解析就是白等。
+        PodcastClient::WarmUpHost(play.url);
         // 只预开第一集：多开会和点击后的建流抢带宽，实测把第二集撞成建流超时。
         if (i != 0 || s_playing || s_paused ||
             s_preparing_play.load(std::memory_order_acquire) ||

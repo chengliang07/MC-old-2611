@@ -722,6 +722,9 @@ int PodcastHttpEvent(http_stream_event_msg_t* msg) {
             esp_http_client_set_header(client, "Range", range);
             ESP_LOGI(TAG, "http range %s", range);
         }
+    } else if (msg->event_id == HTTP_STREAM_POST_REQUEST) {
+        // 请求已发出（DNS/TCP/TLS 都已完成）：和 http_request 相减就是握手耗时。
+        TimingLog(player_ctx->generation, "http_request_sent");
     } else if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
         ParseResponseHeaders(client, player_ctx->generation);
         // 3xx 之后可能是第三方域（CDN/签名存储）：把 Bearer 摘掉再跳。
