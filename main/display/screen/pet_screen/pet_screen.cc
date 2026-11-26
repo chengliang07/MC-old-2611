@@ -1714,6 +1714,9 @@ void ReturnHome() {
     if (target == ChatScreen::CurrentScreen()) {
         ChatScreen::ResumeAfterTemporaryLeave();
     }
+    ESP_LOGI(TAG, "[leak] ReturnHome: old=%p target=%p will_delete=%d",
+             static_cast<void*>(old_screen), static_cast<void*>(target),
+             (old_screen != nullptr && old_screen != target) ? 1 : 0);
     if (old_screen != nullptr && old_screen != target) {
         lv_obj_delete_async(old_screen);
     }
@@ -1743,6 +1746,10 @@ void OnScreenUnloaded(lv_event_t* event) {
 
 void OnScreenDeleted(lv_event_t* event) {
     lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+    ESP_LOGI(TAG, "[leak] delete event: target=%p s_ui.screen=%p internal=%uKB psram=%uKB",
+             static_cast<void*>(target), static_cast<void*>(s_ui.screen),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     if (target != s_ui.screen) {
         return;
     }
