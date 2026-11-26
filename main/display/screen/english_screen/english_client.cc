@@ -1,4 +1,5 @@
 #include "english_client.h"
+#include "utils/api_gate.h"
 
 #include <atomic>
 #include <cctype>
@@ -87,6 +88,8 @@ bool HttpRequest(const char* method, const std::string& url,
         error = "网络未连接";
         return false;
     }
+    // 同一时刻只允许一条 TLS：播客/英语/宠物共享这把闸。
+    std::lock_guard<std::mutex> api_gate_lock(api_gate::Mutex());
     auto http = network->CreateHttp(0);
     if (http == nullptr) {
         error = "创建网络请求失败";

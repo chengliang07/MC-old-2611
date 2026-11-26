@@ -1,4 +1,6 @@
 #include "application.h"
+#include "podcast_screen/podcast_player.h"
+#include "utils/api_gate.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -996,6 +998,16 @@ void Application::SetDeviceState(DeviceState state) {
     clock_ticks_ = 0;
     auto previous_state = device_state_;
     device_state_ = state;
+
+    // 语音会话优先：开始听说时停掉播客，避免同时开两套音频链路。
+    if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+        if (!api_gate::IsVoiceActive()) {
+            PodcastPlayer::Stop();
+        }
+        api_gate::BeginVoice();
+    } else if (state == kDeviceStateIdle) {
+        api_gate::EndVoice();
+    }
     ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
 
     // Send the state change event

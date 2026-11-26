@@ -1,4 +1,5 @@
 #include "podcast_client.h"
+#include "utils/api_gate.h"
 
 #include <atomic>
 #include <cctype>
@@ -44,7 +45,8 @@ std::condition_variable s_inflight_cv;
 std::set<std::string> s_inflight;
 // 所有设备 API 请求串行化：并发 TLS 会话会把内部 RAM（实测只剩 130KB 量级）
 // 和连接槽吃光，播放流就会 "Failed to open new connection in specified timeout"。
-std::mutex s_api_gate_mutex;
+// 与英语页/宠物页共用同一把闸：同一时刻只允许一条 TLS 在建连。
+std::mutex& s_api_gate_mutex = api_gate::Mutex();
 PodcastList s_list_cache;
 time_t s_list_cache_at = 0;
 

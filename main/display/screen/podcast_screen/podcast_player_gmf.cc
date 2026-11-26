@@ -1,4 +1,5 @@
 #include "podcast_player.h"
+#include "utils/api_gate.h"
 #include "utils/psram_task.h"
 
 #include <algorithm>
@@ -1279,6 +1280,11 @@ static bool StartInternal(const std::string& url, std::string& error,
     ESP_LOGI(TAG, "[mem] before start: free=%u largest=%u",
              static_cast<unsigned>(internal_free),
              static_cast<unsigned>(internal_largest));
+    // 语音优先：正在语音对话时不开播放，避免两套音频缓冲同时吃内部 RAM。
+    if (api_gate::IsVoiceActive()) {
+        error = "正在语音对话，稍后再试";
+        return false;
+    }
     if (internal_largest < 20 * 1024) {
         char mem_msg[96];
         snprintf(mem_msg, sizeof(mem_msg), "内存不足(%u/%uKB)，请重启设备后再试",
