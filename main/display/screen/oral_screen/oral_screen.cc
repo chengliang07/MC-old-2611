@@ -842,7 +842,7 @@ void trace_tick() {
     t_tick_ms.store(now, std::memory_order_relaxed);
     ESP_LOGI(TAG,
              "[T] tick rxn=%u rxb=%u rxslow=%u rxmax=%u drop=%u qn=%u qkb=%u "
-             "gapn=%u gapms=%u gapmax=%u txmax=%u txslow=%u heapint=%u "
+             "gapn=%u gapms=%u gapmax=%u txmax=%u txslow=%u txdrop=%u heapint=%u "
              "heapps=%u lfb=%u",
              (unsigned)t_rx_pkts.exchange(0), (unsigned)t_rx_bytes.exchange(0),
              (unsigned)t_rx_slow.exchange(0),
@@ -851,6 +851,7 @@ void trace_tick() {
              (unsigned)(bytes / 1024), (unsigned)t_gap_cnt.exchange(0),
              (unsigned)t_gap_ms.exchange(0), (unsigned)t_gap_max.load(),
              (unsigned)t_tx_max_us.exchange(0), (unsigned)t_tx_slow.exchange(0),
+             (unsigned)s_tx_dropped.exchange(0),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
