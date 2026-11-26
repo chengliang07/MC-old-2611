@@ -23,12 +23,12 @@ LOGICAL_SCALE = 1
 
 # 文件名 -> (主色, 中文名用途)
 HEADS = {
-    "ic_pet_head_word": (0x4C, 0x6F, 0xFF),     # 单词丢
-    "ic_pet_head_oral": (0x8B, 0x5C, 0xF6),     # 口语丢
-    "ic_pet_head_math": (0xF5, 0x9E, 0x0B),     # 数学丢
-    "ic_pet_head_podcast": (0x10, 0xB9, 0x81),  # 播客丢
-    "ic_pet_head_plan": (0xEC, 0x48, 0x99),     # 计划丢
-    "ic_pet_head_task": (0x06, 0xB6, 0xD4),     # 任务丢
+    "ic_pet_head_word": (0x4A, 0x6F, 0xA5),     # 单词丢：灰蓝
+    "ic_pet_head_oral": (0x7A, 0x6B, 0xA6),     # 口语丢：灰紫
+    "ic_pet_head_math": (0xB0, 0x8A, 0x4E),     # 数学丢：暗金
+    "ic_pet_head_podcast": (0x4E, 0x86, 0x67),  # 播客丢：暗绿
+    "ic_pet_head_plan": (0xA3, 0x6B, 0x7C),     # 计划丢：暗玫瑰
+    "ic_pet_head_task": (0x4E, 0x84, 0x8C),     # 任务丢：暗青
 }
 
 
