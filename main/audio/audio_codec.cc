@@ -30,9 +30,18 @@ void AudioCodec::Start() {
     // 启动阶段只读 NVS，默认音量 45%，不做会触发 Flash 写入的迁移。
     Settings reader("audio", false);
     output_volume_ = reader.GetInt("output_volume", output_volume_);
+    // 旧固件默认音量偏大：做一次性迁移，把已有设备统一落到 50%。
+    // 只迁一次（volume_migrated 打标记），之后用户自己调的值会保留。
+    if (reader.GetInt("volume_migrated", 0) == 0) {
+        output_volume_ = 50;
+        Settings writer("audio", true);
+        writer.SetInt("output_volume", output_volume_);
+        writer.SetInt("volume_migrated", 1);
+        ESP_LOGI(TAG, "output volume migrated to %d", output_volume_);
+    }
     if (output_volume_ <= 0) {
-        ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (45)", output_volume_);
-        output_volume_ = 45;
+        ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (50)", output_volume_);
+        output_volume_ = 50;
     }
 
     if (tx_handle_ != nullptr) {
