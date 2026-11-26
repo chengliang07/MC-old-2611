@@ -31,6 +31,10 @@ let PATHQ = "/functions/v1/oral-coach-relay-probe";
 // --wav out.wav : dump received PCM (24 kHz mono s16le) to a playable file
 const idxW = process.argv.indexOf("--wav");
 const wavPath = idxW > -1 ? process.argv[idxW + 1] : "";
+// --in-wav x.wav : stream a 16 kHz mono PCM file as *user speech* so we can
+// observe the upstream ASR path (relay.user_transcript.*) without the device.
+const idxIn = process.argv.indexOf("--in-wav");
+const inWavPath = idxIn > -1 ? process.argv[idxIn + 1] : "";
 const pcmChunks = [];
 let transcript = '';
 
@@ -111,6 +115,7 @@ let audioBytes = 0;
 let audioFrames = 0;
 const audioTimes = [];
 let said = false;
+let fed = false;
 const t0 = Date.now();
 
 const timer = setTimeout(() => {
@@ -145,6 +150,10 @@ sock.on("data", (chunk) => {
       if (obj.model) extra.push("model=" + obj.model);
       if (obj.voice) extra.push("voice=" + obj.voice);
       if (obj.error) extra.push("ERROR=" + obj.error);
+      if (obj.type === "relay.debug") extra.push("dbg=" + JSON.stringify(obj));
+      if (obj.type === "relay.user_transcript.delta") extra.push("delta=" + String(obj.delta).slice(0, 80));
+      if (obj.type === "relay.user_transcript.done") extra.push("text=" + String(obj.text || "").slice(0, 120));
+      if (obj.type === "relay.user_transcript.replace") extra.push("text=" + String(obj.text || "").slice(0, 120));
       if (obj.type === "relay.qwen.event") {
         if (obj.fmt) extra.push("fmt=" + JSON.stringify(obj.fmt));
         else extra.push("raw=" + JSON.stringify(obj).slice(0, 200));
@@ -157,6 +166,47 @@ sock.on("data", (chunk) => {
           console.log("-- response done, closing");
           sock.destroy();
         }, 1300);
+      }
+      if (obj.type === "relay.ready" && inWavPath && !fed) {
+        fed = true;
+        const fs = require("fs");
+        const b = fs.readFileSync(inWavPath);
+        let off = 12, dataOff = -1, dataLen = 0, rate = 16000, ch = 1;
+        while (off + 8 <= b.length) {
+          const id = b.toString("ascii", off, off + 4);
+          const sz = b.readUInt32LE(off + 4);
+          if (id === "fmt ") { ch = b.readUInt16LE(off + 10); rate = b.readUInt32LE(off + 12); }
+          if (id === "data") { dataOff = off + 8; dataLen = sz; break; }
+          off += 8 + sz + (sz & 1);
+        }
+        if (dataOff < 0) { console.log("-- in-wav: no data chunk"); return; }
+        let pcm = b.subarray(dataOff, dataOff + dataLen);
+        if (ch === 2) {
+          const mono = Buffer.alloc(Math.floor(pcm.length / 4) * 2);
+          for (let i = 0; i < mono.length / 2; i++) mono.writeInt16LE(pcm.readInt16LE(i * 4), i * 2);
+          pcm = mono;
+        }
+        if (rate !== 16000) console.log(`-- in-wav: WARN rate=${rate}, relay expects 16000`);
+        const step = 3200; // 100 ms of 16k s16le
+        const padMs = Number(process.argv[process.argv.indexOf("--pad-silence") + 1] || 0) || 1500;
+        const silence = Buffer.alloc(step);
+        let p = 0;
+        let pad = 0;
+        const feeder = setInterval(() => {
+          if (p < pcm.length) {
+            sock.write(frameBin(pcm.subarray(p, Math.min(p + step, pcm.length))));
+            p += step;
+            return;
+          }
+          // 尾巴补静音，否则服务端 VAD 收不到“说完了”，转写就可能一直不落定。
+          if (pad < padMs) {
+            sock.write(frameBin(silence));
+            pad += 100;
+            return;
+          }
+          clearInterval(feeder);
+          console.log(`-- sent input ${(pcm.length / 32000).toFixed(2)}s + ${padMs}ms silence`);
+        }, 100);
       }
       if (obj.type === "relay.ready" && process.argv.includes("--say") && !said) {
         said = true;
