@@ -78,7 +78,7 @@ def draw_body(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
         c.hline(x0 + 1, x0 + 2, 69, "orange_dark")
 
 
-def canvas_to_square_png(c: PixelCanvas, path: str) -> None:
+def canvas_to_square_png(c: PixelCanvas, path: str, block: int = 1) -> None:
     small = c.to_image().resize(
         (c.size * LOGICAL_SCALE, c.size * LOGICAL_SCALE), Image.NEAREST)
     bbox = small.split()[-1].getbbox()
@@ -89,6 +89,11 @@ def canvas_to_square_png(c: PixelCanvas, path: str) -> None:
     square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     square.alpha_composite(
         cropped, ((side - cropped.width) // 2, (side - cropped.height) // 2))
+    if block > 1:
+        # 降采样再最近邻放大：把像素块放到约 block 倍，和外面的大猫头鹰同一粗细。
+        tiny = square.resize((max(1, side // block), max(1, side // block)),
+                             Image.NEAREST)
+        square = tiny.resize((side, side), Image.NEAREST)
     square.save(path)
 
 
@@ -104,7 +109,8 @@ def build_head(rgb: tuple[int, int, int]) -> PixelCanvas:
 
 def main() -> int:
     for name, rgb in HEADS.items():
-        canvas_to_square_png(build_head(rgb), os.path.join(ASSETS, name + ".png"))
+        canvas_to_square_png(build_head(rgb),
+                             os.path.join(ASSETS, name + ".png"), block=2)
         print("wrote", name + ".png")
 
     # 右上角蛋按钮：只要那颗蛋，不要整张 360 画布。

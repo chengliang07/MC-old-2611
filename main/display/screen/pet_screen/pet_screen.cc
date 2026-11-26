@@ -1276,8 +1276,9 @@ void BuildHeader(lv_obj_t* screen) {
     lv_obj_t* egg = lv_button_create(screen);
     s_ui.egg_btn = egg;
     lv_obj_remove_style_all(egg);
-    lv_obj_set_size(egg, 44, 44);
-    lv_obj_set_pos(egg, 656, 20);
+    // 图标只有 42px，点击区放大到 96px，避免每次都要精准点。
+    lv_obj_set_size(egg, 96, 96);
+    lv_obj_set_pos(egg, 620, 0);
     lv_obj_set_style_bg_opa(egg, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(egg, lv_color_hex(0xFFFFFF),
                               LV_PART_MAIN | LV_STATE_PRESSED);
@@ -1385,7 +1386,8 @@ void BuildMenu() {
     constexpr int32_t kCellW = 150;
     constexpr int32_t kCellH = 142;
     constexpr int32_t kLeft = 10;
-    constexpr int32_t kTop = 18;
+    // 上下留白对齐：格子上沿到面板顶 = 第二排文字到底边。
+    constexpr int32_t kTop = 32;
     for (int i = 0; i < 6; ++i) {
         const int col = i % 3;
         const int row = i / 3;
