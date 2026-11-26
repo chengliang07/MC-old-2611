@@ -34,6 +34,7 @@
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
+LV_FONT_DECLARE(font_awesome_20_4);
 LV_FONT_DECLARE(font_awesome_30_4);
 
 namespace {
@@ -967,31 +968,6 @@ void PrefetchFirstPlayUrl() {
     }
 }
 
-// 取标题首个字符（UTF-8），用作列表左侧的字母头像。
-std::string FirstGlyph(const std::string& text) {
-    size_t i = 0;
-    while (i < text.size() &&
-           (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) {
-        ++i;
-    }
-    if (i >= text.size()) {
-        return "-";
-    }
-    const unsigned char lead = static_cast<unsigned char>(text[i]);
-    size_t len = 1;
-    if ((lead & 0xE0) == 0xC0) {
-        len = 2;
-    } else if ((lead & 0xF0) == 0xE0) {
-        len = 3;
-    } else if ((lead & 0xF8) == 0xF0) {
-        len = 4;
-    }
-    if (i + len > text.size()) {
-        len = text.size() - i;
-    }
-    return text.substr(i, len);
-}
-
 // 列表标题必须保持单行：按显示宽度截断（CJK 记 2 个单位），
 // 否则标题折成两行会压到右下角的时长/完成状态。
 std::string TruncateForWidth(const std::string& text, size_t max_units) {
@@ -1047,9 +1023,8 @@ lv_obj_t* CreatePillButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
 }
 
 // ---- 列表头像图标 ---------------------------------------------------------
-// 固定栏目用固定图标：数学=圆规、英语=地球、许云说美国=书本、一丢教育=房子。
-// 其它节目仍回退到标题首字，保持原来的观感。
-enum class PodcastAvatar { Letter, Compass, Globe, Book, House };
+// 数学=圆规、英语=地球、教育/家庭=大人带小孩，其余一律书本（讲书/读书类都适用）。
+enum class PodcastAvatar { Book, Compass, Globe, Family };
 
 PodcastAvatar AvatarForTitle(const std::string& title) {
     if (title.find("数学") != std::string::npos ||
@@ -1063,14 +1038,12 @@ PodcastAvatar AvatarForTitle(const std::string& title) {
         title.find("english") != std::string::npos) {
         return PodcastAvatar::Globe;
     }
-    if (title.find("许云") != std::string::npos) {
-        return PodcastAvatar::Book;
-    }
     if (title.find("教育") != std::string::npos ||
-        title.find("家庭") != std::string::npos) {
-        return PodcastAvatar::House;
+        title.find("家庭") != std::string::npos ||
+        title.find("亲子") != std::string::npos) {
+        return PodcastAvatar::Family;
     }
-    return PodcastAvatar::Letter;
+    return PodcastAvatar::Book;
 }
 
 void CreateFontAwesomeIcon(lv_obj_t* parent, const char* utf8) {
@@ -1096,6 +1069,23 @@ void CreateBookIcon(lv_obj_t* parent) {
         lv_obj_set_style_bg_color(page, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(page, LV_OPA_COVER, LV_PART_MAIN);
     }
+}
+
+// 家庭教育：字体里没有"大人拉小孩"，用一大一小两个人形拼出来。
+void CreateFamilyIcon(lv_obj_t* parent) {
+    lv_obj_t* adult = lv_label_create(parent);
+    lv_label_set_text(adult, "\xEF\x80\x87");
+    lv_obj_set_style_text_font(adult, &font_awesome_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(adult, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_pos(adult, 5, 11);
+    screen_make_input_passive(adult);
+
+    lv_obj_t* child = lv_label_create(parent);
+    lv_label_set_text(child, "\xEF\x80\x87");
+    lv_obj_set_style_text_font(child, &font_awesome_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(child, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_pos(child, 33, 26);
+    screen_make_input_passive(child);
 }
 
 // 空列表 / 加载失败：居中提示 + 刷新按钮，避免用户卡在“暂无节目”无路可走。
@@ -1198,24 +1188,12 @@ void RebuildList() {
             case PodcastAvatar::Globe:
                 CreateFontAwesomeIcon(avatar, "\xEF\x82\xAC");  // 地球
                 break;
-            case PodcastAvatar::House:
-                CreateFontAwesomeIcon(avatar, "\xEF\x80\x95");  // 房子
+            case PodcastAvatar::Family:
+                CreateFamilyIcon(avatar);
                 break;
             case PodcastAvatar::Book:
                 CreateBookIcon(avatar);
                 break;
-            case PodcastAvatar::Letter: {
-                lv_obj_t* glyph = lv_label_create(avatar);
-                const std::string initial = FirstGlyph(item.title);
-                lv_label_set_text(glyph, initial.c_str());
-                lv_obj_set_style_text_font(glyph, &font_puhui_30_4,
-                                           LV_PART_MAIN);
-                lv_obj_set_style_text_color(glyph, lv_color_hex(0xFFFFFF),
-                                            LV_PART_MAIN);
-                lv_obj_center(glyph);
-                screen_make_input_passive(glyph);
-                break;
-            }
         }
 
         lv_obj_t* title = lv_label_create(row);
