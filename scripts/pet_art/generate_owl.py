@@ -144,12 +144,13 @@ def draw_wings(c: PixelCanvas, skip_left: bool = False,
         c.ellipse(48.0, 61.0, 2.8, 4.6, "brown_dark")
 
 
-def draw_raised_wing(c: PixelCanvas, cx: float, cy: float) -> None:
-    """举起来的那只手：画在头部之上，贴着脑袋外侧，朝上。"""
-    c.ellipse(cx, cy, 5.4, 8.0, "outline")
-    c.ellipse(cx, cy, 4.5, 7.1, "brown_dark")
-    c.ellipse(cx, cy - 3.0, 2.8, 3.4, "cream")
-    c.ellipse(cx, cy - 4.2, 1.4, 1.6, "cream_light")
+def draw_raised_wing(c: PixelCanvas, cx: float, cy: float,
+                     side: int = 1) -> None:
+    """举起的那只手：平举在身体两侧，不抬到耳朵边上。"""
+    c.ellipse(cx, cy, 6.2, 3.6, "outline")
+    c.ellipse(cx, cy, 5.2, 2.8, "brown_dark")
+    # 手尖一点奶油色，和脚的颜色呼应
+    c.ellipse(cx + side * 3.4, cy, 1.8, 1.8, "cream")
 
 
 def draw_feet(c: PixelCanvas, lift_left: int = 0, lift_right: int = 0) -> None:
@@ -220,26 +221,25 @@ def draw_eye(c: PixelCanvas, cx: float, cy: float, mood: str,
                int(cx + dx), int(cy + dy + 1), "eye_black")
         return
 
-    if mood == "star":
-        # 星星眼：白眼球里一颗四角星（菱形亮片）。
+    if mood == "heart":
+        # 爱心眼：白眼球里一颗粉色心。
         c.ellipse(cx, cy, 7.4 * s, 7.0 * s, "outline")
         c.ellipse(cx, cy, 6.4 * s, 6.0 * s, "eye_white")
         ix, iy = int(cx), int(cy)
-        star = (
-            "...#...",
-            "..###..",
-            ".#####.",
+        heart = (
+            ".##.##.",
+            "#######",
+            "#######",
             "#######",
             ".#####.",
             "..###..",
             "...#...",
         )
-        for row, line in enumerate(star):
+        for row, line in enumerate(heart):
             for col, ch in enumerate(line):
                 if ch == "#":
-                    c.set(ix - 3 + col, iy - 3 + row, "eye_blue")
-        c.set(ix, iy, "eye_white")
-        c.set(ix - 1, iy - 1, "eye_white")
+                    c.set(ix - 3 + col, iy - 3 + row, (236, 112, 133))
+        c.set(ix - 2, iy - 2, (255, 189, 198))
         return
 
     c.ellipse(cx + pupil_dx, cy + pupil_dy, pupil_r, pupil_r, "eye_black")
@@ -344,12 +344,12 @@ def build_state(mood: str) -> PixelCanvas:
     draw_wings(c, skip_left=hand_left, skip_right=hand_right)
     draw_head(c)
     if hand_left:
-        draw_raised_wing(c, 5.8, 34.0)
+        draw_raised_wing(c, 15.0, 58.0, side=-1)
     if hand_right:
-        draw_raised_wing(c, 66.2, 34.0)
+        draw_raised_wing(c, 57.0, 58.0, side=1)
     draw_eyes(c, mood)
     draw_beak(c, openness=BEAK_OPENNESS.get(mood, 0))
-    if mood in ("happy", "star"):
+    if mood in ("happy", "heart"):
         draw_blush(c)
     if mood == "listening":
         draw_sound_waves(c)
@@ -378,7 +378,7 @@ STATES = [
     ("stretch", "ic_pet_stretch"),
     ("stomp_l", "ic_pet_stomp_l"),
     ("stomp_r", "ic_pet_stomp_r"),
-    ("star", "ic_pet_star"),
+    ("heart", "ic_pet_heart"),
     ("wink", "ic_pet_wink"),
 ]
 

@@ -73,7 +73,7 @@ enum class PetMood : uint8_t {
     Stretch,
     StompL,
     StompR,
-    Star,
+    Heart,
     Wink,
 };
 
@@ -105,8 +105,8 @@ const char* PetImagePath(PetMood mood, bool egg) {
             return "A:ic_pet_stomp_l.spng";
         case PetMood::StompR:
             return "A:ic_pet_stomp_r.spng";
-        case PetMood::Star:
-            return "A:ic_pet_star.spng";
+        case PetMood::Heart:
+            return "A:ic_pet_heart.spng";
         case PetMood::Wink:
             return "A:ic_pet_wink.spng";
         case PetMood::Idle:
@@ -159,7 +159,6 @@ std::atomic<uint32_t> s_request_generation{0};
 // 互动：随机走动 / 打盹 / 内容触发的表情。
 int32_t s_walk_offset = 0;        // 相对 s_body_base_x 的横向偏移
 uint8_t s_stomp_phase = 0;        // 跺脚帧序号
-bool s_turn_left = false;         // 下一次转身方向
 uint32_t s_last_active_ms = 0;    // 最近一次交互（点按 / 语音）时刻
 bool s_has_transient = false;     // 瞬时表情是否生效
 PetMood s_transient_face = PetMood::Idle;
@@ -896,8 +895,6 @@ void ResetBodyTransform() {
         return;
     }
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_x(body, 256, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_y(body, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(body, s_body_scale_base,
                                          LV_PART_MAIN);
@@ -914,8 +911,6 @@ void StartIdleMotion() {
     lv_obj_set_x(body, s_body_base_x + s_walk_offset);
     lv_obj_set_y(body, s_body_base_y);
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_x(body, 256, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_y(body, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(body, s_body_scale_base,
                                          LV_PART_MAIN);
@@ -957,11 +952,6 @@ void AnimSetScale(void* var, int32_t value) {
                                      LV_PART_MAIN);
 }
 
-void AnimSetScaleX(void* var, int32_t value) {
-    lv_obj_set_style_transform_scale_x(static_cast<lv_obj_t*>(var), value,
-                                       LV_PART_MAIN);
-}
-
 // 所有小动作结束后统一回位：位置、旋转、缩放、表情、呼吸。
 void FinishMotion(lv_anim_t* finished) {
     auto* pet = static_cast<lv_obj_t*>(lv_anim_get_user_data(finished));
@@ -971,8 +961,6 @@ void FinishMotion(lv_anim_t* finished) {
     lv_obj_set_x(pet, s_body_base_x + s_walk_offset);
     lv_obj_set_y(pet, s_body_base_y);
     lv_obj_set_style_transform_rotation(pet, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_x(pet, 256, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_y(pet, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(pet, s_body_scale_base, LV_PART_MAIN);
     }
@@ -1057,7 +1045,7 @@ void PlayStomp() {
     }
 }
 
-// 挥手：举起一只手，身体左右晃两下。
+// 挥手：一只手平举，身体轻轻点两下头。
 void PlayWave() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
@@ -1072,10 +1060,10 @@ void PlayWave() {
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, body);
     lv_anim_set_user_data(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetRotation);
-    lv_anim_set_values(&anim, 0, -110);
-    lv_anim_set_duration(&anim, 160);
-    lv_anim_set_playback_duration(&anim, 160);
+    lv_anim_set_exec_cb(&anim, AnimSetY);
+    lv_anim_set_values(&anim, 0, -4);
+    lv_anim_set_duration(&anim, 220);
+    lv_anim_set_playback_duration(&anim, 220);
     lv_anim_set_repeat_count(&anim, 2);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_set_completed_cb(&anim, FinishMotion);
@@ -1104,33 +1092,7 @@ void PlayHeadTilt() {
     lv_anim_start(&anim);
 }
 
-// 左右转：横向压扁模拟转身，不再整只翻过去（脚朝上很难看）。
-void PlayTurn() {
-    lv_obj_t* body = s_ui.body;
-    if (body == nullptr) {
-        return;
-    }
-    lv_anim_delete(body, nullptr);
-    ResetBodyTransform();
-    s_turn_left = !s_turn_left;
-    lv_obj_set_x(body, s_body_base_x + s_walk_offset +
-                           (s_turn_left ? -16 : 16));
-
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, body);
-    lv_anim_set_user_data(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetScaleX);
-    lv_anim_set_values(&anim, 256, 108);
-    lv_anim_set_duration(&anim, 260);
-    lv_anim_set_playback_duration(&anim, 300);
-    lv_anim_set_playback_delay(&anim, 120);
-    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-    lv_anim_set_completed_cb(&anim, FinishMotion);
-    lv_anim_start(&anim);
-}
-
-// 伸懒腰：两只手举起来，身体跟着拔高。
+// 伸懒腰：两只手平举，身体跟着拔高。
 void PlayStretch() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr || IsEggStage()) {
@@ -1202,28 +1164,26 @@ void PlayRandomReaction() {
     }
     ResetBodyTransform();
     const uint32_t roll = esp_random() % 100;
-    if (roll < 18) {
+    if (roll < 20) {
         WalkToRandom();
-    } else if (roll < 30) {
+    } else if (roll < 34) {
         PlayPetRoll();       // 跳一下
-    } else if (roll < 42) {
+    } else if (roll < 46) {
         PlayStomp();         // 左右脚交替跺
-    } else if (roll < 54) {
-        PlayWave();          // 举起一只手挥
-    } else if (roll < 64) {
+    } else if (roll < 58) {
+        PlayWave();          // 一只手平举
+    } else if (roll < 70) {
         PlayHeadTilt();      // 歪头
-    } else if (roll < 74) {
-        PlayTurn();          // 左右转身
-    } else if (roll < 82) {
-        PlayStretch();       // 举起两只手伸懒腰
+    } else if (roll < 80) {
+        PlayStretch();       // 两只手平举伸懒腰
     } else if (roll < 90) {
-        ApplyTransientFace(PetMood::Star, 1800);   // 星星眼
+        ApplyTransientFace(PetMood::Heart, 1800);   // 爱心眼
         PlayPetRoll();
     } else if (roll < 96) {
         ApplyTransientFace(PetMood::Happy, 1600);
         PlayPetRoll();
     } else {
-        ApplyTransientFace(PetMood::Wink, 2000);   // 眨一只眼
+        ApplyTransientFace(PetMood::Wink, 2000);    // 眨一只眼
     }
 }
 
@@ -1771,13 +1731,10 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
     s_return_screen = return_screen;
     // 保留进程内最近一次成功获取的状态，重新进入时先显示缓存，
     // 再由 LifecycleCallback 异步刷新服务端数据。
-    if (!s_has_state) {
-        s_stage.clear();
-    }
-
+    // 首次进入没有缓存时也先画猫头鹰，不要用蛋占位等接口。
     BuildHeader(screen);
     BuildContent(screen);
-    BuildPetArt(s_stage.empty() ? "egg" : s_stage.c_str());
+    BuildPetArt(s_stage.empty() ? "chick" : s_stage.c_str());
     // 舞台是后建的，盖住了顶栏两个按钮的下沿，这里把它们提到最上层。
     if (s_ui.back_btn != nullptr) {
         lv_obj_move_foreground(s_ui.back_btn);
