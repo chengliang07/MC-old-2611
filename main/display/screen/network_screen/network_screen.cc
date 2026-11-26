@@ -917,18 +917,41 @@ void on_saved_set_default(lv_event_t* e) {
     refresh_saved_list();
 }
 
+struct RemoveSavedArg {
+    int index;
+};
+
+// 删除已保存 WiFi 的落地动作。必须在独立任务里跑：
+// 真机实测在 LVGL 任务里直接调 SsidManager::RemoveSsid()（内部 nvs_set/nvs_commit
+// 写 flash）会整机静默卡死——串口零输出、esptool 也连不上，只能断电。
+// 对照：保存密码走 AddSsid 是在后台任务里做的，从来不出问题。
+void remove_saved_task(void* param) {
+    auto* arg = static_cast<RemoveSavedArg*>(param);
+    ESP_LOGI(TAG, "[del] task begin idx=%d", arg->index);
+    SsidManager::GetInstance().RemoveSsid(arg->index);
+    ESP_LOGI(TAG, "[del] task done idx=%d", arg->index);
+    delete arg;
+    lv_async_call(
+        [](void*) {
+            if (!s_screen_active) return;
+            post_status(I18n::T("已删除该网络"), kColorSuccess);
+            refresh_saved_list();
+        },
+        nullptr);
+    vTaskDelete(nullptr);
+}
+
 void on_saved_remove(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
-    // 真机现象：点删除会整机静默卡死（串口无输出）。逐步打点定位卡在哪一步。
-    ESP_LOGI(TAG, "[del] begin idx=%d psram=%uKB internal=%uKB", ctx->index,
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
-    SsidManager::GetInstance().RemoveSsid(ctx->index);
-    ESP_LOGI(TAG, "[del] RemoveSsid returned");
-    post_status(I18n::T("已删除该网络"), kColorSuccess);
-    ESP_LOGI(TAG, "[del] status posted");
-    refresh_saved_list();
+    ESP_LOGI(TAG, "[del] click idx=%d", ctx->index);
+    auto* arg = new RemoveSavedArg{ctx->index};
+    if (xTaskCreate(remove_saved_task, "wifi_del", 4096, arg, 4, nullptr) != pdPASS) {
+        delete arg;
+        ESP_LOGE(TAG, "[del] create task failed");
+        post_status(I18n::T("删除失败"), kColorError);
+        return;
+    }
 }
 
 void on_saved_btn_delete(lv_event_t* e) {
