@@ -75,10 +75,14 @@ constexpr size_t kMaxTxChunks = 8;
 // 服务端漏发 / 长时间不发 response.done 时，客户端会永远停在“回答中”，
 // 只能按电源键才能继续。这里做兜底：最后一块音频之后静默太久，就当作本轮结束。
 constexpr uint32_t kTurnIdleTimeoutMs = 8000;
-// ---- 配色（改这 6 行就能整页换肤）----
-// 底色：深海军蓝的竖向渐变，替代原来的纯黑平铺。
+// ---- 配色（改这几行就能整页换肤）----
+// 只让 88px 的头部做渐变；列表区必须用纯色：整屏渐变会在每次滚动/流式
+// 刷字时重绘几十万像素，LVGL 任务抢 CPU，音频和字幕都会卡（真机验证过）。
 constexpr uint32_t kColorBgTop = 0x0E1A2B;
-constexpr uint32_t kColorBgBottom = 0x06090F;
+constexpr uint32_t kColorBgBottom = 0x0A1220;
+constexpr uint32_t kColorChatBg = 0x080D16;
+constexpr uint32_t kColorAiBubble = 0x1A2230;
+constexpr uint32_t kColorAvatarBg = 0x1C2736;
 // 主色：暖琥珀。备选：蓝 0x4C8DFF / 紫 0xA78BFA / 珊瑚 0xFF7A59。
 constexpr uint32_t kColorAccent = 0xF2B25C;
 constexpr uint32_t kColorAccentDeep = 0xD98E3E;
@@ -140,12 +144,10 @@ lv_obj_t* s_chat = nullptr;
 // 状态胶囊：容器 + 发光圆点，颜色跟 State 走。
 lv_obj_t* s_status_pill = nullptr;
 lv_obj_t* s_status_dot = nullptr;
-// 底部聆听区：麦克风胶囊 + 5 根波柱 + 一句提示。
+// 底部标识：5 根静态电平条，纯装饰，不动。
 lv_obj_t* s_footer = nullptr;
-lv_obj_t* s_hint = nullptr;
-lv_obj_t* s_wave_bars[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-lv_timer_t* s_wave_timer = nullptr;
-uint32_t s_wave_tick = 0;
+// 状态文案缓存：重建页面时清掉，保证首次一定落到新对象上。
+bool s_status_seeded = false;
 lv_obj_t* s_return_screen = nullptr;
 TaskHandle_t s_worker_task = nullptr;
 std::unique_ptr<WebSocket> s_ws;
@@ -198,9 +200,21 @@ uint32_t status_color(State state) {
     }
 }
 
-// 状态胶囊 + 底部提示统一在这里改，避免状态色散落在多个回调里。
+// 状态胶囊统一在这里改，避免状态色散落在多个回调里。
+// 文本没变就整段跳过：流式回答时 post_ui 每个分片都会调到这里，
+// 无脑 lv_label_set_text 会让胶囊重算尺寸、连带整屏重排。
 void set_status_visual(State state, const char* text) {
+    static State last_state = State::Idle;
+    static char last_text[96] = {0};
+    const char* wanted = text != nullptr ? text : "";
+    const bool changed = !s_status_seeded || state != last_state ||
+                         std::strcmp(last_text, wanted) != 0;
+    s_status_seeded = true;
+    last_state = state;
+    std::snprintf(last_text, sizeof(last_text), "%s", wanted);
+
     const uint32_t color = status_color(state);
+    if (!changed) return;
     if (s_status != nullptr) {
         lv_label_set_text(s_status, text != nullptr ? text : "");
         lv_obj_set_style_text_color(s_status, lv_color_hex(color), LV_PART_MAIN);
@@ -212,48 +226,6 @@ void set_status_visual(State state, const char* text) {
     if (s_status_pill != nullptr) {
         lv_obj_set_style_bg_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
         lv_obj_set_style_border_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
-    }
-    if (s_hint != nullptr) {
-        const char* hint = "轻触屏幕开始";
-        switch (state) {
-            case State::Listening:
-                hint = "直接说英文，说完停一下";
-                break;
-            case State::Answering:
-                hint = "AI 回答中 · 可随时打断";
-                break;
-            case State::Connecting:
-                hint = "正在连接…";
-                break;
-            case State::Error:
-                hint = "连接失败 · 轻触屏幕重试";
-                break;
-            default:
-                break;
-        }
-        lv_label_set_text(s_hint, hint);
-    }
-}
-
-// 底部波柱：5 根柱子按 6 帧循环涨落，只在聆听/回答时动。
-void wave_timer_cb(lv_timer_t* /*timer*/) {
-    static const uint8_t kFrames[6][5] = {
-        {10, 22, 14, 26, 12}, {16, 14, 26, 12, 22}, {22, 26, 12, 22, 14},
-        {26, 12, 22, 14, 26}, {14, 22, 12, 26, 16}, {12, 26, 16, 12, 22},
-    };
-    if (s_footer == nullptr) return;
-    const State state = s_state.load(std::memory_order_acquire);
-    const bool active =
-        state == State::Listening || state == State::Answering;
-    const uint8_t* frame = kFrames[s_wave_tick % 6];
-    ++s_wave_tick;
-    const uint32_t color =
-        state == State::Answering ? kColorStatusAnswering : kColorAccent;
-    for (int i = 0; i < 5; ++i) {
-        if (s_wave_bars[i] == nullptr) continue;
-        lv_obj_set_height(s_wave_bars[i], active ? frame[i] : 6);
-        lv_obj_set_style_bg_color(s_wave_bars[i], lv_color_hex(color),
-                                  LV_PART_MAIN);
     }
 }
 
@@ -643,8 +615,8 @@ void post_ui(uint32_t session, State state, const char* status,
                 lv_obj_remove_flag(avatar, LV_OBJ_FLAG_CLICKABLE);
                 lv_obj_set_size(avatar, kAvatarSize, kAvatarSize);
                 lv_obj_set_style_radius(avatar, 12, LV_PART_MAIN);
-                lv_obj_set_style_bg_color(avatar, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-                lv_obj_set_style_bg_opa(avatar, 12, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(avatar, lv_color_hex(kColorAvatarBg), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(avatar, LV_OPA_COVER, LV_PART_MAIN);
                 lv_obj_set_style_border_width(avatar, 1, LV_PART_MAIN);
                 lv_obj_set_style_border_color(avatar, lv_color_hex(kColorAccent), LV_PART_MAIN);
                 lv_obj_set_style_border_opa(avatar, 70, LV_PART_MAIN);
@@ -674,12 +646,13 @@ void post_ui(uint32_t session, State state, const char* status,
                 lv_obj_set_style_bg_grad_dir(bubble, LV_GRAD_DIR_VER, LV_PART_MAIN);
                 lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
             } else {
-                // AI：半透明玻璃 + 1px 描边，弱于用户但不与底色糊在一起。
+                // AI：纯色卡 + 1px 描边。原来用 6% 白叠底，每帧要混一次
+                // alpha；纯色在深底上视觉几乎一样，但不吃混合带宽。
                 lv_obj_set_style_border_width(bubble, 1, LV_PART_MAIN);
                 lv_obj_set_style_border_color(bubble, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
                 lv_obj_set_style_border_opa(bubble, 26, LV_PART_MAIN);
-                lv_obj_set_style_bg_color(bubble, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-                lv_obj_set_style_bg_opa(bubble, 16, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(bubble, lv_color_hex(kColorAiBubble), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, LV_PART_MAIN);
             }
             // 气泡宽度按文本自适应；流式期间只在“需要变宽 24px 以上”时
             // 才重排，避免每个分片都跳一次宽度；封口时再精确收窄。
@@ -1736,12 +1709,6 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_status_pill = nullptr;
     s_status_dot = nullptr;
     s_footer = nullptr;
-    s_hint = nullptr;
-    for (auto*& bar : s_wave_bars) bar = nullptr;
-    if (s_wave_timer != nullptr) {
-        lv_timer_delete(s_wave_timer);
-        s_wave_timer = nullptr;
-    }
 }
 
 lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font, lv_color_t color) {
@@ -1770,10 +1737,8 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     s_screen = screen;
     screen_strip_obj_chrome(screen);
     lv_obj_set_size(screen, kPanelW, kPanelH);
-    // 底色：整页竖向渐变，替代原来的纯黑平铺。
-    lv_obj_set_style_bg_color(screen, lv_color_hex(kColorBgTop), LV_PART_MAIN);
-    lv_obj_set_style_bg_grad_color(screen, lv_color_hex(kColorBgBottom), LV_PART_MAIN);
-    lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    // 屏幕底色只用纯色：列表滚动时这块每帧都要重填，渐变填不起。
+    lv_obj_set_style_bg_color(screen, lv_color_hex(kColorChatBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -1783,8 +1748,11 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_add_flag(header, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_size(header, kPanelW, kHeaderH);
     lv_obj_set_pos(header, 0, 0);
+    // 渐变只留在这 88px：头部是 FLOATING，滚动时不会重绘，成本可以忽略。
     lv_obj_set_style_bg_color(header, lv_color_hex(kColorBgTop), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(header, 242, LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_color(header, lv_color_hex(kColorChatBg), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(header, LV_GRAD_DIR_VER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(header, 0, LV_PART_MAIN);
 
@@ -1887,29 +1855,30 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_set_style_bg_opa(s_chat, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_add_flag(s_chat, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chat, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_AUTO);
+    // 列表已自动跟到最新，右侧滚动条只会闪，干脆不画。
+    lv_obj_set_scrollbar_mode(s_chat, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_event_cb(s_chat, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
 
-    // 底部聆听区：波柱 + 一句提示，固定压在列表下方。
+    // 底部标识：5 根静态电平条，纯装饰。不做动画、不写提示语。
     s_footer = lv_obj_create(screen);
     screen_strip_obj_chrome(s_footer);
     lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(s_footer, kPanelW, kFooterH);
     lv_obj_set_pos(s_footer, 0, kPanelH - kFooterH);
     lv_obj_set_style_bg_opa(s_footer, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_flex_flow(s_footer, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_footer, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+    lv_obj_set_flex_flow(s_footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_footer, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(s_footer, 12, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(s_footer, 22, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(s_footer, 26, LV_PART_MAIN);
     lv_obj_add_flag(s_footer, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_footer, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
 
+    static const int32_t kBarHeights[5] = {8, 16, 11, 19, 9};
     lv_obj_t* wave_row = lv_obj_create(s_footer);
     screen_strip_obj_chrome(wave_row);
     lv_obj_remove_flag(wave_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(wave_row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_size(wave_row, 220, 40);
+    lv_obj_set_size(wave_row, LV_SIZE_CONTENT, 40);
     lv_obj_set_style_bg_opa(wave_row, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_flex_flow(wave_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(wave_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
@@ -1920,21 +1889,14 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
         screen_strip_obj_chrome(bar);
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_size(bar, 4, 6);
+        lv_obj_set_size(bar, 4, kBarHeights[i]);
         lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
         lv_obj_set_style_bg_color(bar, lv_color_hex(kColorAccent), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
-        s_wave_bars[i] = bar;
     }
 
-    s_hint = lv_label_create(s_footer);
-    lv_label_set_text(s_hint, "正在连接…");
-    lv_obj_set_style_text_font(s_hint, &font_puhui_20_4, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_hint, lv_color_hex(0x7C8698), LV_PART_MAIN);
-    screen_make_input_passive(s_hint);
-
-    s_wave_timer = lv_timer_create(wave_timer_cb, 90, nullptr);
+    s_status_seeded = false;
     set_status_visual(State::Connecting, "连接中…");
 
     lv_obj_add_event_cb(screen, on_screen_unloaded, LV_EVENT_SCREEN_UNLOADED, nullptr);
