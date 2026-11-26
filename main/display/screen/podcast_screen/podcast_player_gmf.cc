@@ -31,6 +31,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "media_lib_adapter.h"
 #include "podcast_client.h"
@@ -44,6 +45,11 @@
 namespace {
 
 constexpr const char* TAG = "PodcastPlayer";
+
+// 播客后台任务统一用 PSRAM 当栈：真机内部 RAM 只剩几 KB 时，8~12KB 的栈会让
+// xTaskCreate 直接失败（表现为“创建播放请求失败”），TLS 也会因内部 RAM 不足
+// 握手慢到十几秒。任务随后用 vTaskDeleteWithCaps 退出。
+// 任务创建统一走 utils/psram_task.h 的 CreatePsramTask()。
 constexpr int kOutputSampleRate = 16000;
 // 独立 tag：池按 tag 取第一个实例，不能直接复用默认的 "io_http"。
 constexpr const char* kPodcastHttpTag = "io_http_podcast";

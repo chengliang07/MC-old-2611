@@ -23,6 +23,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
 #include "http.h"
@@ -34,10 +35,16 @@
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_puhui_30_4);
+LV_FONT_DECLARE(font_awesome_20_4);
+LV_FONT_DECLARE(font_awesome_30_4);
 
 namespace {
 
 constexpr const char* TAG = "PodcastScreen";
+
+// 播客后台任务统一用 PSRAM 当栈：真机内部 RAM 只剩几 KB 时，
+// 8~12KB 的栈会让 xTaskCreate 直接失败（表现为“创建播放请求失败”）。
+// 任务创建统一走 utils/psram_task.h 的 CreatePsramTask()。
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kListX = 20;
 constexpr int32_t kListY = 104;
@@ -957,31 +964,6 @@ void PrefetchFirstPlayUrl() {
     }
 }
 
-// 取标题首个字符（UTF-8），用作列表左侧的字母头像。
-std::string FirstGlyph(const std::string& text) {
-    size_t i = 0;
-    while (i < text.size() &&
-           (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) {
-        ++i;
-    }
-    if (i >= text.size()) {
-        return "-";
-    }
-    const unsigned char lead = static_cast<unsigned char>(text[i]);
-    size_t len = 1;
-    if ((lead & 0xE0) == 0xC0) {
-        len = 2;
-    } else if ((lead & 0xF0) == 0xE0) {
-        len = 3;
-    } else if ((lead & 0xF8) == 0xF0) {
-        len = 4;
-    }
-    if (i + len > text.size()) {
-        len = text.size() - i;
-    }
-    return text.substr(i, len);
-}
-
 // 列表标题必须保持单行：按显示宽度截断（CJK 记 2 个单位），
 // 否则标题折成两行会压到右下角的时长/完成状态。
 std::string TruncateForWidth(const std::string& text, size_t max_units) {
@@ -1034,6 +1016,72 @@ lv_obj_t* CreatePillButton(lv_obj_t* parent, int32_t x, int32_t y, int32_t w,
                                 LV_PART_MAIN);
     lv_obj_center(label);
     return button;
+}
+
+// ---- 列表头像图标 ---------------------------------------------------------
+// 数学=圆规、英语=地球、教育/家庭=大人带小孩，其余一律书本（讲书/读书类都适用）。
+enum class PodcastAvatar { Book, Compass, Globe, Family };
+
+PodcastAvatar AvatarForTitle(const std::string& title) {
+    if (title.find("数学") != std::string::npos ||
+        title.find("Math") != std::string::npos ||
+        title.find("math") != std::string::npos) {
+        return PodcastAvatar::Compass;
+    }
+    if (title.find("英语") != std::string::npos ||
+        title.find("英文") != std::string::npos ||
+        title.find("English") != std::string::npos ||
+        title.find("english") != std::string::npos) {
+        return PodcastAvatar::Globe;
+    }
+    if (title.find("教育") != std::string::npos ||
+        title.find("家庭") != std::string::npos ||
+        title.find("亲子") != std::string::npos) {
+        return PodcastAvatar::Family;
+    }
+    return PodcastAvatar::Book;
+}
+
+void CreateFontAwesomeIcon(lv_obj_t* parent, const char* utf8) {
+    lv_obj_t* icon = lv_label_create(parent);
+    lv_label_set_text(icon, utf8);
+    lv_obj_set_style_text_font(icon, &font_awesome_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_center(icon);
+    screen_make_input_passive(icon);
+}
+
+// 书本：字体里没有书本图标，用两页白色纸面拼出来，中间留书脊缝。
+void CreateBookIcon(lv_obj_t* parent) {
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t* page = lv_obj_create(parent);
+        lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(page, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_set_size(page, 13, 21);
+        lv_obj_set_pos(page, i == 0 ? 15 : 32, 20);
+        lv_obj_set_style_radius(page, 3, LV_PART_MAIN);
+        lv_obj_set_style_border_width(page, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(page, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(page, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(page, LV_OPA_COVER, LV_PART_MAIN);
+    }
+}
+
+// 家庭教育：字体里没有"大人拉小孩"，用一大一小两个人形拼出来。
+void CreateFamilyIcon(lv_obj_t* parent) {
+    lv_obj_t* adult = lv_label_create(parent);
+    lv_label_set_text(adult, "\xEF\x80\x87");
+    lv_obj_set_style_text_font(adult, &font_awesome_30_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(adult, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_pos(adult, 5, 11);
+    screen_make_input_passive(adult);
+
+    lv_obj_t* child = lv_label_create(parent);
+    lv_label_set_text(child, "\xEF\x80\x87");
+    lv_obj_set_style_text_font(child, &font_awesome_20_4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(child, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_pos(child, 33, 26);
+    screen_make_input_passive(child);
 }
 
 // 空列表 / 加载失败：居中提示 + 刷新按钮，避免用户卡在“暂无节目”无路可走。
@@ -1129,14 +1177,20 @@ void RebuildList() {
             avatar, lv_color_hex(is_current ? kColorAccent : 0x1E3A8A),
             LV_PART_MAIN);
         lv_obj_set_style_bg_grad_dir(avatar, LV_GRAD_DIR_VER, LV_PART_MAIN);
-        lv_obj_t* glyph = lv_label_create(avatar);
-        const std::string initial = FirstGlyph(item.title);
-        lv_label_set_text(glyph, initial.c_str());
-        lv_obj_set_style_text_font(glyph, &font_puhui_30_4, LV_PART_MAIN);
-        lv_obj_set_style_text_color(glyph, lv_color_hex(0xFFFFFF),
-                                    LV_PART_MAIN);
-        lv_obj_center(glyph);
-        screen_make_input_passive(glyph);
+        switch (AvatarForTitle(item.title)) {
+            case PodcastAvatar::Compass:
+                CreateFontAwesomeIcon(avatar, "\xEF\x85\x8E");  // 圆规
+                break;
+            case PodcastAvatar::Globe:
+                CreateFontAwesomeIcon(avatar, "\xEF\x82\xAC");  // 地球
+                break;
+            case PodcastAvatar::Family:
+                CreateFamilyIcon(avatar);
+                break;
+            case PodcastAvatar::Book:
+                CreateBookIcon(avatar);
+                break;
+        }
 
         lv_obj_t* title = lv_label_create(row);
         const std::string title_text = TruncateForWidth(item.title, 40);
