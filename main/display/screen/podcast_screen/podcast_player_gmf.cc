@@ -1,4 +1,5 @@
 #include "podcast_player.h"
+#include "utils/psram_task.h"
 
 #include <algorithm>
 #include <atomic>
@@ -349,7 +350,7 @@ void PostPlayerControl(bool pause) {
         bool pause;
     };
     auto* arg = new ControlArg{player, generation, pause};
-    if (xTaskCreate(
+    if (CreatePsramTask(
             [](void* data) {
                 std::unique_ptr<ControlArg> control(
                     static_cast<ControlArg*>(data));
@@ -368,7 +369,7 @@ void PostPlayerControl(bool pause) {
                 } else {
                     esp_audio_simple_player_resume(control->player);
                 }
-                vTaskDelete(nullptr);
+                DeleteCurrentPsramTask();
             },
             "podcast_ctl", 3072, arg, 4, nullptr) != pdPASS) {
         delete arg;
@@ -397,7 +398,7 @@ void FinishPlayTask(uint32_t generation = 0) {
             }
         }
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 bool WaitForPendingStop(esp_asp_handle_t player) {
@@ -488,7 +489,7 @@ void PodcastStopTask(void* data) {
             s_stop_cv.notify_all();
         }
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void DetachCurrentPlayback() {
@@ -512,7 +513,7 @@ void DetachCurrentPlayback() {
     TimingLog(s_generation.load(std::memory_order_relaxed), "detach_old");
     HeapLog("detach");
     auto* arg = new StopArg{old_player};
-    if (xTaskCreate(PodcastStopTask, "podcast_stop", 4096, arg, 4, nullptr) !=
+    if (CreatePsramTask(PodcastStopTask, "podcast_stop", 4096, arg, 4, nullptr) !=
         pdPASS) {
         delete arg;
         // 极少见：任务创建失败时退回同步停止，保证不会有两个声音同时播放。
@@ -559,7 +560,7 @@ void DeferredDestroyTask(void* data) {
     }
     HeapLog("deferred_destroy_done");
     ESP_LOGW(TAG, "deferred destroy done player=%p", arg->player);
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void ScheduleDeferredDestroy(esp_asp_handle_t player, PlayerContext* ctx,
@@ -569,7 +570,7 @@ void ScheduleDeferredDestroy(esp_asp_handle_t player, PlayerContext* ctx,
         return;
     }
     auto* arg = new DeferredDestroyArg{player, ctx, generation};
-    if (xTaskCreate(DeferredDestroyTask, "podcast_destroy", 4096, arg, 2,
+    if (CreatePsramTask(DeferredDestroyTask, "podcast_destroy", 4096, arg, 2,
                     nullptr) != pdPASS) {
         // 连清理任务都起不来：内存已经见底，只能记录（下次重启恢复）。
         ESP_LOGE(TAG, "deferred destroy task failed, player=%p", player);
@@ -1214,7 +1215,7 @@ void PodcastStartTask(void* arg) {
     for (int i = 0; i < 2000; ++i) {
         if (generation != s_generation.load(std::memory_order_acquire)) {
             delete play_arg;
-            vTaskDelete(nullptr);
+            DeleteCurrentPsramTask();
             return;
         }
         {
@@ -1232,7 +1233,7 @@ void PodcastStartTask(void* arg) {
         std::lock_guard<std::mutex> lock(s_player_mutex);
         if (ready &&
             generation == s_generation.load(std::memory_order_acquire)) {
-            started = xTaskCreate(PodcastPlayTask, "podcast_play", 8192,
+            started = CreatePsramTask(PodcastPlayTask, "podcast_play", 8192,
                                   play_arg, 5, &s_play_task) == pdPASS;
             if (!started) {
                 s_play_task = nullptr;
@@ -1245,7 +1246,7 @@ void PodcastStartTask(void* arg) {
             Emit(PodcastPlayerEvent::Error, "播放器正忙，请稍后重试");
         }
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 }  // namespace
@@ -1296,7 +1297,7 @@ static bool StartInternal(const std::string& url, std::string& error,
         }
         s_base_ms.store(base_ms, std::memory_order_relaxed);
         s_clock_us.store(0, std::memory_order_relaxed);
-        if (xTaskCreate(PodcastStartTask, "podcast_start", 4096, arg, 4,
+        if (CreatePsramTask(PodcastStartTask, "podcast_start", 4096, arg, 4,
                         nullptr) != pdPASS) {
             delete arg;
             error = "创建播放任务失败";
@@ -1324,14 +1325,14 @@ void PodcastPrepareWatchdog(void* arg) {
         if (!s_prepare_mode.load(std::memory_order_acquire) ||
             s_prepare_generation.load(std::memory_order_acquire) !=
                 generation) {
-            vTaskDelete(nullptr);
+            DeleteCurrentPsramTask();
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     ESP_LOGW(TAG, "prepare timeout, cancel prepared player");
     PodcastPlayer::Stop();
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 }  // namespace
 
@@ -1352,7 +1353,7 @@ bool PodcastPlayer::Prepare(const std::string& url, std::string& error) {
     }
     const uint32_t generation =
         s_prepare_generation.load(std::memory_order_acquire);
-    if (xTaskCreate(
+    if (CreatePsramTask(
             PodcastPrepareWatchdog, "podcast_prep", 3072,
             reinterpret_cast<void*>(static_cast<uintptr_t>(generation)), 2,
             nullptr) != pdPASS) {

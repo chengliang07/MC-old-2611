@@ -1,4 +1,5 @@
 #include "podcast_screen.h"
+#include "utils/psram_task.h"
 
 #include <algorithm>
 #include <atomic>
@@ -498,7 +499,7 @@ void AudioCacheWorker(void* data) {
         s_download_generation.load(std::memory_order_acquire)) {
         s_download_running.store(false, std::memory_order_release);
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void StartAudioCacheWorker() {
@@ -526,7 +527,7 @@ void StartAudioCacheWorker() {
     for (size_t i = 0; i < count; ++i) {
         arg->ids.push_back(s_items[i].id);
     }
-    if (xTaskCreate(AudioCacheWorker, "podcast_cache", 8192, arg, 2,
+    if (CreatePsramTask(AudioCacheWorker, "podcast_cache", 8192, arg, 2,
                     nullptr) != pdPASS) {
         delete arg;
         if (generation ==
@@ -737,7 +738,7 @@ void BeginPlayAt(size_t index) {
     context->podcast_id = item.id;
     context->title = item.title;
     context->click_us = s_click_us;
-    if (xTaskCreate(
+    if (CreatePsramTask(
             [](void* arg) {
                 auto* result = static_cast<ResolveResult*>(arg);
                 std::string error;
@@ -824,7 +825,7 @@ void BeginPlayAt(size_t index) {
                     result) != LV_RESULT_OK) {
                     delete result;
                 }
-                vTaskDelete(nullptr);
+                DeleteCurrentPsramTask();
             },
             "podcast_play_url", 8192, context, 4, nullptr) != pdPASS) {
         delete context;
@@ -930,7 +931,7 @@ void PrefetchFirstPlayUrlWorker(void* data) {
             ESP_LOGW(TAG, "prepare skipped: %s", prepare_error.c_str());
         }
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void PrefetchFirstPlayUrl() {
@@ -950,7 +951,7 @@ void PrefetchFirstPlayUrl() {
     for (size_t i = 0; i < count; ++i) {
         arg->ids.push_back(s_items[i].id);
     }
-    if (xTaskCreate(PrefetchFirstPlayUrlWorker, "podcast_prefetch", 12288, arg,
+    if (CreatePsramTask(PrefetchFirstPlayUrlWorker, "podcast_prefetch", 12288, arg,
                     3, nullptr) != pdPASS) {
         delete arg;
     }
@@ -1237,7 +1238,7 @@ void StartLoadWorker(bool manual_refresh) {
     auto* context = new LoadResult{};
     context->session = session;
     context->generation = generation;
-    if (xTaskCreate(
+    if (CreatePsramTask(
             [](void* arg) {
                 auto* result = static_cast<LoadResult*>(arg);
                 std::string error;
@@ -1258,7 +1259,7 @@ void StartLoadWorker(bool manual_refresh) {
                     }
                     delete result;
                 }
-                vTaskDelete(nullptr);
+                DeleteCurrentPsramTask();
             },
             "podcast_list", 8192, context, 4, nullptr) != pdPASS) {
         if (generation ==

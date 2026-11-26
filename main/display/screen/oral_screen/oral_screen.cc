@@ -1,4 +1,5 @@
 #include "oral_screen.h"
+#include "utils/psram_task.h"
 
 #include <atomic>
 #include <cctype>
@@ -769,7 +770,7 @@ void audio_playback_task(void* /*arg*/) {
     while (true) {
         if (s_stop_requested.load(std::memory_order_acquire)) {
             s_audio_task_running.store(false, std::memory_order_release);
-            vTaskDelete(nullptr);
+            DeleteCurrentPsramTask();
             return;
         }
         AudioChunk chunk;
@@ -790,7 +791,7 @@ void audio_playback_task(void* /*arg*/) {
                 if (!s_audio_chunks.empty()) continue;
                 s_audio_task_running.store(false, std::memory_order_release);
             }
-            vTaskDelete(nullptr);
+            DeleteCurrentPsramTask();
             return;
         }
         if (chunk.generation != s_generation.load(std::memory_order_acquire)) continue;
@@ -842,7 +843,7 @@ void queue_audio_output(const std::vector<int16_t>& output) {
         s_audio_bytes += bytes;
     }
     if (!s_audio_task_running.load(std::memory_order_acquire)) {
-        if (xTaskCreate(audio_playback_task, "oral_audio", 3584, nullptr, 3, nullptr) == pdPASS) {
+        if (CreatePsramTask(audio_playback_task, "oral_audio", 3584, nullptr, 3, nullptr) == pdPASS) {
             s_audio_task_running.store(true, std::memory_order_release);
         } else {
             clear_audio_queue();
@@ -916,7 +917,7 @@ void tx_task(void* /*arg*/) {
     }
     s_tx_stop.store(true, std::memory_order_release);
     s_tx_running.store(false, std::memory_order_release);
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void send_ws_text(const char* text) {
@@ -1459,7 +1460,7 @@ void worker_task(void* /*arg*/) {
         post_ui(session, State::Error, "音频未就绪", BubbleRole::Assistant, nullptr);
         s_worker_task = nullptr;
         s_worker_running.store(false, std::memory_order_release);
-        vTaskDelete(nullptr);
+        DeleteCurrentPsramTask();
         return;
     }
 
@@ -1500,7 +1501,7 @@ void worker_task(void* /*arg*/) {
 #endif
         clear_tx_queue();
         s_tx_stop.store(false, std::memory_order_release);
-        if (xTaskCreate(tx_task, "oral_tx", 6144, nullptr, 5, nullptr) != pdPASS) {
+        if (CreatePsramTask(tx_task, "oral_tx", 6144, nullptr, 5, nullptr) != pdPASS) {
             // 建不起发送任务：退化为原来同步发，至少不丢音频。
             s_tx_stop.store(true, std::memory_order_release);
             ESP_LOGE(TAG, "tx task create failed");
@@ -1547,7 +1548,7 @@ void worker_task(void* /*arg*/) {
             },
             nullptr);
     }
-    vTaskDelete(nullptr);
+    DeleteCurrentPsramTask();
 }
 
 void CancelStartRetry() {
@@ -1625,7 +1626,7 @@ void start_session() {
     s_worker_running.store(true, std::memory_order_release);
     // 这个任务里同时做 DNS 解析、TLS 握手和 WebSocket 升级，
     // 8KB 栈在弱网/证书链较长时余量太小，加到 12KB。
-    if (xTaskCreate(worker_task, "oral_ws", 12288, nullptr, 4, &s_worker_task) != pdPASS) {
+    if (CreatePsramTask(worker_task, "oral_ws", 12288, nullptr, 4, &s_worker_task) != pdPASS) {
         s_worker_running.store(false, std::memory_order_release);
         s_worker_task = nullptr;
         post_ui(s_session.load(), State::Error, "启动口语会话失败", BubbleRole::Assistant, nullptr);
