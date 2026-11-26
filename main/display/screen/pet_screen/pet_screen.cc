@@ -53,6 +53,7 @@ struct PetUi {
     lv_timer_t* blink_timer = nullptr;
     lv_timer_t* wander_timer = nullptr;
     lv_timer_t* speak_timer = nullptr;
+    lv_timer_t* stomp_timer = nullptr;
     bool use_image_art = true;
 };
 
@@ -68,6 +69,12 @@ enum class PetMood : uint8_t {
     Celebrate,
     Listen,
     Speak,
+    Wave,
+    Stretch,
+    StompL,
+    StompR,
+    Star,
+    Wink,
 };
 
 const char* PetImagePath(PetMood mood, bool egg) {
@@ -90,6 +97,18 @@ const char* PetImagePath(PetMood mood, bool egg) {
             // 说话两帧：张嘴 / 微张，由 s_speak_frame 轮换做口型。
             return s_speak_frame ? "A:ic_pet_speaking.spng"
                                  : "A:ic_pet_speaking_soft.spng";
+        case PetMood::Wave:
+            return "A:ic_pet_wave.spng";
+        case PetMood::Stretch:
+            return "A:ic_pet_stretch.spng";
+        case PetMood::StompL:
+            return "A:ic_pet_stomp_l.spng";
+        case PetMood::StompR:
+            return "A:ic_pet_stomp_r.spng";
+        case PetMood::Star:
+            return "A:ic_pet_star.spng";
+        case PetMood::Wink:
+            return "A:ic_pet_wink.spng";
         case PetMood::Idle:
         default:
             return "A:ic_pet_idle.spng";
@@ -139,6 +158,8 @@ std::atomic<uint32_t> s_request_generation{0};
 
 // 互动：随机走动 / 打盹 / 内容触发的表情。
 int32_t s_walk_offset = 0;        // 相对 s_body_base_x 的横向偏移
+uint8_t s_stomp_phase = 0;        // 跺脚帧序号
+bool s_turn_left = false;         // 下一次转身方向
 uint32_t s_last_active_ms = 0;    // 最近一次交互（点按 / 语音）时刻
 bool s_has_transient = false;     // 瞬时表情是否生效
 PetMood s_transient_face = PetMood::Idle;
@@ -155,6 +176,7 @@ uint32_t s_reply_until_ms = 0;
 // 宠物页只负责字幕和表情。状态由 LVGL 定时器轮询，跨线程不碰 LVGL。
 DeviceState s_voice_state = kDeviceStateUnknown;
 bool s_voice_enabled = false;
+bool s_voice_paused_for_menu = false;
 lv_timer_t* s_voice_timer = nullptr;
 
 void StartIdleMotion();
@@ -840,6 +862,10 @@ void StopIdleTimer() {
         lv_timer_delete(s_ui.wander_timer);
         s_ui.wander_timer = nullptr;
     }
+    if (s_ui.stomp_timer != nullptr) {
+        lv_timer_delete(s_ui.stomp_timer);
+        s_ui.stomp_timer = nullptr;
+    }
     StopSpeakFrames();
     s_blink_step = 0;
     s_has_transient = false;
@@ -870,6 +896,8 @@ void ResetBodyTransform() {
         return;
     }
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_x(body, 256, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_y(body, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(body, s_body_scale_base,
                                          LV_PART_MAIN);
@@ -886,6 +914,8 @@ void StartIdleMotion() {
     lv_obj_set_x(body, s_body_base_x + s_walk_offset);
     lv_obj_set_y(body, s_body_base_y);
     lv_obj_set_style_transform_rotation(body, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_x(body, 256, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_y(body, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(body, s_body_scale_base,
                                          LV_PART_MAIN);
@@ -927,6 +957,11 @@ void AnimSetScale(void* var, int32_t value) {
                                      LV_PART_MAIN);
 }
 
+void AnimSetScaleX(void* var, int32_t value) {
+    lv_obj_set_style_transform_scale_x(static_cast<lv_obj_t*>(var), value,
+                                       LV_PART_MAIN);
+}
+
 // 所有小动作结束后统一回位：位置、旋转、缩放、表情、呼吸。
 void FinishMotion(lv_anim_t* finished) {
     auto* pet = static_cast<lv_obj_t*>(lv_anim_get_user_data(finished));
@@ -936,6 +971,8 @@ void FinishMotion(lv_anim_t* finished) {
     lv_obj_set_x(pet, s_body_base_x + s_walk_offset);
     lv_obj_set_y(pet, s_body_base_y);
     lv_obj_set_style_transform_rotation(pet, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_x(pet, 256, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_y(pet, 256, LV_PART_MAIN);
     if (!IsEggStage()) {
         lv_obj_set_style_transform_scale(pet, s_body_scale_base, LV_PART_MAIN);
     }
@@ -971,44 +1008,74 @@ void PlayPetRoll() {
     lv_anim_start(&anim);
 }
 
-// 跺脚：连续几下小的上下弹动。
+// 跺脚：左右脚分开交替抬起来，脚落地时身体跟着沉一下。
+void EndStomp() {
+    if (s_ui.stomp_timer != nullptr) {
+        lv_timer_delete(s_ui.stomp_timer);
+        s_ui.stomp_timer = nullptr;
+    }
+    lv_obj_t* body = s_ui.body;
+    if (body != nullptr) {
+        lv_obj_set_y(body, s_body_base_y);
+    }
+    if (body == s_ui.body &&
+        s_screen_active.load(std::memory_order_relaxed)) {
+        ApplyFace(VoiceOverrideActive()
+                      ? VoiceMood()
+                      : (s_has_transient ? s_transient_face : s_base_mood));
+        lv_async_call(RestartIdleAsync, body);
+    }
+}
+
+void OnStompTick(lv_timer_t* /*timer*/) {
+    lv_obj_t* body = s_ui.body;
+    if (!s_screen_active.load(std::memory_order_relaxed) ||
+        body == nullptr) {
+        EndStomp();
+        return;
+    }
+    ++s_stomp_phase;
+    const bool left = (s_stomp_phase & 1) == 0;
+    s_mood = left ? PetMood::StompL : PetMood::StompR;
+    lv_image_set_src(body, PetImagePath(s_mood, false));
+    lv_obj_set_y(body, s_body_base_y + (left ? -3 : 0));
+    if (s_stomp_phase >= 6) {
+        EndStomp();
+    }
+}
+
 void PlayStomp() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
     }
     lv_anim_delete(body, nullptr);
-
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, body);
-    lv_anim_set_user_data(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetY);
-    lv_anim_set_values(&anim, 0, -7);
-    lv_anim_set_duration(&anim, 90);
-    lv_anim_set_playback_duration(&anim, 90);
-    lv_anim_set_repeat_count(&anim, 3);
-    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
-    lv_anim_set_completed_cb(&anim, FinishMotion);
-    lv_anim_start(&anim);
+    ResetBodyTransform();
+    s_stomp_phase = 0;
+    if (s_ui.stomp_timer == nullptr) {
+        s_ui.stomp_timer = lv_timer_create(OnStompTick, 140, nullptr);
+    }
 }
 
-// 挥手：左右晃两下。
+// 挥手：举起一只手，身体左右晃两下。
 void PlayWave() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
     }
     lv_anim_delete(body, nullptr);
+    ResetBodyTransform();
+    s_mood = PetMood::Wave;
+    lv_image_set_src(body, PetImagePath(PetMood::Wave, false));
 
     lv_anim_t anim;
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, body);
     lv_anim_set_user_data(&anim, body);
     lv_anim_set_exec_cb(&anim, AnimSetRotation);
-    lv_anim_set_values(&anim, 0, -140);
-    lv_anim_set_duration(&anim, 150);
-    lv_anim_set_playback_duration(&anim, 150);
+    lv_anim_set_values(&anim, 0, -110);
+    lv_anim_set_duration(&anim, 160);
+    lv_anim_set_playback_duration(&anim, 160);
     lv_anim_set_repeat_count(&anim, 2);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_set_completed_cb(&anim, FinishMotion);
@@ -1037,33 +1104,42 @@ void PlayHeadTilt() {
     lv_anim_start(&anim);
 }
 
-// 转一圈。
-void PlaySpin() {
+// 左右转：横向压扁模拟转身，不再整只翻过去（脚朝上很难看）。
+void PlayTurn() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr) {
         return;
     }
     lv_anim_delete(body, nullptr);
+    ResetBodyTransform();
+    s_turn_left = !s_turn_left;
+    lv_obj_set_x(body, s_body_base_x + s_walk_offset +
+                           (s_turn_left ? -16 : 16));
 
     lv_anim_t anim;
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, body);
     lv_anim_set_user_data(&anim, body);
-    lv_anim_set_exec_cb(&anim, AnimSetRotation);
-    lv_anim_set_values(&anim, 0, 3600);
-    lv_anim_set_duration(&anim, 720);
+    lv_anim_set_exec_cb(&anim, AnimSetScaleX);
+    lv_anim_set_values(&anim, 256, 108);
+    lv_anim_set_duration(&anim, 260);
+    lv_anim_set_playback_duration(&anim, 300);
+    lv_anim_set_playback_delay(&anim, 120);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_set_completed_cb(&anim, FinishMotion);
     lv_anim_start(&anim);
 }
 
-// 伸懒腰：整体放大一下再缩回。
+// 伸懒腰：两只手举起来，身体跟着拔高。
 void PlayStretch() {
     lv_obj_t* body = s_ui.body;
     if (body == nullptr || IsEggStage()) {
         return;
     }
     lv_anim_delete(body, nullptr);
+    ResetBodyTransform();
+    s_mood = PetMood::Stretch;
+    lv_image_set_src(body, PetImagePath(PetMood::Stretch, false));
 
     lv_anim_t anim;
     lv_anim_init(&anim);
@@ -1121,27 +1197,33 @@ void WalkToRandom() {
 
 // 点按：随机做一个小动作，不再顺手打开语音会话（语音只靠唤醒词）。
 void PlayRandomReaction() {
+    if (s_ui.stomp_timer != nullptr) {
+        EndStomp();
+    }
     ResetBodyTransform();
     const uint32_t roll = esp_random() % 100;
-    if (roll < 20) {
+    if (roll < 18) {
         WalkToRandom();
-    } else if (roll < 34) {
+    } else if (roll < 30) {
         PlayPetRoll();       // 跳一下
-    } else if (roll < 48) {
-        PlayStomp();         // 跺脚
-    } else if (roll < 62) {
-        PlayWave();          // 挥手
-    } else if (roll < 74) {
+    } else if (roll < 42) {
+        PlayStomp();         // 左右脚交替跺
+    } else if (roll < 54) {
+        PlayWave();          // 举起一只手挥
+    } else if (roll < 64) {
         PlayHeadTilt();      // 歪头
-    } else if (roll < 84) {
-        PlaySpin();          // 转一圈
-    } else if (roll < 92) {
-        PlayStretch();       // 伸懒腰
-    } else if (roll < 97) {
+    } else if (roll < 74) {
+        PlayTurn();          // 左右转身
+    } else if (roll < 82) {
+        PlayStretch();       // 举起两只手伸懒腰
+    } else if (roll < 90) {
+        ApplyTransientFace(PetMood::Star, 1800);   // 星星眼
+        PlayPetRoll();
+    } else if (roll < 96) {
         ApplyTransientFace(PetMood::Happy, 1600);
         PlayPetRoll();
     } else {
-        ApplyTransientFace(PetMood::Curious, 2400);
+        ApplyTransientFace(PetMood::Wink, 2000);   // 眨一只眼
     }
 }
 
@@ -1153,7 +1235,8 @@ void OnWanderTick(lv_timer_t* /*timer*/) {
     if (VoiceOverrideActive() || s_busy.load(std::memory_order_relaxed)) {
         return;
     }
-    if (s_mood == PetMood::Speak || s_has_transient) {
+    if (s_mood == PetMood::Speak || s_has_transient ||
+        s_ui.stomp_timer != nullptr) {
         return;
     }
     if (s_mood == PetMood::Sleep) {
@@ -1214,7 +1297,9 @@ void StartIdleTimer() {
             if (!s_screen_active.load(std::memory_order_relaxed) ||
                 s_ui.body == nullptr || IsEggStage() ||
                 s_mood == PetMood::Sleep || s_mood == PetMood::Happy ||
-                s_mood == PetMood::Celebrate || s_mood == PetMood::Speak) {
+                s_mood == PetMood::Celebrate || s_mood == PetMood::Speak ||
+                s_mood == PetMood::Wave || s_mood == PetMood::Stretch ||
+                s_mood == PetMood::StompL || s_mood == PetMood::StompR) {
                 s_blink_step = 0;
                 lv_timer_set_period(timer, 4500);
                 return;
@@ -1322,6 +1407,13 @@ void CloseMenu() {
         lv_obj_delete(s_ui.menu);
         s_ui.menu = nullptr;
     }
+    // 菜单是为了点开应用才暂停语音的；如果只是关掉菜单，就把语音恢复回来。
+    if (s_voice_paused_for_menu) {
+        s_voice_paused_for_menu = false;
+        if (s_screen_active.load(std::memory_order_relaxed)) {
+            StartVoiceUi();
+        }
+    }
 }
 
 // 弹窗是在自己的事件回调里关掉的，直接删父对象不安全，统一延后一拍。
@@ -1332,6 +1424,8 @@ void CloseMenuAsync(void* /*arg*/) {
 void OnMenuEntryClicked(lv_event_t* event) {
     const auto action = static_cast<MenuAction>(reinterpret_cast<uintptr_t>(
         lv_event_get_user_data(event)));
+    // 要跳去别的应用了：不要恢复语音，交给页面 unload 收尾。
+    s_voice_paused_for_menu = false;
     lv_async_call(CloseMenuAsync, nullptr);
     switch (action) {
         case MenuAction::English:
@@ -1422,6 +1516,11 @@ void BuildMenu() {
 }
 
 void OnEggClicked(lv_event_t* /*event*/) {
+    // 弹菜单前先停掉语音会话：唤醒态下会话占用比平时大，进应用前先释放。
+    if (s_ui.menu == nullptr && s_voice_enabled) {
+        StopVoiceUi();
+        s_voice_paused_for_menu = true;
+    }
     BuildMenu();
 }
 
@@ -1650,6 +1749,7 @@ void OnScreenDeleted(lv_event_t* event) {
     StopIdleTimer();
     s_walk_offset = 0;
     s_has_pending_reaction = false;
+    s_voice_paused_for_menu = false;
     s_ui = PetUi{};
     s_bound_screen = nullptr;
 }

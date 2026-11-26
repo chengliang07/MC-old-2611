@@ -134,18 +134,30 @@ def draw_body(c: PixelCanvas) -> None:
     c.ellipse(36.0, 63.5, 6.0, 4.0, "cream")
 
 
-def draw_wings(c: PixelCanvas) -> None:
-    c.ellipse(24.0, 61.0, 3.6, 5.4, "outline")
-    c.ellipse(24.0, 61.0, 2.8, 4.6, "brown_dark")
-    c.ellipse(48.0, 61.0, 3.6, 5.4, "outline")
-    c.ellipse(48.0, 61.0, 2.8, 4.6, "brown_dark")
+def draw_wings(c: PixelCanvas, skip_left: bool = False,
+               skip_right: bool = False) -> None:
+    if not skip_left:
+        c.ellipse(24.0, 61.0, 3.6, 5.4, "outline")
+        c.ellipse(24.0, 61.0, 2.8, 4.6, "brown_dark")
+    if not skip_right:
+        c.ellipse(48.0, 61.0, 3.6, 5.4, "outline")
+        c.ellipse(48.0, 61.0, 2.8, 4.6, "brown_dark")
 
 
-def draw_feet(c: PixelCanvas) -> None:
-    for x0 in (31, 38):
-        c.rect(x0, 66, x0 + 3, 68, "outline")
-        c.rect(x0 + 1, 66, x0 + 2, 68, "orange")
-        c.hline(x0 + 1, x0 + 2, 69, "orange_dark")
+def draw_raised_wing(c: PixelCanvas, cx: float, cy: float) -> None:
+    """举起来的那只手：画在头部之上，贴着脑袋外侧，朝上。"""
+    c.ellipse(cx, cy, 5.4, 8.0, "outline")
+    c.ellipse(cx, cy, 4.5, 7.1, "brown_dark")
+    c.ellipse(cx, cy - 3.0, 2.8, 3.4, "cream")
+    c.ellipse(cx, cy - 4.2, 1.4, 1.6, "cream_light")
+
+
+def draw_feet(c: PixelCanvas, lift_left: int = 0, lift_right: int = 0) -> None:
+    for x0, lift in ((31, lift_left), (38, lift_right)):
+        y0 = 66 - lift
+        c.rect(x0, y0, x0 + 3, y0 + 2, "outline")
+        c.rect(x0 + 1, y0, x0 + 2, y0 + 2, "orange")
+        c.hline(x0 + 1, x0 + 2, y0 + 3, "orange_dark")
 
 
 def draw_head(c: PixelCanvas) -> None:
@@ -208,6 +220,28 @@ def draw_eye(c: PixelCanvas, cx: float, cy: float, mood: str,
                int(cx + dx), int(cy + dy + 1), "eye_black")
         return
 
+    if mood == "star":
+        # 星星眼：白眼球里一颗四角星（菱形亮片）。
+        c.ellipse(cx, cy, 7.4 * s, 7.0 * s, "outline")
+        c.ellipse(cx, cy, 6.4 * s, 6.0 * s, "eye_white")
+        ix, iy = int(cx), int(cy)
+        star = (
+            "...#...",
+            "..###..",
+            ".#####.",
+            "#######",
+            ".#####.",
+            "..###..",
+            "...#...",
+        )
+        for row, line in enumerate(star):
+            for col, ch in enumerate(line):
+                if ch == "#":
+                    c.set(ix - 3 + col, iy - 3 + row, "eye_blue")
+        c.set(ix, iy, "eye_white")
+        c.set(ix - 1, iy - 1, "eye_white")
+        return
+
     c.ellipse(cx + pupil_dx, cy + pupil_dy, pupil_r, pupil_r, "eye_black")
     c.ellipse(cx + pupil_dx - 1.2 * s, cy + pupil_dy - 1.2 * s,
               1.1 * s, 1.1 * s, "eye_blue")
@@ -216,6 +250,11 @@ def draw_eye(c: PixelCanvas, cx: float, cy: float, mood: str,
 
 
 def draw_eyes(c: PixelCanvas, mood: str) -> None:
+    if mood == "wink":
+        # 眨一只眼：左眼正常，右眼闭成一条线。
+        draw_eye(c, 26.0, 33.0, "idle", scale=1.55)
+        draw_eye(c, 46.0, 33.0, "blink", scale=1.55)
+        return
     draw_eye(c, 26.0, 33.0, mood, scale=1.55)
     draw_eye(c, 46.0, 33.0, mood, scale=1.55)
 
@@ -294,14 +333,23 @@ def build_state(mood: str) -> PixelCanvas:
         return c
 
     tall_ears = mood == "listening"
+    # 动作帧：挥手举一只手、伸懒腰举两只手、跺脚左右脚交替抬起。
+    hand_left = mood == "stretch"
+    hand_right = mood in ("stretch", "wave")
     draw_ear_tufts(c, tall=tall_ears)
     draw_body(c)
-    draw_feet(c)
-    draw_wings(c)
+    draw_feet(c,
+              lift_left=3 if mood == "stomp_r" else 0,
+              lift_right=3 if mood == "stomp_l" else 0)
+    draw_wings(c, skip_left=hand_left, skip_right=hand_right)
     draw_head(c)
+    if hand_left:
+        draw_raised_wing(c, 5.8, 34.0)
+    if hand_right:
+        draw_raised_wing(c, 66.2, 34.0)
     draw_eyes(c, mood)
     draw_beak(c, openness=BEAK_OPENNESS.get(mood, 0))
-    if mood == "happy":
+    if mood in ("happy", "star"):
         draw_blush(c)
     if mood == "listening":
         draw_sound_waves(c)
@@ -326,6 +374,12 @@ STATES = [
     ("speaking", "ic_pet_speaking"),
     ("speaking_soft", "ic_pet_speaking_soft"),
     ("sleep", "ic_pet_sleep"),
+    ("wave", "ic_pet_wave"),
+    ("stretch", "ic_pet_stretch"),
+    ("stomp_l", "ic_pet_stomp_l"),
+    ("stomp_r", "ic_pet_stomp_r"),
+    ("star", "ic_pet_star"),
+    ("wink", "ic_pet_wink"),
 ]
 
 
