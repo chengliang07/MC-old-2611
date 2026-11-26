@@ -702,6 +702,9 @@ void BeginPlayAt(size_t index) {
     // 点击即关 WiFi 省电：省电模式下首包要等 DTIM，实测"出声慢 + 卡顿"主要由它造成。
     // 播放结束时由 AudioService::SetExternalPlayback(false) 恢复。
     Board::GetInstance().SetPowerSaveMode(false);
+    // 点击后立刻掐掉后台预取：它和这次建流抢 TLS 会话与内部 RAM，
+    // 实测"点第一条要等十几秒、之后才突然出声"就是这种抢占造成的。
+    s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
     const PodcastItem item = s_items[index];
     s_current_index = index;
     s_current_podcast_id = item.id;
@@ -763,12 +766,21 @@ void BeginPlayAt(size_t index) {
                     const PodcastPlayInfo play =
                         PodcastClient::ResolvePlayUrl(result->podcast_id,
                                                      error);
+                    ESP_LOGI(TAG, "[timing] screen resolve id=%s ok=%d dt=%dms",
+                             result->podcast_id.c_str(), play.ok ? 1 : 0,
+                             static_cast<int>((esp_timer_get_time() -
+                                               result->click_us) /
+                                              1000));
                     if (!play.ok) {
                         result->error =
                             play.error.empty() ? error : play.error;
                     } else if (PodcastPlayer::PlayPrepared(
                                    play.url, error, result->click_us)) {
                         // 进入列表时已预播：这里几乎立即出声。
+                        ESP_LOGI(TAG, "[timing] screen prepared hit dt=%dms",
+                                 static_cast<int>((esp_timer_get_time() -
+                                                   result->click_us) /
+                                                  1000));
                         result->duration_seconds = play.duration_seconds;
                     } else {
                         PodcastPlayer::Stop();
@@ -852,7 +864,9 @@ void ClickWatchdogCb(lv_timer_t* timer) {
 
 void ArmClickWatchdog() {
     CancelClickWatchdog();
-    s_click_watchdog = lv_timer_create(ClickWatchdogCb, 8000, nullptr);
+    // 15 秒：正常建流 1~3 秒，留给慢链路余量；太早重试会把本来要成功的请求掐掉
+    // （实测 8 秒重试会出现"先报播放失败、随后又自己响了"）。
+    s_click_watchdog = lv_timer_create(ClickWatchdogCb, 15000, nullptr);
 }
 
 void OnPodcastClicked(lv_event_t* event) {
@@ -925,7 +939,7 @@ void PrefetchFirstPlayUrl() {
         return;
     }
     // 前 3 集都先取地址（串行）：点第 2、3 集时省掉 2~3 秒地址请求。
-    constexpr size_t kPrefetchCount = 3;
+    constexpr size_t kPrefetchCount = 1;
     auto* arg = new PrefetchTaskArg{};
     arg->session = CurrentSession();
     arg->generation =
@@ -1497,7 +1511,8 @@ void BuildHeader(lv_obj_t* screen) {
     lv_obj_set_style_text_font(title, &font_puhui_30_4, LV_PART_MAIN);
     lv_obj_set_style_text_color(title, lv_color_hex(kColorText),
                                 LV_PART_MAIN);
-    lv_obj_set_pos(title, 96, 16);
+    // 和返回按钮垂直居中对齐（直接写死 y 会因为字号行高不同而偏上）。
+    lv_obj_align_to(title, back, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
     screen_make_input_passive(title);
 
     lv_obj_t* refresh = lv_button_create(screen);
