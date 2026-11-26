@@ -952,6 +952,7 @@ constexpr AppEntry kApps[] = {
     {"calculator",     "计算器",     LaunchCalculator,    calculator_lifecycle_cb,    false},
     {"2048",           "2048",       LaunchGame2048,      game_2048_lifecycle_cb,     false},
     {"radio",          "电台",       LaunchRadio,         radio_lifecycle_cb,         true},
+    {"camera",         "相机",       LaunchCamera,        camera_lifecycle_cb,        false},
     // 系统项
     {"wifi",           "网络配置",   LaunchWifi,          wifi_lifecycle_cb,          false},
     {"settings",       "设置",       LaunchSettings,      settings_lifecycle_cb,      false},
