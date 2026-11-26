@@ -88,7 +88,9 @@ foreach ($scr in $table.Keys) {
     $items = $table[$scr]
     Write-Host ("屏幕 {0}：" -f $scr) -ForegroundColor White
     foreach ($it in $items) {
-        $line = "  {0,-6} internal {1,+5} KB   largest {2,+5} KB   psram {3,+6} KB   tasks {4,+3}" -f $it.Phase, $it.dInt, $it.dLargest, $it.dPsram, $it.dTasks
+        $sign = { param($v) if ($v -ge 0) { "+$v" } else { "$v" } }
+        $line = "  {0,-6} internal {1,6} KB   largest {2,6} KB   psram {3,7} KB   tasks {4,4}" -f `
+            $it.Phase, (& $sign $it.dInt), (& $sign $it.dLargest), (& $sign $it.dPsram), (& $sign $it.dTasks)
         if ($it.dInt -le -8 -or $it.dPsram -le -1024) { Write-Host $line -ForegroundColor Red } else { Write-Host $line }
     }
     $sumInt = ($items | Measure-Object -Property dInt -Sum).Sum
