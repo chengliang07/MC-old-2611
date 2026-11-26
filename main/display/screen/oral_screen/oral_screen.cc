@@ -144,8 +144,11 @@ lv_obj_t* s_chat = nullptr;
 // 状态胶囊：容器 + 发光圆点，颜色跟 State 走。
 lv_obj_t* s_status_pill = nullptr;
 lv_obj_t* s_status_dot = nullptr;
-// 底部标识：5 根静态电平条，纯装饰，不动。
+// 底部标识：5 根电平条。用户说话时轻微起伏，AI 回答时冻结，空闲时压平。
 lv_obj_t* s_footer = nullptr;
+lv_obj_t* s_wave_bars[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+lv_timer_t* s_wave_timer = nullptr;
+uint32_t s_wave_tick = 0;
 // 状态文案缓存：重建页面时清掉，保证首次一定落到新对象上。
 bool s_status_seeded = false;
 lv_obj_t* s_return_screen = nullptr;
@@ -214,7 +217,12 @@ void set_status_visual(State state, const char* text) {
     std::snprintf(last_text, sizeof(last_text), "%s", wanted);
 
     const uint32_t color = status_color(state);
-    if (!changed) return;
+    if (!changed) {
+        if (state == State::Listening && s_wave_timer != nullptr) {
+            lv_timer_resume(s_wave_timer);
+        }
+        return;
+    }
     if (s_status != nullptr) {
         lv_label_set_text(s_status, text != nullptr ? text : "");
         lv_obj_set_style_text_color(s_status, lv_color_hex(color), LV_PART_MAIN);
@@ -226,6 +234,43 @@ void set_status_visual(State state, const char* text) {
     if (s_status_pill != nullptr) {
         lv_obj_set_style_bg_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
         lv_obj_set_style_border_color(s_status_pill, lv_color_hex(color), LV_PART_MAIN);
+    }
+    // 波柱只在用户说话时动；回答态冻结、空闲态压平由 wave_timer_cb 处理。
+    if (state == State::Listening && s_wave_timer != nullptr) {
+        lv_timer_resume(s_wave_timer);
+    }
+}
+
+// 用户说话时 6 帧循环的柱高；回答态用固定的一组，表示“正在播报”。
+void wave_timer_cb(lv_timer_t* timer) {
+    static const uint8_t kFrames[6][5] = {
+        {10, 22, 14, 26, 12}, {16, 14, 26, 12, 22}, {22, 26, 12, 22, 14},
+        {26, 12, 22, 14, 26}, {14, 22, 12, 26, 16}, {12, 26, 16, 12, 22},
+    };
+    static const uint8_t kAnsweringBars[5] = {8, 16, 11, 19, 9};
+    if (s_footer == nullptr) {
+        lv_timer_pause(timer);
+        return;
+    }
+    const State state = s_state.load(std::memory_order_acquire);
+    if (state != State::Listening) {
+        if (s_wave_tick != 0) {
+            s_wave_tick = 0;
+            for (int i = 0; i < 5; ++i) {
+                if (s_wave_bars[i] == nullptr) continue;
+                lv_obj_set_height(s_wave_bars[i],
+                                  state == State::Answering
+                                      ? kAnsweringBars[i]
+                                      : 6);
+            }
+        }
+        lv_timer_pause(timer);
+        return;
+    }
+    const uint8_t* frame = kFrames[s_wave_tick % 6];
+    ++s_wave_tick;
+    for (int i = 0; i < 5; ++i) {
+        if (s_wave_bars[i] != nullptr) lv_obj_set_height(s_wave_bars[i], frame[i]);
     }
 }
 
@@ -398,7 +443,8 @@ bool response_says_goodbye() {
            text.find("bye") != std::string::npos;
 }
 
-void post_ui(uint32_t session, State state, const char* status,
+// 返回 false 表示这次 UI 投递没排上（LVGL 侧分配失败），调用方要把文本留着。
+bool post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user = false,
              bool reset_assistant = false, bool close_assistant = false,
              bool reset_user = false, bool replace_user = false);
@@ -414,8 +460,14 @@ void flush_stream_text(uint32_t session, bool close_assistant = false) {
         s_stream_text_ms = 0;
     }
     if (text.empty()) return;
-    post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant,
-            text.c_str(), false, false, close_assistant);
+    if (!post_ui(session, State::Answering, "回答中…", BubbleRole::Assistant,
+                 text.c_str(), false, false, close_assistant)) {
+        // UI 队列没排上：文本必须还回去，否则这一句在屏幕上永久消失。
+        std::lock_guard<std::mutex> lock(s_text_mutex);
+        s_stream_text = text + s_stream_text;
+        if (s_stream_text_ms == 0) s_stream_text_ms = now_ms();
+        ESP_LOGW(TAG, "flush requeue %u bytes", (unsigned)text.size());
+    }
 }
 
 struct WakeWordGuard {
@@ -439,7 +491,7 @@ void stop_barge_in_detection() {
     audio.EnableWakeWordDetection(false);
 }
 
-void post_ui(uint32_t session, State state, const char* status,
+bool post_ui(uint32_t session, State state, const char* status,
              BubbleRole role, const char* text, bool append_user,
              bool reset_assistant, bool close_assistant, bool reset_user,
              bool replace_user) {
@@ -524,7 +576,18 @@ void post_ui(uint32_t session, State state, const char* status,
             // 判过期而整条丢失（表现为只有第一句有气泡）。
             if (item->role != BubbleRole::User &&
                 item->generation != s_generation.load(std::memory_order_acquire)) {
-                return;
+                // 只有“封口”的那一批允许跨代：response.done 的 flush 排在
+                // 队列里时，下一轮 response.start 可能已经把 generation 加过，
+                // 旧逻辑会把最后整句直接丢掉（屏幕上少一句）。补一条独立
+                // 气泡，比吞掉整句好。
+                if (!item->close_assistant) return;
+                s_text = nullptr;
+                s_text_bubble = nullptr;
+                s_assistant_row = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(s_text_mutex);
+                    s_answer.clear();
+                }
             }
             if (item->append.empty() || s_chat == nullptr) return;
             if (item->append_user && item->role == BubbleRole::User && s_user_text_label != nullptr) {
@@ -598,6 +661,12 @@ void post_ui(uint32_t session, State state, const char* status,
                 s_text_layout_ms = 0;
             }
             bool is_user = item->role == BubbleRole::User;
+            // 占位投递和正文投递可能乱序：正文先建好气泡后，占位不能再补一条
+            // 空的 "…"，否则屏幕上会多出一个空白用户气泡。
+            if (is_user && !item->replace_user && s_user_text_label != nullptr &&
+                item->append == "…") {
+                return;
+            }
             lv_obj_t* row = lv_obj_create(s_chat);
             screen_strip_obj_chrome(row);
             lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -696,7 +765,9 @@ void post_ui(uint32_t session, State state, const char* status,
             scroll_chat_to_bottom();
         }, payload) != LV_RESULT_OK) {
         delete payload;
+        return false;
     }
+    return true;
 }
 
 void clear_audio_queue() {
@@ -1042,6 +1113,13 @@ void handle_json(const char* data, size_t len, uint32_t session) {
         }
     } else if (std::strcmp(type, "relay.user_transcript.done") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
+        // 排查“用户这句没上屏”：这行能区分是 relay 没发转写，还是 UI 吞了。
+        ESP_LOGI(TAG, "user_transcript.done len=%u pending=%d streamed=%d",
+                 (unsigned)(cJSON_IsString(text) && text->valuestring != nullptr
+                                ? std::strlen(text->valuestring)
+                                : 0),
+                 s_user_pending.load(std::memory_order_acquire) ? 1 : 0,
+                 s_user_streamed.load(std::memory_order_acquire) ? 1 : 0);
         s_user_transcript_closed.store(true, std::memory_order_release);
         if (s_user_pending.exchange(false, std::memory_order_acq_rel)) {
             // 没有增量、只给了整句：回填占位气泡
@@ -1709,6 +1787,11 @@ void on_screen_unloaded(lv_event_t* /*event*/) {
     s_status_pill = nullptr;
     s_status_dot = nullptr;
     s_footer = nullptr;
+    for (auto*& bar : s_wave_bars) bar = nullptr;
+    if (s_wave_timer != nullptr) {
+        lv_timer_delete(s_wave_timer);
+        s_wave_timer = nullptr;
+    }
 }
 
 lv_obj_t* create_label(lv_obj_t* parent, const char* text, const lv_font_t& font, lv_color_t color) {
@@ -1873,7 +1956,6 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
     lv_obj_add_flag(s_footer, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_footer, on_screen_clicked, LV_EVENT_CLICKED, nullptr);
 
-    static const int32_t kBarHeights[5] = {8, 16, 11, 19, 9};
     lv_obj_t* wave_row = lv_obj_create(s_footer);
     screen_strip_obj_chrome(wave_row);
     lv_obj_remove_flag(wave_row, LV_OBJ_FLAG_SCROLLABLE);
@@ -1889,14 +1971,16 @@ lv_obj_t* OralScreen::Create(lv_obj_t* return_screen) {
         screen_strip_obj_chrome(bar);
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_size(bar, 4, kBarHeights[i]);
+        lv_obj_set_size(bar, 4, 6);
         lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
         lv_obj_set_style_bg_color(bar, lv_color_hex(kColorAccent), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
+        s_wave_bars[i] = bar;
     }
 
     s_status_seeded = false;
+    s_wave_timer = lv_timer_create(wave_timer_cb, 90, nullptr);
     set_status_visual(State::Connecting, "连接中…");
 
     lv_obj_add_event_cb(screen, on_screen_unloaded, LV_EVENT_SCREEN_UNLOADED, nullptr);
