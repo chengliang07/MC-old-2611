@@ -1,4 +1,5 @@
 #include "pet_screen.h"
+#include <esp_heap_caps.h>
 
 #include <atomic>
 #include <cstdio>
@@ -1747,6 +1748,17 @@ void OnScreenDeleted(lv_event_t* event) {
     }
     StopVoiceUi();
     StopIdleTimer();
+
+    // 真机实测：每进一次宠物页，PSRAM 永久少约 3MB、内部 RAM 少约 20KB。
+    // 这一页要加载十几张 720x720 带透明的大图，怀疑是解码后的图元缓存没释放。
+    // 这里在屏幕销毁时丢掉图片缓存，并把前后 PSRAM 打出来验证。
+    const unsigned psram_before =
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+    lv_image_cache_drop(nullptr);
+    const unsigned psram_after =
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+    ESP_LOGI(TAG, "unload: psram %uKB -> %uKB (cache dropped %uKB)",
+             psram_before, psram_after, psram_after - psram_before);
     s_walk_offset = 0;
     s_has_pending_reaction = false;
     s_voice_paused_for_menu = false;
