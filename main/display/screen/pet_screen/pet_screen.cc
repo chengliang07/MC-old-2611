@@ -176,6 +176,7 @@ uint32_t s_reply_until_ms = 0;
 // 宠物页只负责字幕和表情。状态由 LVGL 定时器轮询，跨线程不碰 LVGL。
 DeviceState s_voice_state = kDeviceStateUnknown;
 bool s_voice_enabled = false;
+bool s_voice_paused_for_menu = false;
 lv_timer_t* s_voice_timer = nullptr;
 
 void StartIdleMotion();
@@ -1406,6 +1407,13 @@ void CloseMenu() {
         lv_obj_delete(s_ui.menu);
         s_ui.menu = nullptr;
     }
+    // 菜单是为了点开应用才暂停语音的；如果只是关掉菜单，就把语音恢复回来。
+    if (s_voice_paused_for_menu) {
+        s_voice_paused_for_menu = false;
+        if (s_screen_active.load(std::memory_order_relaxed)) {
+            StartVoiceUi();
+        }
+    }
 }
 
 // 弹窗是在自己的事件回调里关掉的，直接删父对象不安全，统一延后一拍。
@@ -1416,6 +1424,8 @@ void CloseMenuAsync(void* /*arg*/) {
 void OnMenuEntryClicked(lv_event_t* event) {
     const auto action = static_cast<MenuAction>(reinterpret_cast<uintptr_t>(
         lv_event_get_user_data(event)));
+    // 要跳去别的应用了：不要恢复语音，交给页面 unload 收尾。
+    s_voice_paused_for_menu = false;
     lv_async_call(CloseMenuAsync, nullptr);
     switch (action) {
         case MenuAction::English:
@@ -1506,6 +1516,11 @@ void BuildMenu() {
 }
 
 void OnEggClicked(lv_event_t* /*event*/) {
+    // 弹菜单前先停掉语音会话：唤醒态下会话占用比平时大，进应用前先释放。
+    if (s_ui.menu == nullptr && s_voice_enabled) {
+        StopVoiceUi();
+        s_voice_paused_for_menu = true;
+    }
     BuildMenu();
 }
 
@@ -1734,6 +1749,7 @@ void OnScreenDeleted(lv_event_t* event) {
     StopIdleTimer();
     s_walk_offset = 0;
     s_has_pending_reaction = false;
+    s_voice_paused_for_menu = false;
     s_ui = PetUi{};
     s_bound_screen = nullptr;
 }
