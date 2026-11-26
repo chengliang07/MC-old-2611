@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "home_screen/home_screen.h"
 #include "http.h"
@@ -37,6 +38,15 @@ LV_FONT_DECLARE(font_puhui_30_4);
 namespace {
 
 constexpr const char* TAG = "PodcastScreen";
+
+// 播客后台任务统一用 PSRAM 当栈：真机内部 RAM 只剩几 KB 时，
+// 8~12KB 的栈会让 xTaskCreate 直接失败（表现为“创建播放请求失败”）。
+BaseType_t SpawnPodcastTask(TaskFunction_t fn, const char* name,
+                            uint32_t stack_bytes, void* arg, UBaseType_t prio,
+                            TaskHandle_t* handle = nullptr) {
+    return xTaskCreateWithCaps(fn, name, stack_bytes, arg, prio, handle,
+                               MALLOC_CAP_SPIRAM);
+}
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kListX = 20;
 constexpr int32_t kListY = 104;
@@ -498,7 +508,7 @@ void AudioCacheWorker(void* data) {
         s_download_generation.load(std::memory_order_acquire)) {
         s_download_running.store(false, std::memory_order_release);
     }
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void StartAudioCacheWorker() {
@@ -526,7 +536,7 @@ void StartAudioCacheWorker() {
     for (size_t i = 0; i < count; ++i) {
         arg->ids.push_back(s_items[i].id);
     }
-    if (xTaskCreate(AudioCacheWorker, "podcast_cache", 8192, arg, 2,
+    if (SpawnPodcastTask(AudioCacheWorker, "podcast_cache", 8192, arg, 2,
                     nullptr) != pdPASS) {
         delete arg;
         if (generation ==
@@ -737,7 +747,7 @@ void BeginPlayAt(size_t index) {
     context->podcast_id = item.id;
     context->title = item.title;
     context->click_us = s_click_us;
-    if (xTaskCreate(
+    if (SpawnPodcastTask(
             [](void* arg) {
                 auto* result = static_cast<ResolveResult*>(arg);
                 std::string error;
@@ -824,7 +834,7 @@ void BeginPlayAt(size_t index) {
                     result) != LV_RESULT_OK) {
                     delete result;
                 }
-                vTaskDelete(nullptr);
+                vTaskDeleteWithCaps(nullptr);
             },
             "podcast_play_url", 8192, context, 4, nullptr) != pdPASS) {
         delete context;
@@ -930,7 +940,7 @@ void PrefetchFirstPlayUrlWorker(void* data) {
             ESP_LOGW(TAG, "prepare skipped: %s", prepare_error.c_str());
         }
     }
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void PrefetchFirstPlayUrl() {
@@ -950,7 +960,7 @@ void PrefetchFirstPlayUrl() {
     for (size_t i = 0; i < count; ++i) {
         arg->ids.push_back(s_items[i].id);
     }
-    if (xTaskCreate(PrefetchFirstPlayUrlWorker, "podcast_prefetch", 12288, arg,
+    if (SpawnPodcastTask(PrefetchFirstPlayUrlWorker, "podcast_prefetch", 12288, arg,
                     3, nullptr) != pdPASS) {
         delete arg;
     }
@@ -1237,7 +1247,7 @@ void StartLoadWorker(bool manual_refresh) {
     auto* context = new LoadResult{};
     context->session = session;
     context->generation = generation;
-    if (xTaskCreate(
+    if (SpawnPodcastTask(
             [](void* arg) {
                 auto* result = static_cast<LoadResult*>(arg);
                 std::string error;
@@ -1258,7 +1268,7 @@ void StartLoadWorker(bool manual_refresh) {
                     }
                     delete result;
                 }
-                vTaskDelete(nullptr);
+                vTaskDeleteWithCaps(nullptr);
             },
             "podcast_list", 8192, context, 4, nullptr) != pdPASS) {
         if (generation ==
