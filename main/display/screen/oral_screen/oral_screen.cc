@@ -67,8 +67,12 @@ constexpr int kMaxTextBytes = kMaxTextChars * 4 + 1;
 constexpr size_t kPlaybackSliceSamples = 1600;
 // 下行缓冲：relay 是突发投递（实测 0.32 s 音频 / 0.2 s 墙钟），
 // 192 KB（6 s）在长回答时会被顶满并丢弃最旧音频 —— 表现为“AI 吞字”。
-constexpr size_t kMaxAudioChunks = 32;
-constexpr size_t kMaxAudioBytes = 256 * 1024;
+// 4G 实测：256 KB 下行缓冲全在内部 RAM，留给 UartEthModem 的 DMA TX 缓冲
+// 只剩 20 KB 左右，日志里刷 "Failed to allocate TX buffer for queue"，
+// Send 单帧阻塞 250~450 ms，整条 worker 甚至 stall 8 秒。128 KB（约 2.7 s）
+// 足够吸收 relay 的突发投递，又不把内部堆榨干。
+constexpr size_t kMaxAudioChunks = 16;
+constexpr size_t kMaxAudioBytes = 128 * 1024;
 // 上行发送缓冲：采集只入队，网络再慢也不阻塞读麦（原来 Send 阻塞
 // 100–600ms 会直接丢掉 I2S DMA 里的麦克风样本）。
 constexpr size_t kMaxTxChunks = 8;
