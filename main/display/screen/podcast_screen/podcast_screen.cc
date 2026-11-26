@@ -935,10 +935,11 @@ void PrefetchFirstPlayUrlWorker(void* data) {
             continue;
         }
         if (SdCardManager::GetInstance().IsMounted()) {
-            // 有 SD 卡：直接把第一集整集存到本地，点播走文件，出声约 0.2 秒。
-            // 比"预开流"更彻底，也不会长期占着一条 TLS。
-            ESP_LOGI(TAG, "prefetch first episode to SD");
-            StartAudioCacheWorker(1);
+            // 有 SD 卡：后台按顺序把整集缓存到本地（最多 12 集，播放时自动让路）。
+            // 缓存过的那一集点播走文件，出声约 0.2 秒——不管用户点第几集，
+            // 只要它在后台已经轮到了就快。
+            ESP_LOGI(TAG, "prefetch episodes to SD");
+            StartAudioCacheWorker();
             continue;
         }
         std::string prepare_error;
