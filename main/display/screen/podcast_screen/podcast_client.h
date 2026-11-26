@@ -25,6 +25,8 @@ public:
     static std::string DeviceToken();
     // 提前做一次 DNS 解析：真机上首次解析常常要 1~3 秒，点击后再解析就是白等。
     static void WarmUpHost(const std::string& url);
+    // 直连 /stream 被拒（403/404）时调用：关掉直连，后续回退到 /play。
+    static void ReportDirectStreamFailure();
     // 只对自家域名（api_base 的 host）附 Bearer：签名音频地址在第三方域，
     // 不该带着设备令牌过去。
     static bool IsOwnHost(const std::string& url);
