@@ -9,6 +9,11 @@
 
 ## Firmware build policy
 
+- **烧录前必须先汇总所有模块分支（固定动作，不许只烧自己的改动）**：
+  1. 逐个检查 `english / oral / pet / podcast`：`git -C ../wt-<m> log --oneline main..HEAD`
+  2. 有已提交内容的就 `git merge --no-ff feat/<m>`；有冲突先解决再继续
+  3. 只合并**已提交**的内容；分支里还在改（未提交）的部分等它提交后再带
+  4. 编译烧录后，在报告里列出本次带进来的各分支提交，让用户知道设备上有什么
 - Before starting a GitHub Actions firmware build or flashing, report the intended changes and ask the user for confirmation.
 - Do not trigger a full firmware build for every small change; batch related fixes before building.
 
