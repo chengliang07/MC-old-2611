@@ -860,7 +860,7 @@ int PodcastOutCallback(uint8_t* data, int data_size, void* ctx) {
     if (!s_quick_url.load(std::memory_order_relaxed) &&
         !s_start_gate_done.exchange(true, std::memory_order_acq_rel)) {
         TimingLog(player_ctx->generation, "first_pcm_buffered");
-        WaitInitialBuffer(player_ctx, 48 * 1024, 200);
+        WaitInitialBuffer(player_ctx, 24 * 1024, 120);
         if (player_ctx->generation !=
                 s_generation.load(std::memory_order_acquire) ||
             !s_output_enabled.load(std::memory_order_acquire)) {

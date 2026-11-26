@@ -513,7 +513,7 @@ void AudioCacheWorker(void* data) {
     vTaskDeleteWithCaps(nullptr);
 }
 
-void StartAudioCacheWorker() {
+void StartAudioCacheWorker(size_t max_items = kMaxCachedEpisodes) {
     if (!s_screen_active.load(std::memory_order_acquire) ||
         s_items.empty()) {
         return;
@@ -532,8 +532,7 @@ void StartAudioCacheWorker() {
     const uint32_t generation = s_download_generation.fetch_add(1) + 1;
     arg->generation = generation;
     const size_t count =
-        s_items.size() < kMaxCachedEpisodes ? s_items.size()
-                                            : kMaxCachedEpisodes;
+        s_items.size() < max_items ? s_items.size() : max_items;
     arg->ids.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         arg->ids.push_back(s_items[i].id);
@@ -717,6 +716,9 @@ void BeginPlayAt(size_t index) {
     // 点击后立刻掐掉后台预取：它和这次建流抢 TLS 会话与内部 RAM，
     // 实测"点第一条要等十几秒、之后才突然出声"就是这种抢占造成的。
     s_prefetch_generation.fetch_add(1, std::memory_order_acq_rel);
+    // 整集缓存也停掉：播放优先用带宽；已下完的文件仍然走本地播放。
+    s_download_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_download_running.store(false, std::memory_order_release);
     const PodcastItem item = s_items[index];
     s_current_index = index;
     s_current_podcast_id = item.id;
@@ -926,10 +928,17 @@ void PrefetchFirstPlayUrlWorker(void* data) {
         ESP_LOGI(TAG, "prefetched play url #%u", static_cast<unsigned>(i));
         // 顺手把音频域名的 DNS 解掉：真机首次解析 1~3 秒，点击时再解析就是白等。
         PodcastClient::WarmUpHost(play.url);
-        // 只预开第一集：多开会和点击后的建流抢带宽，实测把第二集撞成建流超时。
+        // 只处理第一集：多操作会和点击后的建流抢带宽，实测把第二集撞成建流超时。
         if (i != 0 || s_playing || s_paused ||
             s_preparing_play.load(std::memory_order_acquire) ||
             !IsCurrentSession(session)) {
+            continue;
+        }
+        if (SdCardManager::GetInstance().IsMounted()) {
+            // 有 SD 卡：直接把第一集整集存到本地，点播走文件，出声约 0.2 秒。
+            // 比"预开流"更彻底，也不会长期占着一条 TLS。
+            ESP_LOGI(TAG, "prefetch first episode to SD");
+            StartAudioCacheWorker(1);
             continue;
         }
         std::string prepare_error;
@@ -1681,7 +1690,7 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
         std::snprintf(text, sizeof(text), "%.1fx",
                       static_cast<double>(kSpeedOptions[i]));
         lv_obj_t* button = CreateActionButton(
-            screen, 24 + static_cast<int32_t>(i) * 76, 652, 68, 44, text,
+            screen, 24 + static_cast<int32_t>(i) * 82, 648, 76, 48, text,
             OnSpeedClicked,
             reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
         s_ui.speed_btn[i] = button;
@@ -1691,20 +1700,19 @@ lv_obj_t* PodcastScreen::Create(lv_obj_t* return_screen) {
 
     s_ui.progress_timer = lv_timer_create(OnProgressTimer, 500, nullptr);
 
-    // 播放/暂停、停止做成大按钮：48px 高度手指很难点中，改成 64px。
     s_ui.pause_label = nullptr;
-    s_ui.pause_btn = CreateActionButton(screen, 300, 640, 180, 64,
+    s_ui.pause_btn = CreateActionButton(screen, 320, 648, 168, 48,
                                         I18n::T("暂停"), OnPauseClicked);
     s_ui.pause_label =
         lv_obj_get_child(s_ui.pause_btn, 0);
-    // 暂停是播放中的主操作，用强调色，避免和右侧停止按钮混淆。
+    // 暂停是播放中的主操作，用强调色，避免和右侧停止按钮混淆（尺寸保持原样）。
     lv_obj_set_style_bg_color(s_ui.pause_btn, lv_color_hex(kColorAccentDeep),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_ui.pause_btn, lv_color_hex(0x3B82F6),
                               LV_PART_MAIN | LV_STATE_PRESSED);
-    s_ui.stop_btn = CreateActionButton(screen, 492, 640, 180, 64,
+    s_ui.stop_btn = CreateActionButton(screen, 504, 648, 168, 48,
                                        I18n::T("停止"), OnStopClicked);
-    // 再向外放宽 5px 命中区：手指边缘点上去也算按到。
+    // 不改尺寸，只把命中区向外放宽 5px：手指边缘点上去也算按到。
     lv_obj_set_ext_click_area(s_ui.pause_btn, 5);
     lv_obj_set_ext_click_area(s_ui.stop_btn, 5);
     UpdateControls(false, false);
