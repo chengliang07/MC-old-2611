@@ -1114,8 +1114,14 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             s_last_audio_ms.store(now, std::memory_order_relaxed);
             s_rstart_ms.store(now, std::memory_order_relaxed);
         }
-        // 打断时已经建过占位气泡就复用，避免同一轮出现两个空气泡
+        // 每开口一次就另起一条用户气泡：先把上一条“封口”（只清指针，
+        // 不删气泡），再建占位。只靠 response.done 清指针时，一旦那条事件
+        // 顺序不对或没到，后续转写就会一直回填到上一条气泡里 —— 表现为
+        // 同一块区域被反复改写，而不是像 AI 那样一句一条。
+        s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
         if (!s_user_pending.exchange(true, std::memory_order_acq_rel)) {
+            post_ui(session, State::Answering, "思考中…", BubbleRole::User,
+                    nullptr, false, false, false, true);
             post_ui(session, State::Answering, "思考中…", BubbleRole::User, "…");
         }
         s_user_pending_ms.store(now_ms(), std::memory_order_release);
