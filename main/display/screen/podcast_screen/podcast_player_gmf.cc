@@ -1260,6 +1260,23 @@ static bool StartInternal(const std::string& url, std::string& error,
         return false;
     }
 
+    // 内部 RAM 见底时再开流会把 DMA 描述符和 TLS 一起拖死：实测后果是
+    // MQTT 写失败 → 全模块"发送失败" → 只能重启。这里先取最大连续内部块，
+    // 过低就直接拒绝，而不是把整机网络拖死。
+    const size_t internal_free =
+        static_cast<size_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    const size_t internal_largest = static_cast<size_t>(
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGI(TAG, "[mem] before start: free=%u largest=%u",
+             static_cast<unsigned>(internal_free),
+             static_cast<unsigned>(internal_largest));
+    if (internal_largest < 20 * 1024) {
+        error = "内存不足，请重启设备后再试";
+        ESP_LOGE(TAG, "[mem] refuse playback: largest=%u",
+                 static_cast<unsigned>(internal_largest));
+        return false;
+    }
+
     DetachCurrentPlayback();
     bool create_failed = false;
     {

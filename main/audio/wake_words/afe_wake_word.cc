@@ -326,8 +326,14 @@ void AfeWakeWord::EncodeWakeWordData() {
     const size_t stack_size = 4096 * 7;
     wake_word_opus_.clear();
     if (wake_word_encode_task_stack_ == nullptr) {
-        wake_word_encode_task_stack_ =
-            (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_INTERNAL);
+        // 28KB 编码栈没必要占内部 RAM：先要 PSRAM，拿不到再退回内部。
+        wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(
+            stack_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (wake_word_encode_task_stack_ == nullptr) {
+            ESP_LOGW(TAG, "psram stack alloc failed, fallback to internal");
+            wake_word_encode_task_stack_ =
+                (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_INTERNAL);
+        }
         assert(wake_word_encode_task_stack_ != nullptr);
     }
     if (wake_word_encode_task_buffer_ == nullptr) {
