@@ -16,6 +16,9 @@
   4. **合并后必须验证**：`git merge-base --is-ancestor <被合并的提交> HEAD`，并确认输出里有 `Merge made by`
   5. 只合并**已提交**的内容；分支里还在改（未提交）的部分等它提交后再带
   6. 编译烧录后，在报告里列出本次带进来的各分支提交，让用户知道设备上有什么
+  7. **编译完成后、烧录之前再扫一次分支**：模块窗口可能正好在这 1~2 分钟里提交。
+     若发现新提交，重新合并并重编，不要直接烧（2026-11-27 已因此烧早一次，
+     导致口语窗口的新诊断代码不在设备上）。
 - Before starting a GitHub Actions firmware build or flashing, report the intended changes and ask the user for confirmation.
 - Do not trigger a full firmware build for every small change; batch related fixes before building.
 
