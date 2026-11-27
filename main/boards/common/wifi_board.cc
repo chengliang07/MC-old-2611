@@ -111,6 +111,42 @@ void WifiBoard::StartNetwork() {
     });
     wifi_station.Start();
 
+    // 临时诊断：开机 8 秒后自己扫一次并打印结果，用来验证驱动层扫描是否可用
+    // （不依赖用户在设置页点按钮）。定位完成后删除。
+    xTaskCreate(
+        [](void*) {
+            vTaskDelay(pdMS_TO_TICKS(8000));
+            wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
+            const esp_err_t band_err = esp_wifi_get_band_mode(&band_now);
+            wifi_scan_config_t scan_cfg = {};
+            scan_cfg.show_hidden = false;
+            const int64_t t0 = esp_timer_get_time();
+            const esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+            uint16_t ap_num = 0;
+            if (err == ESP_OK) {
+                esp_wifi_scan_get_ap_num(&ap_num);
+            }
+            ESP_LOGI("WifiBoard",
+                     "[selftest] band_err=%s band=%d scan_err=%s ap=%u cost=%lldms",
+                     esp_err_to_name(band_err), (int)band_now, esp_err_to_name(err),
+                     ap_num, (long long)((esp_timer_get_time() - t0) / 1000));
+            if (ap_num > 0) {
+                wifi_ap_record_t* recs = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * ap_num);
+                if (recs != nullptr) {
+                    uint16_t got = ap_num;
+                    if (esp_wifi_scan_get_ap_records(&got, recs) == ESP_OK) {
+                        for (int i = 0; i < got && i < 5; ++i) {
+                            ESP_LOGI("WifiBoard", "[selftest] ap%d %s ch=%d rssi=%d",
+                                     i, (const char*)recs[i].ssid, recs[i].primary, recs[i].rssi);
+                        }
+                    }
+                    free(recs);
+                }
+            }
+            vTaskDelete(nullptr);
+        },
+        "wifi_selftest", 4096, nullptr, 3, nullptr);
+
     // 只读取并打印当前频段模式，不做强制设置：
     // 实测强制 WIFI_BAND_MODE_AUTO 后扫描会变慢且返回 0 个 AP（hosted 链路下不可靠）。
     {
