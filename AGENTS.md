@@ -43,8 +43,14 @@
     （如 `IDF_INIT_VERSION`）因此不会进仓库，也不会造成分支合并冲突。
   - 任何有意的配置调整（内存开关、TCP 缓冲、LVGL 色深、分区表、唤醒词等）
     必须写进 `sdkconfig.defaults`，否则 CI 出的包和本地测的固件不一致。
-  - 生成方式：调好本地 `sdkconfig` 后执行 `idf.py save-defconfig`，它只导出
-    "与默认值不同"的项（当前约 100 行），再提交该文件。
+  - **改配置时只手工改 `sdkconfig.defaults` 里对应的那几行，不要整份重写。**
+    尤其不要在自己的 worktree 里跑 `idf.py save-defconfig` 再提交整份文件 ——
+    该文件是每行一个符号，整份重写会让每个分支都产生 add/add 冲突，
+    合并时只能人工逐行比对（2026-11-27 已因此冲突一次）。
+  - 首次创建 defaults（仓库里还没有时）才用 `idf.py save-defconfig` 生成，
+    生成后人工检查并入库；之后一律增量修改。
+  - 若仍遇到 `sdkconfig.defaults` 冲突：它只是配置文件，直接取"想要的值"即可，
+    不要保留冲突标记，改完 `git add` 再继续合并。
   - 新工作区或 CI 首次构建会自动按 defaults 生成 sdkconfig，无需手工拷贝。
 - `ota_1` overflow warning (`Part 'ota_1' ... overflow`) is expected: partition layout
   `partitions/v1/32m_dual.csv` reserves ota_1 for another purpose.
