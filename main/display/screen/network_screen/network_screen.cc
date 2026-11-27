@@ -599,7 +599,20 @@ void scan_task(void* /*arg*/) {
     cfg.show_hidden = false;
     // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表永远为空。
     wifi_activity::SetScanning(true);
-    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    // WifiStation 自己也在周期扫描（"Wait for next scan"），它正在扫时我们再 start
+    // 会拿到 ESP_ERR_WIFI_STATE，界面就表现为"扫不出 WiFi"。
+    // 先停掉在跑的扫描，再带重试地启动。
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        esp_wifi_scan_stop();
+        xEventGroupClearBits(s_evt_group, kBitScanDone);
+        err = esp_wifi_scan_start(&cfg, false);
+        if (err == ESP_OK) {
+            break;
+        }
+        ESP_LOGW(TAG, "scan start retry %d err=%d", attempt + 1, (int)err);
+        vTaskDelay(pdMS_TO_TICKS(600));
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
         char buf[64];
@@ -627,9 +640,22 @@ void scan_task(void* /*arg*/) {
         return;
     }
 
-    wifi_activity::SetScanning(false);
     uint16_t ap_num = 0;
     esp_wifi_scan_get_ap_num(&ap_num);
+    if (ap_num == 0) {
+        // 被别的扫描打断时会出现"成功但 0 个"，补扫一次再判定。
+        esp_wifi_scan_stop();
+        xEventGroupClearBits(s_evt_group, kBitScanDone);
+        if (esp_wifi_scan_start(&cfg, false) == ESP_OK) {
+            const auto bits2 = xEventGroupWaitBits(
+                s_evt_group, kBitScanDone, pdTRUE, pdTRUE, pdMS_TO_TICKS(8000));
+            if (bits2 & kBitScanDone) {
+                esp_wifi_scan_get_ap_num(&ap_num);
+            }
+        }
+        ESP_LOGW(TAG, "scan empty, rescan once -> ap=%u", ap_num);
+    }
+    wifi_activity::SetScanning(false);
 
     std::vector<wifi_ap_record_t> records;
     if (ap_num > 0) {
