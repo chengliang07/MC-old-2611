@@ -601,20 +601,20 @@ void scan_task(void* /*arg*/) {
     // 用阻塞式扫描（block=true）：驱动在扫描真正完成后才返回，避免
     // "启动 + 等事件"模式下上一次扫描的完成事件迟到、把本次等待立刻唤醒，
     // 于是永远读到 0 个 AP（表现为怎么点都扫不到 WiFi）。
-    esp_err_t err = ESP_FAIL;
-    uint16_t ap_num = 0;
+    // 非阻塞启动 + 等事件：这套是之前真机验证过能出结果的流程。
+    // （阻塞式 scan(block=true) 在 hosted 链路下可能长时间不返回，表现为"一直在扫描"。）
+    xEventGroupClearBits(s_evt_group, kBitScanDone);
     const int64_t scan_t0 = esp_timer_get_time();
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        err = esp_wifi_scan_start(&cfg, true);
-        if (err == ESP_OK) {
-            ap_num = 0;
+    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    uint16_t ap_num = 0;
+    if (err == ESP_OK) {
+        const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE,
+                                              pdTRUE, pdMS_TO_TICKS(15000));
+        if (bits & kBitScanDone) {
             esp_wifi_scan_get_ap_num(&ap_num);
-            if (ap_num > 0) {
-                break;
-            }
+        } else {
+            err = ESP_ERR_TIMEOUT;
         }
-        ESP_LOGW(TAG, "scan attempt %d err=%d ap=%u", attempt + 1, (int)err, ap_num);
-        vTaskDelay(pdMS_TO_TICKS(500));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
