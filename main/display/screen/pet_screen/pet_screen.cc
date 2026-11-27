@@ -1749,7 +1749,7 @@ lv_obj_t* PetScreen::Create(lv_obj_t* return_screen) {
     lv_obj_add_event_cb(screen, OnScreenUnloaded,
                         LV_EVENT_SCREEN_UNLOADED, nullptr);
     lv_obj_add_event_cb(screen, OnScreenDeleted, LV_EVENT_DELETE, nullptr);
-    screen_attach_swipe_back(screen, OnSwipeBack);
+    // 按需求取消右滑返回：只能点左上角返回键。
     return screen;
 }
 

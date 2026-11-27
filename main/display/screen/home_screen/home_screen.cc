@@ -946,24 +946,63 @@ void info_lifecycle_cb(screen_lifecycle_event_t event) {
 // 主题图标，资源 ic_app_home_themeN_magnet.spng 缺失时该格会显示为空。
 // name 存 zh-CN msgid（源文案）；显示时用 I18n::T(entry.name)。
 constexpr AppEntry kApps[] = {
-    // 主人格：一丢宠物（图标用数字人的，名字改"我的一丢"）
-    {"digital_people", "我的一丢",   LaunchPet,           pet_lifecycle_cb,           true},
-    // 桌面上直接开放的三项
+    // 左上角固定放设置
+    {"settings",       "设置",       LaunchSettings,      settings_lifecycle_cb,      false},
+    // 常规功能
     {"calculator",     "计算器",     LaunchCalculator,    calculator_lifecycle_cb,    false},
     {"2048",           "2048",       LaunchGame2048,      game_2048_lifecycle_cb,     false},
     {"radio",          "电台",       LaunchRadio,         radio_lifecycle_cb,         true},
+    // 正中：我的一丢（主人格）
+    {"digital_people", "我的一丢",   LaunchPet,           pet_lifecycle_cb,           true},
     {"camera",         "相机",       LaunchCamera,        camera_lifecycle_cb,        false},
-    // 系统项
     {"wifi",           "网络配置",   LaunchWifi,          wifi_lifecycle_cb,          false},
-    {"settings",       "设置",       LaunchSettings,      settings_lifecycle_cb,      false},
     {"sd",             "SD卡",       LaunchSdCard,        sd_card_lifecycle_cb,       false},
     {"theme",          "主题",       LaunchTheme,         theme_lifecycle_cb,         false},
-    // 以下入口只在桌面隐藏，功能都还在（由"我的一丢"菜单调用）；要恢复就取消注释
+    // 以下入口只在桌面隐藏，功能都还在（由"我的一丢"或语音调用）；要恢复就取消注释
     // {"chat",           "一丢学伴", LaunchChat,          chat_lifecycle_cb,          true},
     // {"radio",          "一丢播客", LaunchPodcast,       podcast_lifecycle_cb,       true},
     // {"digital_people", "一丢口语", LaunchOral,          oral_lifecycle_cb,          true},
     // {"music",          "一丢英语", LaunchEnglish,       english_lifecycle_cb,       true},
 };
+
+// 语音直达用的模块注册表：与桌面网格解耦，桌面隐藏的模块也能被语音打开。
+struct ModuleEntry {
+    const char* id;
+    LaunchFn launch;
+    screen_lifecycle_cb_t lifecycle_cb;
+};
+
+constexpr ModuleEntry kModules[] = {
+    {"pet",        LaunchPet,        pet_lifecycle_cb},
+    {"chat",       LaunchChat,       chat_lifecycle_cb},
+    {"podcast",    LaunchPodcast,    podcast_lifecycle_cb},
+    {"oral",       LaunchOral,       oral_lifecycle_cb},
+    {"english",    LaunchEnglish,    english_lifecycle_cb},
+    {"calculator", LaunchCalculator, calculator_lifecycle_cb},
+    {"2048",       LaunchGame2048,   game_2048_lifecycle_cb},
+    {"radio",      LaunchRadio,      radio_lifecycle_cb},
+    {"camera",     LaunchCamera,     camera_lifecycle_cb},
+    {"settings",   LaunchSettings,   settings_lifecycle_cb},
+    {"wifi",       LaunchWifi,       wifi_lifecycle_cb},
+    {"sd",         LaunchSdCard,     sd_card_lifecycle_cb},
+    {"theme",      LaunchTheme,      theme_lifecycle_cb},
+};
+
+void OpenModuleByIdAsync(void* arg) {
+    std::unique_ptr<std::string> id(static_cast<std::string*>(arg));
+    if (id == nullptr) {
+        return;
+    }
+    for (const auto& entry : kModules) {
+        if (entry.id != nullptr && entry.launch != nullptr &&
+            *id == entry.id) {
+            ESP_LOGI(TAG_HOME, "voice open module: %s", entry.id);
+            entry.launch(entry.lifecycle_cb);
+            return;
+        }
+    }
+    ESP_LOGW(TAG_HOME, "unknown module id: %s", id->c_str());
+}
 
 constexpr int kTotalApps = static_cast<int>(sizeof(kApps) / sizeof(kApps[0]));
 
@@ -2690,6 +2729,17 @@ int HomeScreen::GetIdleStandbyMinutes() {
 void HomeScreen::SetIdleStandbyMinutes(int minutes) {
     IdlePower_SetStandbyMinutes(minutes);
     IdlePower_NotifyActivity();
+}
+
+void HomeScreen::RequestOpenModuleById(const char* id) {
+    if (id == nullptr || id[0] == '\0') {
+        return;
+    }
+    auto* arg = new std::string(id);
+    if (lv_async_call(OpenModuleByIdAsync, arg) != LV_RESULT_OK) {
+        delete arg;
+        ESP_LOGW(TAG_HOME, "open module request dropped: %s", id);
+    }
 }
 
 void HomeScreen::RequestOpenPodcastFromCurrentScreen() {

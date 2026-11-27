@@ -17,6 +17,7 @@ public:
     static void ShowPowerOptionsDialog();
     // 从当前屏幕打开播客，返回时回到同一个来源屏（学伴语音入口）。
     // 线程安全：内部投递到 LVGL 线程执行。
+    static void RequestOpenModuleById(const char* id);
     static void RequestOpenPodcastFromCurrentScreen();
     static void RequestOpenEnglishFromCurrentScreen();
     static void RequestOpenOralFromCurrentScreen();

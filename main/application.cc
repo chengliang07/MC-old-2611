@@ -689,55 +689,53 @@ void Application::Start() {
                     display->SetChatMessage("user", message.c_str());
                 });
 #ifdef HAVE_LVGL
-                // 后端未接入设备 MCP 时的本地兜底：
-                // “打开/听/一丢 + 播客”直接进入播客页，不再等 LLM 调工具。
+                // 语音直达模块：从识别文本里找模块关键词，直接切页面，不等 LLM 调工具。
+                // 关键词按越具体越先匹配排序（例如"一丢播客"要先命中播客而不是一丢）。
                 std::string user_text(text->valuestring);
-                // 语音识别对“播客”常给出“博客/电台/广播”等近似词，统一归到播客。
-                const bool mentions_podcast =
-                    user_text.find("播客") != std::string::npos ||
-                    user_text.find("博客") != std::string::npos ||
-                    user_text.find("电台") != std::string::npos ||
-                    user_text.find("广播") != std::string::npos;
-                // 只说“播客/一丢播客/博客”也要能进，不再要求带“打开/听”。
-                const bool wants_podcast = mentions_podcast;
-                const bool wants_english =
-                    user_text.find("英语") != std::string::npos &&
-                    (user_text.find("打开") != std::string::npos ||
-                     user_text.find("一丢") != std::string::npos ||
-                     user_text.find("复习") != std::string::npos);
-                const bool wants_pet =
-                    user_text.find("宠物") != std::string::npos &&
-                    (user_text.find("打开") != std::string::npos ||
-                     user_text.find("一丢") != std::string::npos ||
-                     user_text.find("看看") != std::string::npos ||
-                     user_text.find("喂") != std::string::npos ||
-                     user_text.find("孵化") != std::string::npos);
-                // 否定句直接放过：说"我不想听播客 / 别放英语"不该跳进那一页。
+                struct ModuleKeyword {
+                    const char* keyword;
+                    const char* module_id;
+                };
+                static const ModuleKeyword kModuleKeywords[] = {
+                    {"计算器", "calculator"}, {"算一下", "calculator"}, {"算数", "calculator"},
+                    {"2048", "2048"},         {"游戏", "2048"},
+                    {"相机", "camera"},       {"拍照", "camera"},       {"照相", "camera"},
+                    {"网络配置", "wifi"},     {"配网", "wifi"},         {"联网设置", "wifi"},
+                    {"存储卡", "sd"},         {"SD卡", "sd"},
+                    {"换主题", "theme"},      {"主题", "theme"},
+                    {"设置", "settings"},
+                    {"播客", "podcast"},      {"电台", "podcast"},      {"广播", "podcast"},
+                    {"口语", "oral"},         {"对话练习", "oral"},
+                    {"英语", "english"},      {"单词", "english"},
+                    {"宠物", "pet"},          {"陪陪我", "pet"},        {"一丢", "pet"},
+                };
+                // 否定句直接放过：说"不要打开播客""别进设置"不该跳转。
                 const bool negative =
-                    user_text.find("不想") != std::string::npos ||
                     user_text.find("不要") != std::string::npos ||
                     user_text.find("不用") != std::string::npos ||
+                    user_text.find("不想") != std::string::npos ||
                     user_text.find("别") != std::string::npos ||
                     user_text.find("停止") != std::string::npos ||
                     user_text.find("关掉") != std::string::npos;
-                if (!negative &&
-                    (wants_podcast || wants_english || wants_pet)) {
-                    Schedule([this, wants_podcast, wants_pet]() {
-                        ESP_LOGI(TAG, "local intent: open %s",
-                                 wants_podcast ? "podcast" :
-                                 (wants_pet ? "pet" : "english"));
+                const char* target_module = nullptr;
+                if (!negative) {
+                    for (const auto& item : kModuleKeywords) {
+                        if (user_text.find(item.keyword) != std::string::npos) {
+                            target_module = item.module_id;
+                            break;
+                        }
+                    }
+                }
+                if (target_module != nullptr) {
+                    const std::string module_id(target_module);
+                    Schedule([this, module_id]() {
+                        ESP_LOGI(TAG, "local intent: open %s", module_id.c_str());
                         if (device_state_ == kDeviceStateSpeaking) {
                             AbortSpeaking(kAbortReasonNone);
                         } else if (protocol_ && protocol_->IsAudioChannelOpened()) {
                             protocol_->SendStopListening();
                         }
-                        if (wants_podcast) {
-                            HomeScreen::RequestOpenPodcastFromCurrentScreen();
-                        } else if (wants_pet) {
-                            HomeScreen::RequestOpenPetFromCurrentScreen();
-                        } else {
-                            HomeScreen::RequestOpenEnglishFromCurrentScreen();
-                        }
+                        HomeScreen::RequestOpenModuleById(module_id.c_str());
                     });
                 }
 #endif
