@@ -597,6 +597,10 @@ void scan_task(void* /*arg*/) {
 
     wifi_scan_config_t cfg = {};
     cfg.show_hidden = false;
+    // 双频扫描信道多，默认驻留时间会让整轮扫描很慢；主动扫描 + 短驻留提速。
+    cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    cfg.scan_time.active.min = 60;
+    cfg.scan_time.active.max = 120;
     // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表永远为空。
     wifi_activity::SetScanning(true);
     // WifiStation 自己也在周期扫描（"Wait for next scan"），它正在扫时我们再 start
