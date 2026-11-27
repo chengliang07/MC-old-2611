@@ -595,10 +595,6 @@ void scan_task(void* /*arg*/) {
 
     wifi_scan_config_t cfg = {};
     cfg.show_hidden = false;
-    // 双频扫描信道多，默认驻留时间会让整轮扫描很慢；主动扫描 + 短驻留提速。
-    cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    cfg.scan_time.active.min = 60;
-    cfg.scan_time.active.max = 120;
     // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表为空。
     wifi_activity::SetScanning(true);
 
@@ -607,6 +603,7 @@ void scan_task(void* /*arg*/) {
     // 于是永远读到 0 个 AP（表现为怎么点都扫不到 WiFi）。
     esp_err_t err = ESP_FAIL;
     uint16_t ap_num = 0;
+    const int64_t scan_t0 = esp_timer_get_time();
     for (int attempt = 0; attempt < 3; ++attempt) {
         err = esp_wifi_scan_start(&cfg, true);
         if (err == ESP_OK) {
@@ -634,6 +631,8 @@ void scan_task(void* /*arg*/) {
     }
 
     wifi_activity::SetScanning(false);
+    ESP_LOGI(TAG, "[scan] done err=%d ap=%u cost=%lldms", (int)err, ap_num,
+             (long long)((esp_timer_get_time() - scan_t0) / 1000));
 
     std::vector<wifi_ap_record_t> records;
     if (ap_num > 0) {

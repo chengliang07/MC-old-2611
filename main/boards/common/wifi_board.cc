@@ -111,14 +111,13 @@ void WifiBoard::StartNetwork() {
     });
     wifi_station.Start();
 
-    // 板载 WiFi 协处理器是 ESP32-C5（CONFIG_SLAVE_SOC_WIFI_SUPPORT_5G=y，双频）。
-    // 不显式设置时默认只在 2.4G 上工作，设置页因此永远扫不到 5G 的 AP。
+    // 只读取并打印当前频段模式，不做强制设置：
+    // 实测强制 WIFI_BAND_MODE_AUTO 后扫描会变慢且返回 0 个 AP（hosted 链路下不可靠）。
     {
-        wifi_mode_t mode_now = WIFI_MODE_NULL;
-        if (esp_wifi_get_mode(&mode_now) == ESP_OK) {
-            const esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
-            ESP_LOGI(TAG, "wifi band mode -> %s", esp_err_to_name(band_err));
-        }
+        wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
+        const esp_err_t band_err = esp_wifi_get_band_mode(&band_now);
+        ESP_LOGI(TAG, "wifi band mode read: err=%s value=%d",
+                 esp_err_to_name(band_err), (int)band_now);
     }
 
     // Try to connect to WiFi, if failed, launch the WiFi configuration AP
