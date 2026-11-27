@@ -594,8 +594,14 @@ bool post_ui(uint32_t session, State state, const char* status,
                     resize_bubble(s_user_text_bubble, s_user_text_label,
                                   s_user_text.c_str(), true);
                     scroll_chat_to_bottom();
+                    ESP_LOGI(TAG, "user bubble updated %u bytes",
+                             (unsigned)s_user_text.size());
+                    return;
                 }
-                return;
+                // 没有可回填的气泡（占位被超时回收 / 占位投递失败）：
+                // 这里原来直接 return，整句转写被吞掉 —— 就是“我说的没字幕”。
+                // 继续往下走，新建一条用户气泡。
+                ESP_LOGW(TAG, "user replace without bubble, creating new");
             }
             // generation 只用来丢弃过期的流式文本；用户气泡是结构性消息，
             // 晚一拍到也必须在，否则最终会被 response.start 的 generation++
@@ -650,8 +656,17 @@ bool post_ui(uint32_t session, State state, const char* status,
                     // lv_label_set_text + lv_obj_update_layout 会让 LVGL 任务
                     // 把 CPU/PSRAM 吃满（实测每秒 20~40 次），音频包被延迟、
                     // 播放端欠载 —— 表现为“改气泡之后 AI 变卡”。
+                    // 长回答时每次重排都要重新折行几十行文本，实测会把播放
+                    // 端拖出欠载（“AI 说多了就卡”）。文本超过 200 字节后把
+                    // 刷屏间隔从 80ms 放宽到 160ms。
+                    size_t answer_len = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(s_text_mutex);
+                        answer_len = s_answer.size();
+                    }
+                    const uint32_t interval = answer_len > 200 ? 160 : 80;
                     const bool due = item->close_assistant ||
-                                     now - s_text_layout_ms >= 80;
+                                     now - s_text_layout_ms >= interval;
                     if (!due) return;
                     s_text_layout_ms = now;
                     std::lock_guard<std::mutex> lock(s_text_mutex);
@@ -700,9 +715,17 @@ bool post_ui(uint32_t session, State state, const char* status,
             lv_obj_set_style_pad_bottom(row, kRowGap, LV_PART_MAIN);
             lv_obj_set_width(row, LV_PCT(100));
             lv_obj_set_height(row, LV_SIZE_CONTENT);
+            // 用 flex 排列头像和气泡：绝对定位时行高算不准，长气泡会和下一条
+            // 叠在一起（真机出现过气泡互相压字）。
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row,
+                                  is_user ? LV_FLEX_ALIGN_END
+                                          : LV_FLEX_ALIGN_START,
+                                  LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+            lv_obj_set_style_pad_hor(row, kSideMargin, LV_PART_MAIN);
+            lv_obj_set_style_pad_column(row, kAvatarGap, LV_PART_MAIN);
 
             // AI 侧挂一个 36px 角色方块；用户侧右对齐本身就是身份标识。
-            int32_t bubble_x = kSideMargin;
             if (!is_user) {
                 lv_obj_t* avatar = lv_obj_create(row);
                 screen_strip_obj_chrome(avatar);
@@ -716,13 +739,12 @@ bool post_ui(uint32_t session, State state, const char* status,
                 lv_obj_set_style_border_color(avatar, lv_color_hex(kColorAccent), LV_PART_MAIN);
                 lv_obj_set_style_border_opa(avatar, 70, LV_PART_MAIN);
                 lv_obj_set_style_pad_all(avatar, 0, LV_PART_MAIN);
-                lv_obj_align(avatar, LV_ALIGN_TOP_LEFT, kSideMargin, 2);
+                lv_obj_set_style_flex_grow(avatar, 0, LV_PART_MAIN);
                 lv_obj_t* avatar_text = lv_label_create(avatar);
                 lv_label_set_text(avatar_text, "AI");
                 lv_obj_set_style_text_font(avatar_text, &font_puhui_20_4, LV_PART_MAIN);
                 lv_obj_set_style_text_color(avatar_text, lv_color_hex(kColorAccent), LV_PART_MAIN);
                 lv_obj_center(avatar_text);
-                bubble_x = kSideMargin + kAvatarSize + kAvatarGap;
             }
 
             lv_obj_t* bubble = lv_obj_create(row);
@@ -754,8 +776,7 @@ bool post_ui(uint32_t session, State state, const char* status,
             const int32_t width = bubble_width_for_text(item->append.c_str(), is_user);
             if (!is_user) s_bubble_w = width;
             lv_obj_set_width(bubble, width);
-            if (is_user) lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, -kSideMargin, 0);
-            else lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, bubble_x, 0);
+            lv_obj_set_style_flex_grow(bubble, 0, LV_PART_MAIN);
 
             lv_obj_t* label = lv_label_create(bubble);
             lv_label_set_text(label, item->append.c_str());
@@ -786,6 +807,8 @@ bool post_ui(uint32_t session, State state, const char* status,
                 s_user_row = row;
                 std::lock_guard<std::mutex> lock(s_text_mutex);
                 s_user_text = item->append;
+                ESP_LOGI(TAG, "user bubble created %u bytes",
+                         (unsigned)s_user_text.size());
             }
             trim_messages();
             scroll_chat_to_bottom();
