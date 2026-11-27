@@ -593,29 +593,31 @@ void scan_task(void* /*arg*/) {
 
     post_status(I18n::T("正在扫描附近 WiFi…"), kColorScanning);
 
-    xEventGroupClearBits(s_evt_group, kBitScanDone);
-
     wifi_scan_config_t cfg = {};
     cfg.show_hidden = false;
     // 双频扫描信道多，默认驻留时间会让整轮扫描很慢；主动扫描 + 短驻留提速。
     cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
     cfg.scan_time.active.min = 60;
     cfg.scan_time.active.max = 120;
-    // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表永远为空。
+    // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表为空。
     wifi_activity::SetScanning(true);
-    // WifiStation 自己也在周期扫描（"Wait for next scan"），它正在扫时我们再 start
-    // 会拿到 ESP_ERR_WIFI_STATE，界面就表现为"扫不出 WiFi"。
-    // 先停掉在跑的扫描，再带重试地启动。
+
+    // 用阻塞式扫描（block=true）：驱动在扫描真正完成后才返回，避免
+    // "启动 + 等事件"模式下上一次扫描的完成事件迟到、把本次等待立刻唤醒，
+    // 于是永远读到 0 个 AP（表现为怎么点都扫不到 WiFi）。
     esp_err_t err = ESP_FAIL;
+    uint16_t ap_num = 0;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        esp_wifi_scan_stop();
-        xEventGroupClearBits(s_evt_group, kBitScanDone);
-        err = esp_wifi_scan_start(&cfg, false);
+        err = esp_wifi_scan_start(&cfg, true);
         if (err == ESP_OK) {
-            break;
+            ap_num = 0;
+            esp_wifi_scan_get_ap_num(&ap_num);
+            if (ap_num > 0) {
+                break;
+            }
         }
-        ESP_LOGW(TAG, "scan start retry %d err=%d", attempt + 1, (int)err);
-        vTaskDelay(pdMS_TO_TICKS(600));
+        ESP_LOGW(TAG, "scan attempt %d err=%d ap=%u", attempt + 1, (int)err, ap_num);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
@@ -631,34 +633,6 @@ void scan_task(void* /*arg*/) {
         return;
     }
 
-    auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE, pdTRUE,
-                                    pdMS_TO_TICKS(15000));
-    if (!(bits & kBitScanDone)) {
-        post_status(I18n::T("扫描超时"), kColorError);
-        wifi_activity::SetScanning(false);
-        s_scan_in_progress = false;
-        refresh_nearby_list();
-        post_nearby_spinner(false);
-        post_scan_btn_enabled(true);
-        vTaskDelete(nullptr);
-        return;
-    }
-
-    uint16_t ap_num = 0;
-    esp_wifi_scan_get_ap_num(&ap_num);
-    if (ap_num == 0) {
-        // 被别的扫描打断时会出现"成功但 0 个"，补扫一次再判定。
-        esp_wifi_scan_stop();
-        xEventGroupClearBits(s_evt_group, kBitScanDone);
-        if (esp_wifi_scan_start(&cfg, false) == ESP_OK) {
-            const auto bits2 = xEventGroupWaitBits(
-                s_evt_group, kBitScanDone, pdTRUE, pdTRUE, pdMS_TO_TICKS(8000));
-            if (bits2 & kBitScanDone) {
-                esp_wifi_scan_get_ap_num(&ap_num);
-            }
-        }
-        ESP_LOGW(TAG, "scan empty, rescan once -> ap=%u", ap_num);
-    }
     wifi_activity::SetScanning(false);
 
     std::vector<wifi_ap_record_t> records;
