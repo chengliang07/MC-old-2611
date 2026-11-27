@@ -650,6 +650,9 @@ void scan_task(void* /*arg*/) {
               });
 
     // 去重（同名只保留信号最强的）
+    // 只有真的扫到 AP 才替换列表：扫描失败或被断连打断（ap_num==0）时保留上一次结果，
+    // 否则表现为"删个 WiFi 回来列表就空了"。
+    if (ap_num > 0) {
     s_scan_results.clear();
     s_scan_results.reserve(records.size());
     for (auto& r : records) {
@@ -665,6 +668,7 @@ void scan_task(void* /*arg*/) {
         it.rssi = r.rssi;
         it.authmode = r.authmode;
         s_scan_results.push_back(std::move(it));
+    }
     }
 
     char status[64];
@@ -945,7 +949,7 @@ void remove_saved_task(void* param) {
             post_status(I18n::T("已删除该网络"), kColorSuccess);
             refresh_saved_list();
             // 删完顺手重扫一次：否则附近列表会停在上一次的结果（可能是空的）。
-            schedule_scan();
+            // 不在这里自动重扫：删掉唯一/当前 WiFi 会触发断连，此时扫描必失败；保留上一次的附近列表，让用户自己点扫描。
         },
         nullptr);
     vTaskDelete(nullptr);
