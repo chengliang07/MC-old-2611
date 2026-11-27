@@ -782,12 +782,8 @@ const char* MoodText(const PetState& state) {
     if (!state.hatched) {
         return I18n::T("复习英语，攒够 3 粮就能孵化");
     }
-    if (state.dormant) {
-        return I18n::T("我睡着了，喂点粮食叫醒我");
-    }
-    if (state.satiety < 30) {
-        return I18n::T("肚子咕咕叫，想吃饭");
-    }
+    // 喂食功能尚未开放：暂时不展示饿了喂粮食这类提示，避免出现无法完成的操作。
+    // （后续上线喂食后再恢复 state.satiety / state.dormant 的提示。）
     return nullptr;
 }
 
