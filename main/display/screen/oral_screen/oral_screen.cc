@@ -479,9 +479,8 @@ void flush_stream_text(uint32_t session, bool close_assistant = false) {
     }
 }
 
-// 占位气泡回收：转写比一轮回答慢时，先留着 "…"，等它回填；
-// 超过 8 秒还没等到才删。之前的写法在 response.done 立刻就删，
-// 晚到的转写只能另起一条，看起来就是“这句话没显示”。
+// 占位气泡回收：4G 实测转写可能晚于回答 20~30 秒才到，先留着 "…" 等回填；
+// 30 秒还没等到才删。删早了晚到的转写只能另起一条，看起来就是“这句没显示”。
 void placeholder_timer_cb(lv_timer_t* /*timer*/) {
     const uint32_t deadline =
         s_user_placeholder_deadline_ms.load(std::memory_order_acquire);
@@ -1208,9 +1207,11 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             }
             s_user_streamed.store(false, std::memory_order_release);
         } else if (s_user_streamed.exchange(false, std::memory_order_acq_rel)) {
-            // 已经按增量建过气泡，done 只更新状态，避免整句重复插入。
+            // 已经按增量建过气泡，done 只更新状态。
+            // 不能再带 reset_user：异步投递会落在下一句气泡建好之后清指针，
+            // 后面 replace 找不到气泡又新建一条 —— 就是“同一句出现两次”。
             post_ui(session, State::Answering, "思考中…",
-                    BubbleRole::Assistant, nullptr, false, false, false, true);
+                    BubbleRole::Assistant, nullptr, false, false, false, false);
         } else if (cJSON_IsString(text) && text->valuestring != nullptr &&
                    text->valuestring[0] != '\0') {
             post_ui(session, State::Answering, "思考中…", BubbleRole::User, text->valuestring);
@@ -1319,7 +1320,7 @@ void handle_json(const char* data, size_t len, uint32_t session) {
             // 留 8 秒窗口，由 placeholder_timer 兜底回收。
             if (s_user_pending.load(std::memory_order_acquire)) {
                 s_user_placeholder_deadline_ms.store(
-                    now_ms() + 8000, std::memory_order_release);
+                    now_ms() + 30000, std::memory_order_release);
             }
             s_mic_enabled.store(false, std::memory_order_release);
             s_response_done_pending.store(true, std::memory_order_release);
@@ -1480,7 +1481,7 @@ void stream_microphone(uint32_t session) {
         if (s_user_pending.load(std::memory_order_acquire)) {
             const uint32_t since =
                 s_user_pending_ms.load(std::memory_order_relaxed);
-            if (since != 0 && now_ms() - since > 12000) {
+            if (since != 0 && now_ms() - since > 35000) {
                 s_user_pending.store(false, std::memory_order_release);
                 s_user_pending_ms.store(0, std::memory_order_release);
                 s_user_placeholder_deadline_ms.store(0, std::memory_order_release);
