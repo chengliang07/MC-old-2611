@@ -82,13 +82,10 @@ void WifiBoard::StartNetwork() {
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
     if (ssid_list.empty()) {
-        // wifi_config_mode_ = true;
-        // EnterWifiConfigMode();
-        ESP_LOGI(TAG, "请在WIFI配置连接网络");
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(10000));
-        }
-        return;
+        // 以前这里 while(true) 死等：用户删光已保存 WiFi 后，WiFi 栈永远不启动，
+        // 设置页扫描/连接全部失效（真机表现为"怎么点都扫不到"）。
+        // 现在照常启动 station，让设置页可以扫描并配网。
+        ESP_LOGI(TAG, "no saved ssid, still start station for scanning");
     }
 
     auto& wifi_station = WifiStation::GetInstance();
@@ -115,7 +112,8 @@ void WifiBoard::StartNetwork() {
     // （不依赖用户在设置页点按钮）。定位完成后删除。
     xTaskCreate(
         [](void*) {
-            vTaskDelay(pdMS_TO_TICKS(8000));
+            // 25 秒：避开 USB 串口重启后丢日志的窗口（约 1~20 秒）。
+            vTaskDelay(pdMS_TO_TICKS(25000));
             wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
             const esp_err_t band_err = esp_wifi_get_band_mode(&band_now);
             wifi_scan_config_t scan_cfg = {};
