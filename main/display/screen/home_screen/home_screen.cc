@@ -998,7 +998,12 @@ void OpenModuleByIdAsync(void* arg) {
     if (id == nullptr) {
         return;
     }
-    if (!s_current_module_id.empty() && s_current_module_id == *id) {
+    // 图标里的 id 是 digital_people，语音意图里是 pet，指同一个页面，需要归一化。
+    auto normalize_id = [](const std::string& v) -> std::string {
+        return (v == "digital_people" || v == "pet") ? std::string("pet") : v;
+    };
+    if (!s_current_module_id.empty() &&
+        normalize_id(s_current_module_id) == normalize_id(*id)) {
         ESP_LOGI(TAG_HOME, "module already active, skip reopen: %s", id->c_str());
         return;
     }
@@ -1006,7 +1011,7 @@ void OpenModuleByIdAsync(void* arg) {
         if (entry.id != nullptr && entry.launch != nullptr &&
             *id == entry.id) {
             ESP_LOGI(TAG_HOME, "voice open module: %s", entry.id);
-            s_current_module_id = *id;
+            s_current_module_id = normalize_id(*id);
             entry.launch(entry.lifecycle_cb);
             return;
         }
@@ -1132,6 +1137,9 @@ bool LaunchHomeApp(const AppEntry* app) {
                  app->icon_suffix != nullptr ? app->icon_suffix : "?");
         WifiRequired_ShowDialog();
         return false;
+    }
+    if (app->icon_suffix != nullptr) {
+        s_current_module_id = app->icon_suffix;
     }
     app->launch(app->lifecycle_cb);
     return true;
