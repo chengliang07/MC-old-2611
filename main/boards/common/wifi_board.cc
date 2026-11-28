@@ -108,6 +108,17 @@ void WifiBoard::StartNetwork() {
     });
     wifi_station.Start();
 
+    // 5GHz 需要显式设置国家码 + 双频模式：IDF 默认国家码 "01" 会限制 5G 信道，
+    // 只设其中之一都拿不到 5G 的 AP（2.4G 仍然正常，正是我们之前看到的现象）。
+    {
+        const esp_err_t cc_err = esp_wifi_set_country_code("CN", true);
+        const esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
+        esp_wifi_get_band_mode(&band_now);
+        ESP_LOGI(TAG, "wifi country->%s band->%s (now=%d)",
+                 esp_err_to_name(cc_err), esp_err_to_name(band_err), (int)band_now);
+    }
+
     // 只读取并打印当前频段模式，不做强制设置：
     // 实测强制 WIFI_BAND_MODE_AUTO 后扫描会变慢且返回 0 个 AP（hosted 链路下不可靠）。
     {
