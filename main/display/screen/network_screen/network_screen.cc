@@ -603,18 +603,31 @@ void scan_task(void* /*arg*/) {
     // 于是永远读到 0 个 AP（表现为怎么点都扫不到 WiFi）。
     // 非阻塞启动 + 等事件：这套是之前真机验证过能出结果的流程。
     // （阻塞式 scan(block=true) 在 hosted 链路下可能长时间不返回，表现为"一直在扫描"。）
-    xEventGroupClearBits(s_evt_group, kBitScanDone);
+    // WifiStation 自己每 ~10 秒扫一次（日志 "Wait for next scan"），我们的 start 会撞上它
+    // 返回 ESP_ERR_WIFI_STATE。这里只对"忙"做重试，绝不调 esp_wifi_scan_stop()
+    // （stop 会让上一次扫描的 SCAN_DONE 迟到，把本次等待立刻唤醒，读到 0 个 AP）。
     const int64_t scan_t0 = esp_timer_get_time();
-    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    esp_err_t err = ESP_FAIL;
     uint16_t ap_num = 0;
-    if (err == ESP_OK) {
-        const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE,
-                                              pdTRUE, pdMS_TO_TICKS(15000));
-        if (bits & kBitScanDone) {
-            esp_wifi_scan_get_ap_num(&ap_num);
-        } else {
-            err = ESP_ERR_TIMEOUT;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        xEventGroupClearBits(s_evt_group, kBitScanDone);
+        err = esp_wifi_scan_start(&cfg, false);
+        if (err == ESP_OK) {
+            const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE,
+                                                  pdTRUE, pdMS_TO_TICKS(15000));
+            if (bits & kBitScanDone) {
+                esp_wifi_scan_get_ap_num(&ap_num);
+                if (ap_num > 0) {
+                    break;
+                }
+            } else {
+                err = ESP_ERR_TIMEOUT;
+            }
+        } else if (err != ESP_ERR_WIFI_STATE) {
+            break;
         }
+        ESP_LOGW(TAG, "[scan] retry %d err=%d ap=%u", attempt + 1, (int)err, ap_num);
+        vTaskDelay(pdMS_TO_TICKS(400));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
