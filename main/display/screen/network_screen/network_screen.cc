@@ -438,21 +438,9 @@ void wifi_evt_handler(void* /*arg*/, esp_event_base_t base, int32_t id,
     if (s_evt_group == nullptr) return;
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_SCAN_DONE) {
-            // 在这里集中取记录：驱动只允许取一次，而且这样对我们自己发起的扫描
-            // 和 WifiStation 周期性发起的扫描都有效。
-            uint16_t n = 0;
-            esp_wifi_scan_get_ap_num(&n);
-            s_scan_raw.clear();
-            if (n > 0) {
-                s_scan_raw.resize(n);
-                uint16_t got = n;
-                if (esp_wifi_scan_get_ap_records(&got, s_scan_raw.data()) != ESP_OK) {
-                    s_scan_raw.clear();
-                } else {
-                    s_scan_raw.resize(got);
-                }
-            }
-            ESP_LOGI(TAG, "[scan] event ap=%u", (unsigned)s_scan_raw.size());
+            // 只置位：不要在回调里取 AP 记录。
+            // WifiStation 的回调（注册更早）会在 SCAN_DONE 时调用 HandleScanResult() 取走记录，
+            // 我们再取只会拿到 0 个；反过来我们先取会导致它连不上已保存的 WiFi。
             xEventGroupSetBits(s_evt_group, kBitScanDone);
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             auto* evt = static_cast<wifi_event_sta_disconnected_t*>(data);
@@ -626,16 +614,34 @@ void scan_task(void* /*arg*/) {
     const int64_t scan_t0 = esp_timer_get_time();
     wifi_activity::SetScanning(true);
 
-    // 只发起一次扫描。若已有扫描在跑（WifiStation 约每 10 秒自己扫一次），
-    // start 会返回 ESP_ERR_WIFI_STATE —— 此时不报错，直接等那一次扫描的 SCAN_DONE。
-    // 记录在 wifi_evt_handler 里统一抓取（驱动只允许取一次）。
+    // 阻塞式扫描（block=true）：返回即表示扫描结束（内部自带超时，返回 ESP_ERR_WIFI_TIMEOUT），
+    // 此时记录还在驱动里，可以立刻取 —— 这是唯一不会被 WifiStation 抢先取走的方式。
     s_scan_raw.clear();
-    xEventGroupClearBits(s_evt_group, kBitScanDone);
-    esp_err_t err = esp_wifi_scan_start(&cfg, false);
-    if (err == ESP_OK || err == ESP_ERR_WIFI_STATE) {
-        const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE, pdTRUE,
-                                              pdMS_TO_TICKS(20000));
-        err = (bits & kBitScanDone) ? ESP_OK : ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        err = esp_wifi_scan_start(&cfg, true);
+        if (err == ESP_OK) {
+            uint16_t n = 0;
+            esp_wifi_scan_get_ap_num(&n);
+            if (n > 0) {
+                s_scan_raw.resize(n);
+                uint16_t got = n;
+                if (esp_wifi_scan_get_ap_records(&got, s_scan_raw.data()) != ESP_OK) {
+                    s_scan_raw.clear();
+                } else {
+                    s_scan_raw.resize(got);
+                }
+            }
+            if (!s_scan_raw.empty()) {
+                break;
+            }
+        } else if (err == ESP_ERR_WIFI_STATE) {
+            // 别的扫描正在跑，稍等再试
+            vTaskDelay(pdMS_TO_TICKS(600));
+            continue;
+        } else {
+            break;
+        }
     }
     wifi_activity::SetScanning(false);
 
