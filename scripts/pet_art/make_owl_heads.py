@@ -51,12 +51,14 @@ def draw_ears(c: PixelCanvas, color: tuple[int, int, int]) -> None:
 
 def draw_head(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
     c.ellipse(36.0, 30.0, 33.0, 28.0, "outline")
-    c.ellipse(36.0, 30.0, 32.0, 27.0, fill)
+    # 和小猫头鹰本体同一套三档明暗，体积感一致。
+    c.sphere(36.0, 30.0, 32.0, 27.0, fill, lighter(fill, 1.2),
+             darker(fill, 0.72), light_dir=(-0.66, -0.75))
     # 奶油色脸盘
-    c.ellipse(26.0, 33.0, 15.5, 14.0, "cream")
-    c.ellipse(46.0, 33.0, 15.5, 14.0, "cream")
+    c.sphere(26.0, 33.0, 15.5, 14.0, "cream", "cream_light", "cream_dark")
+    c.sphere(46.0, 33.0, 15.5, 14.0, "cream", "cream_light", "cream_dark")
     c.ellipse(36.0, 39.0, 9.0, 7.0, "cream")
-    c.ellipse(30.0, 9.0, 8.0, 2.6, lighter(fill))
+    c.ellipse(30.0, 9.0, 8.0, 2.6, lighter(fill, 1.35))
 
 
 def draw_body(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
@@ -69,7 +71,7 @@ def draw_body(c: PixelCanvas, fill: tuple[int, int, int]) -> None:
         c.ellipse(cx, 61.0, 2.8, 4.6, wing)
     # 短短的身体
     c.ellipse(36.0, 62.0, 10.5, 7.5, "outline")
-    c.ellipse(36.0, 62.0, 9.5, 6.5, fill)
+    c.sphere(36.0, 62.0, 9.5, 6.5, fill, lighter(fill, 1.2), darker(fill, 0.72))
     c.ellipse(36.0, 63.5, 6.0, 4.0, "cream")
     # 小脚
     for x0 in (31, 38):
