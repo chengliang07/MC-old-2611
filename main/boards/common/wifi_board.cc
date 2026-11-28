@@ -158,30 +158,9 @@ void WifiBoard::StartNetwork() {
         static bool retry_task_started = false;
         if (!retry_task_started) {
             retry_task_started = true;
-            xTaskCreate(
-                [](void*) {
-                    for (;;) {
-                        vTaskDelay(pdMS_TO_TICKS(15000));
-                        if (WifiStation::GetInstance().IsConnected()) {
-                            continue;
-                        }
-                        // 关键：切到 4G 或设置页停过 WiFi 后，栈可能已经 deinit，
-                        // 这时再 esp_wifi_connect() 会踩空（真机表现为切换网络就蓝屏）。
-                        wifi_mode_t mode = WIFI_MODE_NULL;
-                        if (esp_wifi_get_mode(&mode) != ESP_OK ||
-                            mode == WIFI_MODE_NULL) {
-                            continue;
-                        }
-                        // 扫描进行中不要 connect：会打断扫描，设置页就永远扫不到 WiFi。
-                        if (wifi_activity::IsScanning()) {
-                            continue;
-                        }
-                        const esp_err_t err = esp_wifi_connect();
-                        ESP_LOGI("WifiBoard", "persistent retry connect -> %s",
-                                 esp_err_to_name(err));
-                    }
-                },
-                "wifi_retry", 3072, nullptr, 3, nullptr);
+            // 不再创建定期重连任务：esp_wifi_connect() 会打断正在进行的扫描，
+            // 导致扫描只能拿到前几个信道的结果（实测 5G 全部丢失、列表只剩 2~3 个）。
+            // 重连交给 WifiStation 自身的重连机制（它有 reconnect_count 与扫描定时器）。
         }
         return;
     }

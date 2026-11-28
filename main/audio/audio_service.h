@@ -180,6 +180,7 @@ private:
     std::atomic<uint32_t> playback_generation_{0};
 
     bool wake_word_initialized_ = false;
+    bool wake_word_init_pending_ = false;
     bool audio_processor_initialized_ = false;
     bool device_aec_enabled_ = false;  // 偏好；等语音处理器创建后再落到 AFE
     bool voice_detected_ = false;

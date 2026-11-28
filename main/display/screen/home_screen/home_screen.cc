@@ -988,15 +988,25 @@ constexpr ModuleEntry kModules[] = {
     {"theme",      LaunchTheme,      theme_lifecycle_cb},
 };
 
+// 当前已经打开的模块 id（回到首页时清空）。
+// 用于拦掉"已经在宠物页又喊唤醒词"这类重复打开：重复打开会让新实例顶掉旧实例，
+// 旧实例卸载时调用 StopVoiceUi()，页面就被清空了。
+static std::string s_current_module_id;
+
 void OpenModuleByIdAsync(void* arg) {
     std::unique_ptr<std::string> id(static_cast<std::string*>(arg));
     if (id == nullptr) {
+        return;
+    }
+    if (!s_current_module_id.empty() && s_current_module_id == *id) {
+        ESP_LOGI(TAG_HOME, "module already active, skip reopen: %s", id->c_str());
         return;
     }
     for (const auto& entry : kModules) {
         if (entry.id != nullptr && entry.launch != nullptr &&
             *id == entry.id) {
             ESP_LOGI(TAG_HOME, "voice open module: %s", entry.id);
+            s_current_module_id = *id;
             entry.launch(entry.lifecycle_cb);
             return;
         }
@@ -2619,6 +2629,9 @@ void CreateIndicator(lv_obj_t* screen, PagerState* state) {
 void HomeScreen::ShowPowerOptionsDialog() { ShowPowerDialog(); }
 
 lv_obj_t* HomeScreen::Create() {
+    // 回到首页 = 离开所有模块页，清空"当前模块"标记，允许再次打开。
+    s_current_module_id.clear();
+
     // 主题相关：根据 NVS 里的当前主题 id 把 kApps 的 icon_suffix 拼成完整
     // 路径，写入 s_icon_paths 缓存。后续 CreateAppCell 直接索引这份缓存。
     EnsureIconPathsBuilt();

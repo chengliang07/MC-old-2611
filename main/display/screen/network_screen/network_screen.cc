@@ -1,5 +1,4 @@
 #include "network_screen.h"
-#include "utils/wifi_activity.h"
 #include "i18n.h"
 
 #include <algorithm>
@@ -143,7 +142,6 @@ std::string          s_restart_headline;
 // 用来决定离开时是否恢复 WifiStation::Start()。ML307 模式下 WifiStation
 // 根本没起过，恢复时跳过即可，避免空跑一份 wifi 栈。
 bool                 s_wifi_station_was_active = false;
-bool                 s_stack_was_running = false;
 bool                 s_network_switch_pending = false;
 
 // 上网方式（network/type NVS key）：与 DualNetworkBoard::LoadNetworkTypeFromSettings
@@ -431,16 +429,11 @@ void post_show_failure(const std::string& title, const std::string& detail,
 // ---------------------------------------------------------------------------
 // WiFi 事件
 // ---------------------------------------------------------------------------
-static std::vector<wifi_ap_record_t> s_scan_raw;
-
 void wifi_evt_handler(void* /*arg*/, esp_event_base_t base, int32_t id,
                       void* data) {
     if (s_evt_group == nullptr) return;
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_SCAN_DONE) {
-            // 只置位：不要在回调里取 AP 记录。
-            // WifiStation 的回调（注册更早）会在 SCAN_DONE 时调用 HandleScanResult() 取走记录，
-            // 我们再取只会拿到 0 个；反过来我们先取会导致它连不上已保存的 WiFi。
             xEventGroupSetBits(s_evt_group, kBitScanDone);
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             auto* evt = static_cast<wifi_event_sta_disconnected_t*>(data);
@@ -467,22 +460,7 @@ bool wifi_init_for_screen() {
     esp_err_t mode_err = esp_wifi_get_mode(&mode_before);
     s_wifi_station_was_active = (mode_err == ESP_OK && mode_before != WIFI_MODE_NULL);
     if (s_wifi_station_was_active) {
-        // 栈已经在跑（WifiStation + MQTT 正用着这块 netif）：Stop() 会
-        // esp_wifi_stop()+esp_wifi_deinit()，把 netif 连同 MQTT 的 TLS 一起销毁，
-        // 随后 lwIP 访问它是空指针 → panic → 蓝屏重启。这里只注册自己的事件处理。
-        s_stack_was_running = true;
-        s_wifi_initialized = true;
-        if (s_evt_group == nullptr) {
-            s_evt_group = xEventGroupCreate();
-        } else {
-            xEventGroupClearBits(s_evt_group, 0xFFFFFF);
-        }
-        esp_event_handler_instance_register(
-            WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_evt_handler, nullptr, &s_wifi_evt_inst);
-        esp_event_handler_instance_register(
-            IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_evt_handler, nullptr, &s_ip_evt_inst);
-        ESP_LOGI(TAG, "reuse running wifi stack (skip init/deinit)");
-        return true;
+        WifiStation::GetInstance().Stop();
     }
 
     if (s_evt_group == nullptr) {
@@ -535,9 +513,7 @@ bool wifi_init_for_screen() {
 void wifi_teardown_for_screen() {
     if (!s_wifi_initialized) return;
     esp_wifi_scan_stop();
-    if (!s_stack_was_running) {
-        esp_wifi_disconnect();
-    }
+    esp_wifi_disconnect();
 
     if (s_wifi_evt_inst != nullptr) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_evt_inst);
@@ -547,26 +523,21 @@ void wifi_teardown_for_screen() {
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_evt_inst);
         s_ip_evt_inst = nullptr;
     }
-    if (!s_stack_was_running) {
-        esp_wifi_stop();
-        esp_wifi_deinit();
-        if (s_netif != nullptr) {
-            esp_netif_destroy(s_netif);
-            s_netif = nullptr;
-        }
-    } else {
-        ESP_LOGI(TAG, "wifi stack reused, skip deinit");
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    if (s_netif != nullptr) {
+        esp_netif_destroy(s_netif);
+        s_netif = nullptr;
     }
     s_wifi_initialized = false;
     ESP_LOGI(TAG, "wifi stack torn down");
 
     // 只有进入页面前 WifiStation 在跑时（即 WiFi 模式）才恢复它；ML307
     // 模式下进入本页面前 wifi 栈本来就没起，不要无中生有起一份。
-    if (!s_stack_was_running && s_wifi_station_was_active) {
+    if (s_wifi_station_was_active) {
         WifiStation::GetInstance().Start();
     }
     s_wifi_station_was_active = false;
-    s_stack_was_running = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -598,60 +569,15 @@ void scan_task(void* /*arg*/) {
 
     post_status(I18n::T("正在扫描附近 WiFi…"), kColorScanning);
 
+    xEventGroupClearBits(s_evt_group, kBitScanDone);
+
     wifi_scan_config_t cfg = {};
     cfg.show_hidden = false;
-    // 扫描期间让重连任务让路：esp_wifi_connect() 会打断扫描，导致列表为空。
-    wifi_activity::SetScanning(true);
-
-    // 用阻塞式扫描（block=true）：驱动在扫描真正完成后才返回，避免
-    // "启动 + 等事件"模式下上一次扫描的完成事件迟到、把本次等待立刻唤醒，
-    // 于是永远读到 0 个 AP（表现为怎么点都扫不到 WiFi）。
-    // 非阻塞启动 + 等事件：这套是之前真机验证过能出结果的流程。
-    // （阻塞式 scan(block=true) 在 hosted 链路下可能长时间不返回，表现为"一直在扫描"。）
-    // WifiStation 自己每 ~10 秒扫一次（日志 "Wait for next scan"），我们的 start 会撞上它
-    // 返回 ESP_ERR_WIFI_STATE。这里只对"忙"做重试，绝不调 esp_wifi_scan_stop()
-    // （stop 会让上一次扫描的 SCAN_DONE 迟到，把本次等待立刻唤醒，读到 0 个 AP）。
-    const int64_t scan_t0 = esp_timer_get_time();
-    wifi_activity::SetScanning(true);
-
-    // 阻塞式扫描（block=true）：返回即表示扫描结束（内部自带超时，返回 ESP_ERR_WIFI_TIMEOUT），
-    // 此时记录还在驱动里，可以立刻取 —— 这是唯一不会被 WifiStation 抢先取走的方式。
-    s_scan_raw.clear();
-    esp_err_t err = ESP_FAIL;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        err = esp_wifi_scan_start(&cfg, true);
-        if (err == ESP_OK) {
-            uint16_t n = 0;
-            esp_wifi_scan_get_ap_num(&n);
-            if (n > 0) {
-                s_scan_raw.resize(n);
-                uint16_t got = n;
-                if (esp_wifi_scan_get_ap_records(&got, s_scan_raw.data()) != ESP_OK) {
-                    s_scan_raw.clear();
-                } else {
-                    s_scan_raw.resize(got);
-                }
-            }
-            if (!s_scan_raw.empty()) {
-                break;
-            }
-        } else if (err == ESP_ERR_WIFI_STATE) {
-            // 别的扫描正在跑，稍等再试
-            vTaskDelay(pdMS_TO_TICKS(600));
-            continue;
-        } else {
-            break;
-        }
-    }
-    wifi_activity::SetScanning(false);
-
-    const uint16_t ap_num = (uint16_t)s_scan_raw.size();
-    ESP_LOGI(TAG, "[scan] done err=%d ap=%u cost=%lldms", (int)err, ap_num,
-             (long long)((esp_timer_get_time() - scan_t0) / 1000));
-
+    esp_err_t err = esp_wifi_scan_start(&cfg, false);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
         char buf[64];
-        snprintf(buf, sizeof(buf), "扫描失败(err=%d)，请再试一次", (int)err);
+        snprintf(buf, sizeof(buf), I18n::T("启动扫描失败 (err=%d)"), err);
         post_status(buf, kColorError);
         s_scan_in_progress = false;
         refresh_nearby_list();
@@ -661,7 +587,22 @@ void scan_task(void* /*arg*/) {
         return;
     }
 
-    std::vector<wifi_ap_record_t> records = s_scan_raw;
+    auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE, pdTRUE,
+                                    pdMS_TO_TICKS(15000));
+    if (!(bits & kBitScanDone)) {
+        post_status(I18n::T("扫描超时"), kColorError);
+        s_scan_in_progress = false;
+        refresh_nearby_list();
+        post_nearby_spinner(false);
+        post_scan_btn_enabled(true);
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    uint16_t ap_num = 0;
+    esp_wifi_scan_get_ap_num(&ap_num);
+
+    std::vector<wifi_ap_record_t> records;
     if (ap_num > 0) {
         records.resize(ap_num);
         uint16_t got = ap_num;
@@ -676,9 +617,6 @@ void scan_task(void* /*arg*/) {
               });
 
     // 去重（同名只保留信号最强的）
-    // 只有真的扫到 AP 才替换列表：扫描失败或被断连打断（ap_num==0）时保留上一次结果，
-    // 否则表现为"删个 WiFi 回来列表就空了"。
-    if (ap_num > 0) {
     s_scan_results.clear();
     s_scan_results.reserve(records.size());
     for (auto& r : records) {
@@ -694,7 +632,6 @@ void scan_task(void* /*arg*/) {
         it.rssi = r.rssi;
         it.authmode = r.authmode;
         s_scan_results.push_back(std::move(it));
-    }
     }
 
     char status[64];
@@ -957,39 +894,12 @@ void on_saved_set_default(lv_event_t* e) {
     refresh_saved_list();
 }
 
-struct RemoveSavedArg {
-    int index;
-};
-
-// 删除已保存 WiFi 的落地动作。必须在独立任务里跑：
-// 真机实测在 LVGL 任务里直接调 SsidManager::RemoveSsid()（内部 nvs_set/nvs_commit
-// 写 flash）会整机静默卡死——串口零输出、esptool 也连不上，只能断电。
-// 对照：保存密码走 AddSsid 是在后台任务里做的，从来不出问题。
-void remove_saved_task(void* param) {
-    auto* arg = static_cast<RemoveSavedArg*>(param);
-    SsidManager::GetInstance().RemoveSsid(arg->index);
-    delete arg;
-    lv_async_call(
-        [](void*) {
-            if (!s_screen_active) return;
-            post_status(I18n::T("已删除该网络"), kColorSuccess);
-            refresh_saved_list();
-            // 删完顺手重扫一次：否则附近列表会停在上一次的结果（可能是空的）。
-            // 不在这里自动重扫：删掉唯一/当前 WiFi 会触发断连，此时扫描必失败；保留上一次的附近列表，让用户自己点扫描。
-        },
-        nullptr);
-    vTaskDelete(nullptr);
-}
-
 void on_saved_remove(lv_event_t* e) {
     auto* ctx = static_cast<SavedActionCtx*>(lv_event_get_user_data(e));
     if (ctx == nullptr) return;
-    auto* arg = new RemoveSavedArg{ctx->index};
-    if (xTaskCreate(remove_saved_task, "wifi_del", 4096, arg, 4, nullptr) != pdPASS) {
-        delete arg;
-        post_status(I18n::T("删除失败"), kColorError);
-        return;
-    }
+    SsidManager::GetInstance().RemoveSsid(ctx->index);
+    post_status(I18n::T("已删除该网络"), kColorSuccess);
+    refresh_saved_list();
 }
 
 void on_saved_btn_delete(lv_event_t* e) {

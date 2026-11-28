@@ -618,11 +618,33 @@ void AudioService::EnableWakeWordDetection(bool enable) {
              enable ? "Enabling" : "Disabling", wake_word_initialized_ ? 1 : 0);
     if (enable) {
         if (!wake_word_initialized_) {
-            if (!wake_word_->Initialize(codec_, models_list_)) {
-                ESP_LOGE(TAG, "Failed to initialize wake word");
-                return;
+            // 初始化要加载模型（耗时且占用大），绝不能在界面线程同步做：
+            // 否则界面直接冻住；失败还会让语音 UI 立刻回退（页面被卸载）。
+            // 这里改成后台任务初始化，完成后由它自己 Start。
+            if (!wake_word_init_pending_) {
+                wake_word_init_pending_ = true;
+                xTaskCreate(
+                    [](void* arg) {
+                        auto* self = static_cast<AudioService*>(arg);
+                        bool ok = false;
+                        {
+                            std::lock_guard<std::mutex> lk(self->wake_word_mutex_);
+                            ok = self->wake_word_->Initialize(self->codec_,
+                                                              self->models_list_);
+                            if (ok) {
+                                self->wake_word_initialized_ = true;
+                                self->wake_word_->Start();
+                                xEventGroupSetBits(self->event_group_,
+                                                   AS_EVENT_WAKE_WORD_RUNNING);
+                            }
+                        }
+                        self->wake_word_init_pending_ = false;
+                        ESP_LOGI("AudioService", "wake word init done ok=%d", ok ? 1 : 0);
+                        vTaskDelete(nullptr);
+                    },
+                    "ww_init", 8192, this, 3, nullptr);
             }
-            wake_word_initialized_ = true;
+            return;
         }
         wake_word_->Start();
         xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
