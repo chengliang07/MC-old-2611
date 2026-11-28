@@ -431,11 +431,28 @@ void post_show_failure(const std::string& title, const std::string& detail,
 // ---------------------------------------------------------------------------
 // WiFi 事件
 // ---------------------------------------------------------------------------
+static std::vector<wifi_ap_record_t> s_scan_raw;
+
 void wifi_evt_handler(void* /*arg*/, esp_event_base_t base, int32_t id,
                       void* data) {
     if (s_evt_group == nullptr) return;
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_SCAN_DONE) {
+            // 在这里集中取记录：驱动只允许取一次，而且这样对我们自己发起的扫描
+            // 和 WifiStation 周期性发起的扫描都有效。
+            uint16_t n = 0;
+            esp_wifi_scan_get_ap_num(&n);
+            s_scan_raw.clear();
+            if (n > 0) {
+                s_scan_raw.resize(n);
+                uint16_t got = n;
+                if (esp_wifi_scan_get_ap_records(&got, s_scan_raw.data()) != ESP_OK) {
+                    s_scan_raw.clear();
+                } else {
+                    s_scan_raw.resize(got);
+                }
+            }
+            ESP_LOGI(TAG, "[scan] event ap=%u", (unsigned)s_scan_raw.size());
             xEventGroupSetBits(s_evt_group, kBitScanDone);
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             auto* evt = static_cast<wifi_event_sta_disconnected_t*>(data);
@@ -607,34 +624,29 @@ void scan_task(void* /*arg*/) {
     // 返回 ESP_ERR_WIFI_STATE。这里只对"忙"做重试，绝不调 esp_wifi_scan_stop()
     // （stop 会让上一次扫描的 SCAN_DONE 迟到，把本次等待立刻唤醒，读到 0 个 AP）。
     const int64_t scan_t0 = esp_timer_get_time();
-    esp_err_t err = ESP_FAIL;
-    uint16_t ap_num = 0;
-    for (int attempt = 0; attempt < 6; ++attempt) {
-        xEventGroupClearBits(s_evt_group, kBitScanDone);
-        err = esp_wifi_scan_start(&cfg, false);
-        if (err == ESP_OK) {
-            const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE,
-                                                  pdTRUE, pdMS_TO_TICKS(15000));
-            if (bits & kBitScanDone) {
-                esp_wifi_scan_get_ap_num(&ap_num);
-                if (ap_num > 0) {
-                    break;
-                }
-            } else {
-                err = ESP_ERR_TIMEOUT;
-            }
-        } else if (err != ESP_ERR_WIFI_STATE) {
-            break;
-        }
-        ESP_LOGW(TAG, "[scan] retry %d err=%d ap=%u", attempt + 1, (int)err, ap_num);
-        vTaskDelay(pdMS_TO_TICKS(400));
+    wifi_activity::SetScanning(true);
+
+    // 只发起一次扫描。若已有扫描在跑（WifiStation 约每 10 秒自己扫一次），
+    // start 会返回 ESP_ERR_WIFI_STATE —— 此时不报错，直接等那一次扫描的 SCAN_DONE。
+    // 记录在 wifi_evt_handler 里统一抓取（驱动只允许取一次）。
+    s_scan_raw.clear();
+    xEventGroupClearBits(s_evt_group, kBitScanDone);
+    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    if (err == ESP_OK || err == ESP_ERR_WIFI_STATE) {
+        const auto bits = xEventGroupWaitBits(s_evt_group, kBitScanDone, pdTRUE, pdTRUE,
+                                              pdMS_TO_TICKS(20000));
+        err = (bits & kBitScanDone) ? ESP_OK : ESP_ERR_TIMEOUT;
     }
+    wifi_activity::SetScanning(false);
+
+    const uint16_t ap_num = (uint16_t)s_scan_raw.size();
+    ESP_LOGI(TAG, "[scan] done err=%d ap=%u cost=%lldms", (int)err, ap_num,
+             (long long)((esp_timer_get_time() - scan_t0) / 1000));
+
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_scan_start failed: %d", err);
         char buf[64];
-        snprintf(buf, sizeof(buf), I18n::T("启动扫描失败 (err=%d)"), err);
+        snprintf(buf, sizeof(buf), "扫描失败(err=%d)，请再试一次", (int)err);
         post_status(buf, kColorError);
-        wifi_activity::SetScanning(false);
         s_scan_in_progress = false;
         refresh_nearby_list();
         post_nearby_spinner(false);
@@ -643,11 +655,7 @@ void scan_task(void* /*arg*/) {
         return;
     }
 
-    wifi_activity::SetScanning(false);
-    ESP_LOGI(TAG, "[scan] done err=%d ap=%u cost=%lldms", (int)err, ap_num,
-             (long long)((esp_timer_get_time() - scan_t0) / 1000));
-
-    std::vector<wifi_ap_record_t> records;
+    std::vector<wifi_ap_record_t> records = s_scan_raw;
     if (ap_num > 0) {
         records.resize(ap_num);
         uint16_t got = ap_num;

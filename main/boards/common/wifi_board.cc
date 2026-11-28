@@ -108,16 +108,30 @@ void WifiBoard::StartNetwork() {
     });
     wifi_station.Start();
 
-    // 5GHz 需要显式设置国家码 + 双频模式：IDF 默认国家码 "01" 会限制 5G 信道，
-    // 只设其中之一都拿不到 5G 的 AP（2.4G 仍然正常，正是我们之前看到的现象）。
+    // 关键：关闭 WiFi 省电模式。
+    // 真机对比（同一台设备、同一位置）：省电模式开(1)时只扫到 1 个 2.4G、RSSI -92、
+    // 5G-only 扫描 0 个；关闭(0)后扫到 2 个、5G 出现、RSSI 改善到 -73。
+    // hosted(P4+C5) 链路下省电模式会明显损伤扫描与接收；代价是功耗略增。
     {
-        const esp_err_t cc_err = esp_wifi_set_country_code("CN", true);
-        const esp_err_t band_err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
-        wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
-        esp_wifi_get_band_mode(&band_now);
-        ESP_LOGI(TAG, "wifi country->%s band->%s (now=%d)",
-                 esp_err_to_name(cc_err), esp_err_to_name(band_err), (int)band_now);
+        wifi_ps_type_t ps_before = WIFI_PS_MIN_MODEM;
+        esp_wifi_get_ps(&ps_before);
+        const esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+        wifi_ps_type_t ps_after = WIFI_PS_MIN_MODEM;
+        esp_wifi_get_ps(&ps_after);
+        ESP_LOGI(TAG, "wifi ps %d -> %d (%s)", (int)ps_before, (int)ps_after,
+                 esp_err_to_name(ps_err));
     }
+
+    // 按上游做法：不设置国家码/频段，全部走驱动默认值。
+    // 实测这台设备默认就能扫到 5G（历史日志里有 Channel 40 的 AP），
+    // 反而是手工 set_country_code("CN") + set_band_mode(AUTO) 之后 5G 消失了。
+    {
+        wifi_band_mode_t band_now = WIFI_BAND_MODE_2G_ONLY;
+        const esp_err_t band_err = esp_wifi_get_band_mode(&band_now);
+        ESP_LOGI(TAG, "wifi band mode (default): err=%s value=%d",
+                 esp_err_to_name(band_err), (int)band_now);
+    }
+
 
     // 只读取并打印当前频段模式，不做强制设置：
     // 实测强制 WIFI_BAND_MODE_AUTO 后扫描会变慢且返回 0 个 AP（hosted 链路下不可靠）。
@@ -219,8 +233,11 @@ std::string WifiBoard::GetBoardJson() {
 }
 
 void WifiBoard::SetPowerSaveMode(bool enabled) {
-    auto& wifi_station = WifiStation::GetInstance();
-    wifi_station.SetPowerSaveMode(enabled);
+    // WiFi 省电模式在 hosted(P4+C5) 链路上会明显损伤扫描与接收
+    // （实测 RSSI -92 -> -73、5G 从扫不到到能扫到），因此这里不再开启，
+    // 只允许关闭。audio_service 会在空闲时调 SetPowerSaveMode(true)，必需拦住。
+    (void)enabled;
+    esp_wifi_set_ps(WIFI_PS_NONE);
 }
 
 void WifiBoard::ResetWifiConfiguration() {
