@@ -34,6 +34,8 @@ namespace {
 
 constexpr const char* TAG = "EnglishScreen";
 constexpr uint32_t kChoiceFeedbackMs = 650;
+// 自动发音：等页面画完、反馈音（对/错提示音）播完再起播，避免两路声音叠在一起。
+constexpr uint32_t kAutoPronounceDelayMs = 600;
 constexpr int64_t kTasksCacheFreshSeconds = 30 * 60;
 constexpr int32_t kPanelSize = 720;
 constexpr int32_t kContentX = 24;
@@ -198,6 +200,8 @@ bool s_choice_locked = false;
 int s_choice_correct = -1;
 lv_obj_t* s_choice_buttons[4] = {};
 lv_timer_t* s_choice_feedback_timer = nullptr;
+// 进入一条短句时自动读音的延时定时器（只跑一次）。
+lv_timer_t* s_auto_pronounce_timer = nullptr;
 std::atomic<bool> s_screen_active{false};
 std::atomic<bool> s_busy{false};
 std::atomic<int> s_busy_kind{0};
@@ -233,6 +237,13 @@ void CancelChoiceFeedback() {
     if (s_choice_feedback_timer != nullptr) {
         lv_timer_delete(s_choice_feedback_timer);
         s_choice_feedback_timer = nullptr;
+    }
+}
+
+void CancelAutoPronounce() {
+    if (s_auto_pronounce_timer != nullptr) {
+        lv_timer_delete(s_auto_pronounce_timer);
+        s_auto_pronounce_timer = nullptr;
     }
 }
 
@@ -282,6 +293,7 @@ void PostSetStatus(const char* text) {
 
 void ResetContentRefs() {
     CancelChoiceFeedback();
+    CancelAutoPronounce();
     s_ui.progress = nullptr;
     s_ui.stage_caption = nullptr;
     s_ui.card = nullptr;
@@ -373,6 +385,8 @@ void OnBackToListClicked(lv_event_t* /*event*/);
 void OnTaskClicked(lv_event_t* event);
 void OnCardClicked(lv_event_t* /*event*/);
 void OnPronounceClicked(lv_event_t* /*event*/);
+void OnPronouncePlayerEvent(PodcastPlayerEvent event, const char* detail,
+                            void* ctx);
 void OnChoiceClicked(lv_event_t* event);
 void OnRememberedClicked(lv_event_t* /*event*/);
 void OnForgottenClicked(lv_event_t* /*event*/);
@@ -384,6 +398,8 @@ void BuildReview();
 void BuildChoice();
 void BuildComplete();
 void AdvanceAfterChoiceFeedback();
+void AutoPronounceTick(lv_timer_t* timer);
+void ScheduleAutoPronounce();
 
 void AdvanceAfterChoiceFeedback() {
     CancelChoiceFeedback();
@@ -546,6 +562,7 @@ void BuildReview() {
         entry.correct_index >= 0 &&
         entry.correct_index < static_cast<int>(entry.options.size())) {
         BuildChoice();
+        ScheduleAutoPronounce();
         return;
     }
 
@@ -606,6 +623,7 @@ void BuildReview() {
                  I18n::T("已经掌握"), kColorSuccess,
                  OnRememberedClicked);
     UpdateCard();
+    ScheduleAutoPronounce();
 }
 
 void BuildChoice() {
@@ -1045,6 +1063,50 @@ void StartPronunciation(const std::string& url) {
     }
 }
 
+// 手动点“发音”和自动发音共用：按当前短句算出去哪儿取音频。
+std::string PronunciationUrlForEntry(const EnglishEntry& entry) {
+    const std::string& source =
+        !entry.phrase.empty() ? entry.phrase : entry.term;
+    if (!entry.audio_url.empty()) {
+        return entry.audio_url;
+    }
+    return BuildFallbackAudioUrl(source);
+}
+
+bool StartPronunciationForEntry(const EnglishEntry& entry) {
+    const std::string url = PronunciationUrlForEntry(entry);
+    if (url.empty()) {
+        return false;
+    }
+    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_pronounce_retried.store(false, std::memory_order_release);
+    s_pronounce_url = url;
+    PodcastPlayer::SetEventCallback(OnPronouncePlayerEvent, nullptr);
+    StartPronunciation(url);
+    return true;
+}
+
+// 页面已经画好，延时起播：既躲开对/错提示音，也避免用户刚点完就听见声音。
+void AutoPronounceTick(lv_timer_t* timer) {
+    s_auto_pronounce_timer = nullptr;
+    lv_timer_delete(timer);
+    if (!s_screen_active.load(std::memory_order_acquire) || !s_in_review ||
+        s_current_index >= s_review.entries.size()) {
+        return;
+    }
+    const EnglishEntry& entry = s_review.entries[s_current_index];
+    if (!StartPronunciationForEntry(entry)) {
+        // 没音频就安静停着：自动发音失败不打扰用户，按钮仍可手动重试。
+        ESP_LOGW(TAG, "auto pronounce skipped: no audio url");
+    }
+}
+
+void ScheduleAutoPronounce() {
+    CancelAutoPronounce();
+    s_auto_pronounce_timer = lv_timer_create(
+        AutoPronounceTick, kAutoPronounceDelayMs, nullptr);
+}
+
 void OnPronouncePlayerEvent(PodcastPlayerEvent event, const char* /*detail*/,
                             void* /*ctx*/) {
     if (event != PodcastPlayerEvent::Error) {
@@ -1079,21 +1141,9 @@ void OnPronounceClicked(lv_event_t* /*event*/) {
     if (s_current_index >= s_review.entries.size()) {
         return;
     }
-    const EnglishEntry& entry = s_review.entries[s_current_index];
-    const std::string& source =
-        !entry.phrase.empty() ? entry.phrase : entry.term;
-    const std::string url = !entry.audio_url.empty()
-                                ? entry.audio_url
-                                : BuildFallbackAudioUrl(source);
-    if (url.empty()) {
+    if (!StartPronunciationForEntry(s_review.entries[s_current_index])) {
         SetStatus(I18n::T("暂无发音音频"));
-        return;
     }
-    s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
-    s_pronounce_retried.store(false, std::memory_order_release);
-    s_pronounce_url = url;
-    PodcastPlayer::SetEventCallback(OnPronouncePlayerEvent, nullptr);
-    StartPronunciation(url);
 }
 
 void OnChoiceClicked(lv_event_t* event) {
@@ -1117,6 +1167,7 @@ void OnChoiceClicked(lv_event_t* event) {
         static_cast<lv_obj_t*>(lv_event_get_target(event));
     lv_obj_t* correct_button =
         s_choice_correct < 4 ? s_choice_buttons[s_choice_correct] : nullptr;
+    CancelAutoPronounce();
     s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
     s_pronounce_url.clear();
     PodcastPlayer::SetEventCallback(nullptr, nullptr);
@@ -1231,6 +1282,7 @@ void OnScreenUnloaded(lv_event_t* event) {
         return;
     }
     CancelChoiceFeedback();
+    CancelAutoPronounce();
     s_bound_screen = nullptr;
     s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
     s_pronounce_url.clear();
@@ -1363,6 +1415,7 @@ void EnglishScreen::LifecycleCallback(screen_lifecycle_event_t event) {
         }
     } else {
         ESP_LOGI(TAG, "unload: english_screen");
+        CancelAutoPronounce();
         s_pronounce_generation.fetch_add(1, std::memory_order_acq_rel);
         s_pronounce_url.clear();
         PodcastPlayer::SetEventCallback(nullptr, nullptr);
