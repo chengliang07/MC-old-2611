@@ -50,6 +50,37 @@ class PixelCanvas:
             return self.pixels[y][x]
         return None
 
+    def sphere(self, cx: float, cy: float, rx: float, ry: float,
+               base: str, light: str, dark: str,
+               light_dir: tuple[float, float] = (-0.62, -0.78),
+               deepest: str | None = None) -> None:
+        """三档球面填充：固定左上受光，做出像素风的体积感。
+
+        只用三档纯色（亮/中/暗），不做渐变，放大后仍是硬边像素块。
+        """
+        lx, ly = light_dir
+        x0, x1 = int(cx - rx - 1), int(cx + rx + 1)
+        y0, y1 = int(cy - ry - 1), int(cy + ry + 1)
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                nx = (x + 0.5 - cx) / rx
+                ny = (y + 0.5 - cy) / ry
+                r2 = nx * nx + ny * ny
+                if r2 > 1.0:
+                    continue
+                # 越靠球面边缘，法线越偏向轮廓；用投影决定明暗档位。
+                nz = (1.0 - r2) ** 0.5
+                dot = nx * lx + ny * ly + nz * 0.55
+                if dot > 0.74:
+                    color = light
+                elif dot > 0.34:
+                    color = base
+                elif dot > 0.16:
+                    color = dark
+                else:
+                    color = deepest if deepest is not None else dark
+                self.set(x, y, color)
+
     def ellipse(self, cx: float, cy: float, rx: float, ry: float,
                 color: str, alpha: int = 255) -> None:
         x0, x1 = int(cx - rx - 1), int(cx + rx + 1)
@@ -130,7 +161,7 @@ def draw_body(c: PixelCanvas) -> None:
     # Q 版：身体缩得很小，只露出头部下方一小截。
     c.ellipse(36.0, 69.5, 15.0, 2.4, (59, 39, 24), SHADOW_ALPHA)
     c.ellipse(36.0, 62.0, 10.5, 7.5, "outline")
-    c.ellipse(36.0, 62.0, 9.5, 6.5, "brown")
+    c.sphere(36.0, 62.0, 9.5, 6.5, "brown", "brown_light", "brown_dark")
     c.ellipse(36.0, 63.5, 6.0, 4.0, "cream")
 
 
@@ -164,10 +195,12 @@ def draw_feet(c: PixelCanvas, lift_left: int = 0, lift_right: int = 0) -> None:
 def draw_head(c: PixelCanvas) -> None:
     # Q 版：头部占满画布宽度，脸盘和眼睛同比放大。
     c.ellipse(36.0, 30.0, 33.0, 28.0, "outline")
-    c.ellipse(36.0, 30.0, 32.0, 27.0, "brown")
-    # 面部奶油色圆盘
-    c.ellipse(26.0, 33.0, 15.5, 14.0, "cream")
-    c.ellipse(46.0, 33.0, 15.5, 14.0, "cream")
+    # 球面填充：左上亮、右下暗，给扁平的圆一点体积。
+    c.sphere(36.0, 30.0, 32.0, 27.0, "brown", "brown_light", "brown_dark",
+             light_dir=(-0.66, -0.75))
+    # 面部奶油色圆盘：同样的三档明暗，让脸盘从头上浮起来
+    c.sphere(26.0, 33.0, 15.5, 14.0, "cream", "cream_light", "cream_dark")
+    c.sphere(46.0, 33.0, 15.5, 14.0, "cream", "cream_light", "cream_dark")
     c.ellipse(36.0, 39.0, 9.0, 7.0, "cream")
     # 顶部高光块
     c.ellipse(30.0, 9.0, 8.0, 2.6, "brown_light")
